@@ -16,6 +16,7 @@ import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
@@ -1128,6 +1129,48 @@ def test_read_all_item_data_tolerates_files_and_missing_data(run):
     )
     assert result.exit_code == 0
     assert _rows(_report(result))[item]["dependencies_status"] == "unparsed"
+
+
+@pytest.mark.parametrize(
+    ("item_type", "status"),
+    [
+        ("PDF", "not_applicable"),
+        ("Image", "not_applicable"),
+        ("Service Definition", "not_applicable"),
+        ("Form", "parsed"),
+    ],
+)
+def test_read_all_item_data_does_not_report_a_file_download_as_an_error(
+    run, item_type, status
+):
+    item = "7f" * 16
+    download = "https://download.example.com/file"
+    routes = _one_item(item, item_type, data=(302, {}, {"Location": download}))
+    portal = FakePortal(routes)
+    result, _ = run(portal, "--scope", "org", "--read-all-item-data", "--strict")
+    assert result.exit_code == 0
+    report = _report(result)
+    assert report["errors"] == []
+    assert _rows(report)[item]["dependencies_status"] == status
+    assert [s for s in portal.seen if s.url.startswith(download)] == []
+
+
+def test_a_web_map_data_redirect_is_an_item_error_without_portal_advice(run):
+    item = B1
+    routes = _one_item(
+        item, "Web Map", data=(302, {}, {"Location": "https://other.example.com/x"})
+    )
+    portal = FakePortal(routes)
+    result, _ = run(portal, "--scope", "org", "--strict")
+    assert result.exit_code != 0
+    errors = _report(result)["errors"]
+    assert [(e["item_id"], e["phase"], e["http_status"]) for e in errors] == [
+        (item, "item_data", 302)
+    ]
+    assert "--portal-url" not in errors[0]["message"]
+    assert [
+        s for s in portal.seen if urlsplit(s.url).hostname == "other.example.com"
+    ] == []
 
 
 def test_dependency_text_from_the_portal_is_redacted(run):
