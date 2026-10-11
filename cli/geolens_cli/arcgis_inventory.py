@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, quote_plus, urlencode, urlsplit
+from urllib.parse import quote, quote_plus, unquote_plus, urlencode, urlsplit
 
 from . import arcgis_report as _report
 from . import output as _output
@@ -64,7 +64,7 @@ _RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
 _TOKEN_REQUIRED = 499
 _TOKEN_INVALID = 498
 _TOKEN_CHARS = re.compile(r"[\x21-\x7e]+")
-_CREDENTIAL_PARAM = re.compile(r"((?:token|password)=)[^&\s\"']+", re.IGNORECASE)
+_CREDENTIAL_PARAM = re.compile(r"((?:token|password)=)[^&;#\s]+", re.IGNORECASE)
 # ArcGIS Online hosted services: services.arcgis.com, services1.arcgis.com,
 # services-eu1.arcgis.com, and the same forms for tiles.
 _ARCGIS_ONLINE_HOSTED = re.compile(r"(services|tiles)(-[a-z]+)?\d*\.arcgis\.com")
@@ -162,10 +162,54 @@ _SERVICE_TYPES = frozenset(
         "Scene Service",
     }
 )
-_APP_DATA_TYPES = frozenset({"Web Mapping Application", "Web Experience", "Dashboard"})
+_APP_DATA_TYPES = frozenset(
+    {
+        "Web Mapping Application",
+        "Web Experience",
+        "Dashboard",
+        "StoryMap",
+        "Hub Site Application",
+        "Hub Page",
+        "Hub Initiative",
+        "Notebook",
+        "Web Scene",
+    }
+)
+# Items whose data is a web map's configuration.
+_MAP_CONFIG_TYPES = frozenset({"Web Map", "Web Scene"})
+# One matcher names a credential in a JSON key and in a URL parameter. Names
+# are compared lower-cased with separators removed; the parts below match
+# anywhere in a name, so compound names such as accessToken are covered, and
+# the exact names are too short to match as parts.
+_CREDENTIAL_NAME_PARTS = (
+    "token",
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "apikey",
+    "accesskey",
+    "subscriptionkey",
+    "saskey",
+    "privatekey",
+    "credential",
+    "authorization",
+    "authcode",
+    "bearer",
+    "signature",
+    "customparameters",
+)
+_CREDENTIAL_NAME_EXACT = frozenset({"sig", "auth", "pwd"})
+_URL_PARAM = re.compile(r"(^|[?&;#,(\s])([^=&;?/\s\"'#]+)=([^&;#\s]+)")
+# A key that is a URL or an assignment holds text to scrub, not a bare name.
+_COMPOUND_KEY = re.compile(r"(?:[a-z][a-z0-9+.-]*:)?//|[=&?]", re.IGNORECASE)
+_URL_USERINFO = re.compile(r"(//)[^/@\s]+@")
+_ITEM_ID = re.compile(r"[0-9A-Za-z]{32}")
+_SAFE_FILENAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _WEB_MAP_TYPE = "Web Map"
 # Statuses a portal answers with for members or folders the caller may not see.
 _HIDDEN_STATUSES = frozenset({400, 403})
+_HIDDEN_ITEM_STATUSES = frozenset({400, 401, 403, 404})
 _SERVICE_LAYER_URL = re.compile(r"/(?:Feature|Map)Server/(\d+)/?$")
 _WAB_KEYWORDS = frozenset({"web appbuilder", "wab2d", "wab3d"})
 
@@ -188,6 +232,126 @@ class Redactor:
         for form in self._forms:
             text = text.replace(form, "[REDACTED]")
         return _CREDENTIAL_PARAM.sub(r"\1[REDACTED]", text)
+
+
+def _is_credential_name(name: str) -> bool:
+    """Whether a JSON key or URL parameter name holds a credential."""
+    normal = re.sub(r"[^a-z0-9]", "", name.lower())
+    return normal in _CREDENTIAL_NAME_EXACT or any(
+        part in normal for part in _CREDENTIAL_NAME_PARTS
+    )
+
+
+def _scrub_param(match: re.Match[str]) -> str:
+    lead, name, value = match.groups()
+    if _is_credential_name(unquote_plus(name)):
+        value = "[REDACTED]"
+    return f"{lead}{name}={value}"
+
+
+_HEADER = re.compile(
+    r"\b((?:proxy-)?authorization|cookie|set-cookie|(?:x[-_]?)?api[-_]?key|x-esri-authorization)"
+    r"(\s*[:=]\s*)[^\r\n]+",
+    re.IGNORECASE,
+)
+_SCHEME_CREDENTIAL = re.compile(
+    r"\b(Bearer|Basic|Token|Digest)(\s+)([A-Za-z0-9._~+/=-]{12,})", re.IGNORECASE
+)
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
+_PEM = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
+    re.DOTALL,
+)
+_AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+_JSON_PAIR = re.compile(r'"([^"\\]{1,64})"(\s*:\s*)"(?:[^"\\]|\\.)*"')
+_MAX_EMBEDDED_DEPTH = 3
+
+
+def _scrub_scheme(match: re.Match[str]) -> str:
+    scheme, space, _ = match.groups()
+    return f"{scheme}{space}[REDACTED]"
+
+
+def _scrub_pair(match: re.Match[str]) -> str:
+    name, colon = match.group(1), match.group(2)
+    return (
+        f'"{name}"{colon}"[REDACTED]"' if _is_credential_name(name) else match.group(0)
+    )
+
+
+def _scrub_text(text: str, redact: Redactor, depth: int = 0) -> str:
+    """*text* with every credential shape this module knows masked.
+
+    JSON held inside a string is parsed and scrubbed like the document around
+    it; any other text goes through the shape patterns, which cover query and
+    assignment forms, URL userinfo, auth headers and schemes, JWTs, private
+    keys and cloud access key ids.
+    """
+    stripped = text.lstrip()
+    if depth < _MAX_EMBEDDED_DEPTH and stripped[:1] in ("{", "["):
+        try:
+            embedded = json.loads(stripped)
+        except (ValueError, RecursionError):
+            embedded = None
+        if isinstance(embedded, dict | list):
+            return json.dumps(_redact_json(embedded, redact, depth + 1))
+    text = redact(text)
+    text = _PEM.sub("[REDACTED]", text)
+    text = _HEADER.sub(r"\1\2[REDACTED]", text)
+    text = _SCHEME_CREDENTIAL.sub(_scrub_scheme, text)
+    text = _JWT.sub("[REDACTED]", text)
+    text = _AWS_KEY_ID.sub("[REDACTED]", text)
+    if "=" in text or "//" in text:
+        text = _URL_PARAM.sub(_scrub_param, text)
+        text = _URL_USERINFO.sub(r"\1[REDACTED]@", text)
+    if '":' in text or '" :' in text:
+        text = _JSON_PAIR.sub(_scrub_pair, text)
+    return text
+
+
+def redact_json(value: Any, redact: Redactor) -> Any:
+    """A copy of *value* that is safe to write to disk (see ``_redact_json``)."""
+    return _redact_json(value, redact, 0)
+
+
+def _redact_json(value: Any, redact: Redactor, depth: int) -> Any:
+    """A copy of *value* that is safe to write to disk.
+
+    The value under any key named like a credential becomes ``[REDACTED]`` at
+    any depth, and every other string passes through *redact*. The walk is
+    iterative so a deeply nested document can't exhaust the stack.
+    """
+    if not isinstance(value, dict | list):
+        return _scrub_text(value, redact, depth) if isinstance(value, str) else value
+    root: Any = {} if isinstance(value, dict) else []
+    stack = [(value, root)]
+    while stack:
+        source, target = stack.pop()
+        pairs = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, item in pairs:
+            if (
+                isinstance(source, dict)
+                and isinstance(key, str)
+                and not _COMPOUND_KEY.search(key)
+                and _is_credential_name(key)
+            ):
+                out: Any = "[REDACTED]"
+            elif isinstance(item, dict | list):
+                out = {} if isinstance(item, dict) else []
+                stack.append((item, out))
+            else:
+                out = (
+                    _scrub_text(item, redact, depth) if isinstance(item, str) else item
+                )
+            if isinstance(source, dict):
+                name = _scrub_text(key, redact, depth) if isinstance(key, str) else key
+                # Two keys can scrub to the same text; keep both values.
+                while name in target:
+                    name = f"{name}#"
+                target[name] = out
+            else:
+                target.append(out)
+    return root
 
 
 class PortalError(Exception):
@@ -578,7 +742,7 @@ class PortalClient:
         try:
             data = json.loads(raw)
         except (ValueError, RecursionError):
-            raise self._error(f"{path} did not return JSON", kind="invalid") from None
+            raise self._error(f"{path} did not return JSON", kind="not_json") from None
         if not isinstance(data, dict):
             raise self._error(f"{path} did not return a JSON object", kind="invalid")
         return data
@@ -806,10 +970,13 @@ def _listed_folder(item: Mapping[str, Any], redact: Redactor) -> dict[str, Any] 
 def _item_row(item: Mapping[str, Any], redact: Redactor) -> dict[str, Any]:
     size = item.get("size")
     item_type = str(item.get("type") or "")
-    if item_type == _WEB_MAP_TYPE or item_type in _APP_DATA_TYPES:
-        dependencies_status = "pending"
-    else:
-        dependencies_status = "not_applicable"
+    classified = _classification(item, redact)
+    reads_dependencies = (
+        item_type == _WEB_MAP_TYPE
+        or item_type in _APP_DATA_TYPES
+        or bool(_related_reads(item_type, classified["reason"]))
+    )
+    dependencies_status = "pending" if reads_dependencies else "not_applicable"
     url = _item_url(item, redact)
     return {
         "id": str(item.get("id") or ""),
@@ -823,7 +990,7 @@ def _item_row(item: Mapping[str, Any], redact: Redactor) -> dict[str, Any]:
         "created": _iso_from_ms(item.get("created")),
         "modified": _iso_from_ms(item.get("modified")),
         "url": url,
-        **_classification(item, redact),
+        **classified,
         "dependencies_status": dependencies_status,
         **_metadata(item, redact),
         "folder": _listed_folder(item, redact),
@@ -992,6 +1159,7 @@ def _dependency(
         "order": order,
         "hosted": target["hosted"] if target else _hosted_by_url(url, portal),
         "resolved": target is not None,
+        "external": False if target else None,
     }
 
 
@@ -1072,7 +1240,12 @@ def web_map_dependencies(
     basemap = data.get("baseMap")
     if isinstance(basemap, dict):
         walk(basemap.get("baseMapLayers"), "basemap")
+        walk(basemap.get("groundLayers"), "basemap")
+        walk(basemap.get("elevationLayers"), "basemap")
     walk(data.get("tables"), "table")
+    ground = data.get("ground")
+    if isinstance(ground, dict):
+        walk(ground.get("layers"), "basemap")
     return rows
 
 
@@ -1089,6 +1262,61 @@ def _config_text(value: Any, field: str) -> str:
 
 
 _AppRef = tuple[str | None, str | None, str, str, str | None]
+
+
+def _story_references(data: Mapping[str, Any], add: Callable[..., None]) -> bool:
+    """Web maps a StoryMap's map nodes point at, through its resources."""
+    nodes, resources = data.get("nodes"), data.get("resources")
+    if not isinstance(nodes, dict) or not isinstance(resources, dict):
+        return False
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("type") != "webmap":
+            continue
+        node_data = node.get("data")
+        resource = (
+            resources.get(node_data.get("map")) if isinstance(node_data, dict) else None
+        )
+        if not isinstance(resource, dict):
+            # Raised so the item becomes an error row, not a quietly short list.
+            raise ValueError("a map node points at a resource the story lacks")
+        if resource.get("type") == "webmap":
+            map_data = resource.get("data")
+            if (
+                not isinstance(map_data, dict)
+                or not isinstance(map_data.get("itemId"), str)
+                or not map_data["itemId"]
+            ):
+                raise ValueError("a story's web map resource names no item")
+            add(
+                map_data.get("itemId"),
+                map_data.get("itemType") or "Web Map",
+                "app_web_map",
+            )
+    return True
+
+
+def _hub_references(data: Mapping[str, Any], add: Callable[..., None]) -> bool:
+    """Items a Hub site or page embeds in its layout cards."""
+    values = data.get("values")
+    layout = values.get("layout") if isinstance(values, dict) else None
+    sections = layout.get("sections") if isinstance(layout, dict) else None
+    if not isinstance(sections, list):
+        return False
+    for section in sections:
+        rows = section.get("rows") if isinstance(section, dict) else None
+        for row in rows if isinstance(rows, list) else []:
+            cards = row.get("cards") if isinstance(row, dict) else None
+            for card in cards if isinstance(cards, list) else []:
+                component = card.get("component") if isinstance(card, dict) else None
+                settings = (
+                    component.get("settings") if isinstance(component, dict) else None
+                )
+                if not isinstance(settings, dict):
+                    continue
+                kind = component.get("name")
+                for key in ("itemId", "mobileItemId"):
+                    add(settings.get(key), kind, "app_embedded_item")
+    return True
 
 
 def _app_references(data: Mapping[str, Any]) -> list[_AppRef] | None:
@@ -1147,13 +1375,19 @@ def _app_references(data: Mapping[str, Any]) -> list[_AppRef] | None:
                 add(source.get("itemId"), source.get("type"), "app_web_map")
             else:
                 add_source(source)
+            children = source.get("childDataSourceJsons")
+            for child in children.values() if isinstance(children, dict) else []:
+                if isinstance(child, dict):
+                    add_source(child)
     widgets = data.get("widgets")
     desktop = data.get("desktopView")
     if not isinstance(widgets, list) and isinstance(desktop, dict):
         widgets = desktop.get("widgets")
+    mobile = data.get("mobileView")
+    mobile_widgets = mobile.get("widgets") if isinstance(mobile, dict) else None
     if isinstance(widgets, list):
         recognized = True
-        for widget in widgets:
+        for widget in [*widgets, *(mobile_widgets or [])]:
             if not isinstance(widget, dict):
                 continue
             add(widget.get("itemId"), widget.get("type"), "app_web_map")
@@ -1164,6 +1398,8 @@ def _app_references(data: Mapping[str, Any]) -> list[_AppRef] | None:
                 )
                 if isinstance(source, dict):
                     add_source(source)
+    recognized = _story_references(data, add) or recognized
+    recognized = _hub_references(data, add) or recognized
     if not recognized:
         return None
     unique: dict[tuple[str | None, str | None, str, str | None], _AppRef] = {}
@@ -1189,7 +1425,7 @@ def _extract_dependencies(
     portal: Mapping[str, Any],
 ) -> tuple[str, list[dict[str, Any]]]:
     """(dependencies_status, dependency rows) for one item's data."""
-    if row["type"] == _WEB_MAP_TYPE:
+    if row["type"] in _MAP_CONFIG_TYPES:
         return "parsed", web_map_dependencies(row["id"], data, index, portal)
     refs = _app_references(data)
     if refs is None:
@@ -1222,66 +1458,281 @@ def _detach(exc: BaseException) -> None:
     exc.__cause__ = None
 
 
+def _related_reads(item_type: str, reason: str) -> list[tuple[str, str, str]]:
+    """(relationship type, direction, role) of the related-item reads an item
+    needs: a view's source service, a hosted layer's source file, a survey's
+    results service."""
+    if reason == "hosted_feature_view":
+        return [("Service2Service", "reverse", "view_parent")]
+    if reason == "hosted_feature_layer":
+        return [("Service2Data", "forward", "published_from")]
+    if item_type == "Form":
+        return [("Survey2Service", "forward", "survey_results")]
+    return []
+
+
+def _related_dependencies(
+    row: Mapping[str, Any],
+    response: Mapping[str, Any],
+    role: str,
+    index: Mapping[str, dict[str, Any]],
+    portal: Mapping[str, Any],
+    first_order: int,
+) -> list[dict[str, Any]]:
+    related = response.get("relatedItems")
+    rows: list[dict[str, Any]] = []
+    for item in related if isinstance(related, list) else []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        rows.append(
+            _dependency(
+                row["id"],
+                item["id"],
+                item.get("url"),
+                role=role,
+                layer_type=item.get("type"),
+                layer_id=None,
+                title=item.get("title"),
+                order=first_order + len(rows),
+                index=index,
+                portal=portal,
+            )
+        )
+    return rows
+
+
+def _scan_item_ids(data: Any) -> list[str]:
+    """Item ids under ``itemId`` or ``webmap`` keys, and ``id`` in objects
+    typed ``webmap``, in first-seen document order."""
+    found: dict[str, None] = {}
+    # Each entry is (key, value, whether the parent object is typed webmap),
+    # so scalars and containers are visited in the order they appear.
+    stack: list[tuple[str | None, Any, bool]] = [(None, data, False)]
+    while stack:
+        key, node, typed = stack.pop()
+        if isinstance(node, list):
+            stack.extend((None, item, False) for item in reversed(node))
+        elif isinstance(node, dict):
+            is_typed = str(node.get("type") or "").lower() == "webmap"
+            stack.extend((k, v, is_typed) for k, v in reversed(list(node.items())))
+        elif (
+            isinstance(node, str)
+            and _ITEM_ID.fullmatch(node)
+            and (key in ("itemId", "webmap") or (key == "id" and typed))
+        ):
+            found.setdefault(node, None)
+    return list(found)
+
+
+@dataclass
+class _DepResult:
+    status: str = "not_fetched"
+    dependencies: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    auth: PortalError | None = None
+    saved: bool = False
+
+
+# Reads that carry no usable JSON are an app's normal state, not a failure.
+_UNREADABLE_KINDS = frozenset({"empty"})
+# Item types registered by URL alone, which legitimately have no data.
+_URL_ONLY_TYPES = frozenset({"Web Mapping Application"})
+# Item types whose data is legitimately not a JSON document.
+_NON_JSON_TYPES = frozenset({"Notebook"})
+
+
 def _collect_dependencies(
-    client: PortalClient, inv: Inventory, concurrency: int
+    client: PortalClient,
+    inv: Inventory,
+    concurrency: int,
+    *,
+    read_all: bool = False,
+    sidecar_dir: Path | None = None,
 ) -> None:
-    """Read each web map's and app's data and keep only its dependency rows.
+    """Read each web map's and app's data and related items, and keep only
+    its dependency rows.
 
     Each worker reduces the item's configuration to rows before returning,
-    so at most *concurrency* full configurations are held at once.
+    so at most *concurrency* full configurations are held at once. With
+    *sidecar_dir* the redacted configuration is written to disk first.
     """
     index = {row["id"]: row for row in inv.items}
-    targets = [row for row in inv.items if row["dependencies_status"] == "pending"]
+    reads_data = {
+        row["id"]
+        for row in inv.items
+        if row["type"] == _WEB_MAP_TYPE or row["type"] in _APP_DATA_TYPES
+    }
+    best_effort = (
+        {row["id"] for row in inv.items if row["id"] not in reads_data}
+        if read_all
+        else set()
+    )
+    targets = [
+        row
+        for row in inv.items
+        if row["dependencies_status"] == "pending" or row["id"] in best_effort
+    ]
     stop = threading.Event()
 
-    def fetch(
-        row: dict[str, Any],
-    ) -> tuple[str, list[dict[str, Any]], PortalError | None]:
-        if stop.is_set():
-            return "not_fetched", [], None
+    def read_data(row: dict[str, Any], out: _DepResult) -> str | None:
+        """The status of one item's data read; None when it stopped the run."""
         path = f"content/items/{quote(row['id'], safe='')}/data"
+        is_map = row["type"] in _MAP_CONFIG_TYPES
+        lenient = row["id"] in best_effort
         try:
             data = client.get_json(path)
         except PortalError as exc:
             _detach(exc)
             if exc.kind == "auth":
                 stop.set()
-                return "not_fetched", [], exc
+                out.auth = exc
+                return None
             # An app registered only by URL has no data; a web map always has
             # a configuration, so an empty one is a failed read.
-            if exc.kind == "empty" and row["type"] != _WEB_MAP_TYPE:
-                return "unparsed", [], None
-            return "error", [], exc
-        if row["type"] == _WEB_MAP_TYPE and not _is_web_map(data):
+            not_json_ok = lenient or row["type"] in _NON_JSON_TYPES
+            tolerated = (
+                (
+                    exc.kind in _UNREADABLE_KINDS
+                    and (lenient or row["type"] in _URL_ONLY_TYPES)
+                )
+                or (not_json_ok and exc.kind == "not_json")
+                or (lenient and exc.kind == "invalid")
+            )
+            if not is_map and tolerated:
+                return "unparsed"
+            out.errors.append(_error_row(row["id"], "item_data", exc))
+            return "error"
+        if sidecar_dir is not None and not lenient:
+            out.saved = _write_sidecar(sidecar_dir, row, data, client._redact, out)
+        if is_map and not _is_web_map(data):
             message = f"{path} is not a web map configuration"
-            return "error", [], PortalError(message, kind="invalid")
+            out.errors.append(
+                _error_row(row["id"], "item_data", PortalError(message, kind="invalid"))
+            )
+            return "error"
         try:
-            status, dependencies = _extract_dependencies(row, data, index, inv.portal)
+            if lenient:
+                ids = _scan_item_ids(data)
+                status, dependencies = "unparsed", []
+                if ids:
+                    status = "parsed"
+                    dependencies = [
+                        _dependency(
+                            row["id"],
+                            i,
+                            None,
+                            role="referenced_item",
+                            layer_type=None,
+                            layer_id=None,
+                            title=None,
+                            order=n,
+                            index=index,
+                            portal=inv.portal,
+                        )
+                        for n, i in enumerate(ids)
+                    ]
+            else:
+                status, dependencies = _extract_dependencies(
+                    row, data, index, inv.portal
+                )
         except (TypeError, ValueError, AttributeError, KeyError, IndexError) as exc:
             # One corrupt configuration must not sink the whole inventory.
             message = (
                 f"{path} has a malformed configuration: {type(exc).__name__}: {exc}"
             )
-            return "error", [], client._error(message, kind="invalid")
-        return status, dependencies, None
+            out.errors.append(
+                _error_row(
+                    row["id"], "item_data", client._error(message, kind="invalid")
+                )
+            )
+            return "error"
+        out.dependencies.extend(dependencies)
+        return status
+
+    def fetch(row: dict[str, Any]) -> _DepResult:
+        out = _DepResult()
+        if stop.is_set():
+            return out
+        status = None
+        if row["id"] in reads_data or row["id"] in best_effort:
+            status = read_data(row, out)
+            if out.auth is not None:
+                return out
+        related_ok = True
+        related_reads = _related_reads(row["type"], row["reason"])
+        base = f"content/items/{quote(row['id'], safe='')}/relatedItems"
+        for relationship, direction, role in related_reads:
+            try:
+                response = client.get_json(
+                    base, {"relationshipType": relationship, "direction": direction}
+                )
+            except PortalError as exc:
+                _detach(exc)
+                if exc.kind == "auth":
+                    stop.set()
+                    out.auth = exc
+                    return out
+                out.errors.append(_error_row(row["id"], "related", exc))
+                related_ok = False
+                continue
+            listed = response.get("relatedItems")
+            if not isinstance(listed, list) or not all(
+                isinstance(i, dict) and isinstance(i.get("id"), str) and i["id"]
+                for i in listed
+            ):
+                malformed = PortalError(
+                    f"{base} returned no usable relatedItems list", kind="invalid"
+                )
+                out.errors.append(_error_row(row["id"], "related", malformed))
+                related_ok = False
+                continue
+            out.dependencies.extend(
+                _related_dependencies(
+                    row, response, role, index, inv.portal, len(out.dependencies)
+                )
+            )
+        if not related_ok or status == "error":
+            out.status = "error"
+        elif related_reads:
+            out.status = "parsed"
+        else:
+            out.status = status or "parsed"
+        return out
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        results = list(pool.map(fetch, targets))
+        for row, out in zip(targets, pool.map(fetch, targets), strict=True):
+            row["dependencies_status"] = out.status
+            row["data_saved"] = out.saved
+            inv.dependencies.extend(out.dependencies)
+            inv.errors.extend(out.errors)
+            if out.auth is not None:
+                inv.abort = inv.abort or out.auth
 
-    for row, (status, dependencies, exc) in zip(targets, results, strict=True):
-        row["dependencies_status"] = status
-        inv.dependencies.extend(dependencies)
-        if exc is not None and exc.kind == "auth":
-            inv.abort = inv.abort or exc
-        elif exc is not None:
-            inv.errors.append(
-                {
-                    "item_id": row["id"],
-                    "phase": "item_data",
-                    "http_status": exc.http_status,
-                    "message": str(exc),
-                }
-            )
+
+def _write_sidecar(
+    directory: Path,
+    row: Mapping[str, Any],
+    data: Any,
+    redact: Redactor,
+    out: _DepResult,
+) -> bool:
+    if not _SAFE_FILENAME.fullmatch(row["id"]):
+        return False
+    folder = "webmaps" if row["type"] == _WEB_MAP_TYPE else "apps"
+    try:
+        _report.write_sidecar(directory, folder, row["id"], redact_json(data, redact))
+    except OSError as exc:
+        message = redact(f"could not write the {folder} sidecar: {exc}")
+        out.errors.append(
+            {
+                "item_id": row["id"],
+                "phase": "item_data",
+                "http_status": None,
+                "message": message,
+            }
+        )
+        return False
+    return True
 
 
 # Row fields the item's own record decides, over a possibly stale search result.
@@ -1501,6 +1952,93 @@ def _collect_owners(client: PortalClient, inv: Inventory, concurrency: int) -> N
             inv.abort = inv.abort or out.auth
 
 
+def _external_by_url(url: str | None, portal: Mapping[str, Any]) -> bool | None:
+    """Whether a service URL lies outside the organization's own services."""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host == (urlsplit(portal["url"]).hostname or "").lower():
+        return False
+    if portal["kind"] == "online":
+        path = parts.path.lower()
+        org = (portal["org_id"] or "").lower()
+        if not org or not _ARCGIS_ONLINE_HOSTED.fullmatch(host):
+            return True if org else None
+        return not (
+            path.startswith(f"/{org}/arcgis/rest/services/")
+            or path.startswith(f"/tiles/{org}/arcgis/rest/services/")
+        )
+    # A federated server sits on any host and publishes in any folder, and the
+    # inventory doesn't know the federation, so a host other than the portal's
+    # can't be called foreign.
+    return None
+
+
+def _resolve_external(client: PortalClient, inv: Inventory, concurrency: int) -> None:
+    """Mark each dependency that points at another organization's content.
+
+    An unresolved item id gets one ``/content/items`` read, cached for the
+    run, because search results omit ``orgId``. An item the account can't read
+    falls back to its URL, and with no URL stays unknown. Only a client error
+    counts as "can't read"; a timeout or server failure is an error row.
+    """
+    own_org = inv.portal["org_id"]
+    ids = sorted(
+        {d["to_id"] for d in inv.dependencies if d["to_id"] and not d["resolved"]}
+    )
+    stop = threading.Event()
+    anonymous = inv.auth["mode"] == "anonymous"
+
+    def fatal(exc: PortalError) -> bool:
+        # A 401 on a lookup of someone else's item means "not visible to
+        # you"; a rejected token is the run's own failure.
+        return exc.kind == "auth" and exc.http_status != 401 and not anonymous
+
+    def fetch(item_id: str) -> tuple[str | None, PortalError | None]:
+        if stop.is_set():
+            return None, None
+        try:
+            data = client.get_json(f"content/items/{quote(item_id, safe='')}")
+        except PortalError as exc:
+            _detach(exc)
+            if fatal(exc):
+                stop.set()
+            return None, exc
+        org = data.get("orgId")
+        return (org if isinstance(org, str) and org else None), None
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        results = dict(zip(ids, pool.map(fetch, ids), strict=True))
+    orgs = {item_id: org for item_id, (org, _) in results.items()}
+    for item_id, (_, failure) in results.items():
+        if failure is None:
+            continue
+        if fatal(failure):
+            inv.abort = inv.abort or failure
+        elif failure.http_status not in _HIDDEN_ITEM_STATUSES:
+            inv.errors.append(_error_row(client._redact(item_id), "external", failure))
+    for dep in inv.dependencies:
+        if dep["resolved"]:
+            continue
+        org = orgs.get(dep["to_id"])
+        if org and own_org:
+            dep["external"] = org != own_org
+        else:
+            dep["external"] = _external_by_url(dep["to_url"], inv.portal)
+
+
+def _redact_dependencies(inv: Inventory, redact: Redactor) -> None:
+    """Redact the portal-supplied text of every dependency row.
+
+    This runs last because the ids in these rows address later requests.
+    """
+    for dep in inv.dependencies:
+        for key in ("to_id", "to_url", "layer_type", "layer_id", "title"):
+            if isinstance(dep[key], str):
+                dep[key] = redact(dep[key])
+
+
 def _signed_in_user(info: Mapping[str, Any]) -> str | None:
     user = info.get("user")
     name = user.get("username") if isinstance(user, dict) else None
@@ -1521,6 +2059,8 @@ def run_inventory(
     max_items: int,
     concurrency: int,
     read_groups: bool = True,
+    read_all_item_data: bool = False,
+    sidecar_dir: Path | None = None,
 ) -> Inventory:
     """List, classify, read item metadata and resolve dependencies.
 
@@ -1586,7 +2126,16 @@ def run_inventory(
     if inv.abort is not None:
         _mark_not_fetched(inv)
         return inv
-    _collect_dependencies(client, inv, concurrency)
+    _collect_dependencies(
+        client,
+        inv,
+        concurrency,
+        read_all=read_all_item_data,
+        sidecar_dir=sidecar_dir,
+    )
+    if inv.abort is None:
+        _resolve_external(client, inv, concurrency)
+    _redact_dependencies(inv, client._redact)
     return inv
 
 
@@ -1610,6 +2159,7 @@ class InventoryOptions:
     allow_insecure_http: bool
     json_mode: bool
     read_groups: bool = True
+    read_all_item_data: bool = False
 
 
 class _UsageError(Exception):
@@ -1763,6 +2313,8 @@ def _run(fmt: _output.Formatter, opts: InventoryOptions, redact: Redactor) -> in
             max_items=opts.max_items,
             concurrency=opts.concurrency,
             read_groups=opts.read_groups,
+            read_all_item_data=opts.read_all_item_data,
+            sidecar_dir=opts.output_dir,
         )
     except PortalError as exc:
         fmt.error(str(exc))
