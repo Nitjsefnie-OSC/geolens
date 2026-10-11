@@ -49,6 +49,8 @@ async def _create_raster_dataset(
     with_asset: bool = True,
     is_dem: bool = False,
     nodata: str | None = None,
+    dtype: str | None = None,
+    band_count: int | None = None,
 ) -> tuple[Record, Dataset, RasterAsset | None]:
     """Create a Record + Dataset (+ optional RasterAsset) for raster tests."""
     dataset = await create_raster_dataset(
@@ -73,6 +75,8 @@ async def _create_raster_dataset(
             storage_backend="local",
             is_dem=is_dem,
             nodata=nodata,
+            dtype=dtype,
+            band_count=band_count,
         )
         session.add(raster_asset)
         await session.commit()
@@ -666,6 +670,43 @@ class TestDemTerrainNodataAuthCheck:
         assert "algorithm=terrainrgb" not in render_params
 
 
+class TestDefaultRescaleAuthCheck:
+    """raster_auth_check flags float rasters whose default rescale is the data range."""
+
+    async def _headers(self, client, session, **raster):
+        admin_id = await _get_admin_id(session)
+        _, dataset, _ = await _create_raster_dataset(
+            session, created_by=admin_id, band_count=1, **raster
+        )
+        resp = await client.get(
+            "/tiles/raster-auth-check/", params={"dataset_id": str(dataset.id)}
+        )
+        assert resp.status_code == 200
+        return resp.headers
+
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    async def test_float_raster_is_flagged_and_keeps_the_dtype_fallback(
+        self, client: AsyncClient, test_db_session, dtype
+    ):
+        headers = await self._headers(client, test_db_session, dtype=dtype)
+        assert headers.get("x-geolens-data-range-default") == "1"
+        assert headers["x-geolens-render-params"] == "rescale=0,1.0"
+
+    @pytest.mark.parametrize("dtype", ["int16", "uint8", None])
+    async def test_other_rasters_are_not_flagged(
+        self, client: AsyncClient, test_db_session, dtype
+    ):
+        headers = await self._headers(client, test_db_session, dtype=dtype)
+        assert "x-geolens-data-range-default" not in headers
+
+    async def test_float_dem_is_not_flagged(self, client: AsyncClient, test_db_session):
+        headers = await self._headers(
+            client, test_db_session, dtype="float32", is_dem=True
+        )
+        assert "x-geolens-data-range-default" not in headers
+        assert headers["x-geolens-render-params"].startswith("algorithm=terrainrgb")
+
+
 # ---------------------------------------------------------------------------
 # RBAC regression: inline raster auth vs check_dataset_access
 # ---------------------------------------------------------------------------
@@ -952,29 +993,96 @@ async def test_band_stats_cache_hit(monkeypatch):
     assert result1 is not None
 
 
+@pytest.mark.parametrize(
+    ("bands", "n_bands", "expected"),
+    [
+        ([{"min": -4200.5, "max": 8848.25}], 1, ["rescale=-4200.5,8848.25"]),
+        (
+            [{"min": 0.0, "max": 0.5}, {"min": 1.0, "max": 2.0}] * 2,
+            3,
+            ["rescale=0.0,0.5", "rescale=1.0,2.0", "rescale=0.0,0.5"],
+        ),
+        ([{"min": 5.0, "max": 5.0}], 1, []),
+        ([{"min": 0.0, "max": 1.0}], 3, []),
+        ([{"min": 1.0}], 1, []),
+        ([{"min": -1.5, "max": 1e20}], 1, ["rescale=-1.5,1e%2B20"]),
+    ],
+)
+def test_data_range_rescale(bands, n_bands, expected):
+    from app.processing.tiles.router import _data_range_rescale
+
+    assert _data_range_rescale(bands, n_bands) == expected
+
+
 @pytest.mark.asyncio
-async def test_band_stats_cache_negative(monkeypatch):
-    """Negative caching: None is stored and returned without a second Titiler call."""
+async def test_concurrent_band_stats_lookups_share_one_titiler_call(monkeypatch):
+    """Tiles that miss the cache together trigger a single statistics scan."""
+    import asyncio
+
     monkeypatch.setattr(
         "app.platform.storage.titiler_url._managed_prefix", lambda: "/data/"
     )
-    from app.processing.tiles.router import _band_stats_cache, _fetch_band_statistics
+    from app.processing.tiles import router as tiles_router
 
-    _band_stats_cache.clear()
+    tiles_router._band_stats_cache.clear()
+    tiles_router._band_stats_failures.clear()
+    ok = MagicMock()
+    ok.status_code = 200
+    ok.json.return_value = {"b1": {"min": 0.0, "max": 9.0}}
 
-    mock_get = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
+    async def slow_get(_url):
+        await asyncio.sleep(0.01)
+        return ok
+
+    mock_get = AsyncMock(side_effect=slow_get)
+    monkeypatch.setattr("app.processing.tiles.router._titiler_client.get", mock_get)
+
+    results = await asyncio.gather(
+        *[
+            tiles_router._fetch_band_statistics("/data/herd.tif", 2.0, 98.0)
+            for _ in range(5)
+        ],
+    )
+    assert all(r == [{"min": 0.0, "max": 9.0}] for r in results)
+    assert mock_get.call_count == 1
+    assert not tiles_router._band_stats_inflight
+
+
+@pytest.mark.asyncio
+async def test_band_stats_failure_is_reused_then_retried_after_ttl(monkeypatch):
+    """A failed lookup is reused within the TTL and retried once it expires."""
+    monkeypatch.setattr(
+        "app.platform.storage.titiler_url._managed_prefix", lambda: "/data/"
+    )
+    from cachetools import TTLCache
+
+    from app.processing.tiles import router as tiles_router
+
+    now = [0.0]
+    monkeypatch.setattr(
+        tiles_router,
+        "_band_stats_failures",
+        TTLCache(
+            maxsize=8, ttl=tiles_router._BAND_STATS_FAILURE_TTL_S, timer=lambda: now[0]
+        ),
+    )
+    tiles_router._band_stats_cache.clear()
+
+    ok = MagicMock()
+    ok.status_code = 200
+    ok.json.return_value = {"b1": {"min": 0.0, "max": 9.0}}
+    mock_get = AsyncMock(side_effect=[httpx.TimeoutException("timeout"), ok])
     monkeypatch.setattr("app.processing.tiles.router._titiler_client.get", mock_get)
 
     path = "/data/timeout-test.tif"
-    # Phase 1153: _fetch_band_statistics now requires pmin/pmax for cache-key isolation
-    result1 = await _fetch_band_statistics(path, 2.0, 98.0)
-    result2 = await _fetch_band_statistics(path, 2.0, 98.0)
+    assert await tiles_router._fetch_band_statistics(path, 2.0, 98.0) is None
+    assert await tiles_router._fetch_band_statistics(path, 2.0, 98.0) is None
+    assert mock_get.call_count == 1, "failure must be reused within the TTL"
 
-    assert result1 is None
-    assert result2 is None
-    assert mock_get.call_count == 1, (
-        "None is cached — second call must not retry Titiler"
-    )
+    now[0] = tiles_router._BAND_STATS_FAILURE_TTL_S + 1
+    result = await tiles_router._fetch_band_statistics(path, 2.0, 98.0)
+    assert result == [{"min": 0.0, "max": 9.0}]
+    assert mock_get.call_count == 2, "failure must be retried after the TTL"
 
 
 # ---------------------------------------------------------------------------
