@@ -660,8 +660,8 @@ export function DatasetPage() {
                     every draw mode. */}
                 <DatasetMap
                   // A map keeps every source it was given, so each dataset
-                  // needs its own instance (and, for raster/VRT, each tile kind).
-                  key={`${dataset.id}:${isRasterOrVrt ? mapKey : tileKind ?? 'no-tiles'}`}
+                  // needs its own instance (and, for raster/VRT, each tile kind, DEM or imagery source type and DEM extent).
+                  key={`${dataset.id}:${isRasterOrVrt ? `${mapKey}:${dataset.raster?.is_dem ? `dem:${bbox?.join(',')}` : 'img'}` : tileKind ?? 'no-tiles'}`}
                   bbox={bbox}
                   tableName={dataset.table_name}
                   geometryType={dataset.geometry_type}
@@ -672,6 +672,7 @@ export function DatasetPage() {
                   canEdit={canEditData && featureTable && !isTable}
                   recordType={dataset.record_type}
                   rasterTileUrl={dataset.raster?.tile_url}
+                  isDem={dataset.raster?.is_dem ?? false}
                   tileVersion={dataset.updated_at}
                   attribution={dataset.attribution}
                   shortcutsEnabled={!isDataTabExpanded}
