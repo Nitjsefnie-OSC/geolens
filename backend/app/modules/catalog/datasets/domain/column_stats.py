@@ -1,9 +1,13 @@
 """Column-level statistics and distinct value queries for dataset tables."""
 
+import math
 import re
+from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.platform.timestamptz_text import utc_timestamptz_text
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$", re.IGNORECASE)
 
@@ -19,6 +23,20 @@ _NUMERIC_TYPES = {
     "real",
     "double precision",
     "money",
+}
+
+# Types whose driver value already serializes as a JSON string, boolean or
+# number; every other type is returned as text.
+_NATIVE_VALUE_TYPES = {
+    "smallint",
+    "integer",
+    "bigint",
+    "real",
+    "double precision",
+    "boolean",
+    "text",
+    "character varying",
+    "character",
 }
 
 
@@ -57,6 +75,14 @@ def _sql_quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""').replace(":", "\\:") + '"'
 
 
+def _json_number(value):
+    """Decimal as a float, or as text when a float can't carry it (NaN, 1e309)."""
+    if isinstance(value, Decimal):
+        number = float(value)
+        return number if math.isfinite(number) else str(value)
+    return value
+
+
 async def get_distinct_values(
     session: AsyncSession,
     table_name: str,
@@ -69,7 +95,9 @@ async def get_distinct_values(
 
     Numeric and boolean values are returned in their native Python types so
     that MapLibre match expressions do strict-type comparisons correctly.
-    Text values remain strings.
+    Text values remain strings. ``numeric`` values are floats unless a float
+    can't carry them. Every other type is returned as text; a ``timestamptz``
+    uses the UTC form vector tiles carry.
     """
     _validate_identifier(table_name, "table name")
     _validate_identifier(column_name, "column name")
@@ -81,15 +109,34 @@ async def get_distinct_values(
     # user) doesn't 500 the query.
     col_q = _sql_quote_ident(column_name)
 
+    type_result = await session.execute(
+        text(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = :schema AND table_name = :t "
+            "AND column_name = :c"
+        ).bindparams(schema=_current_data_schema(), t=table_name, c=column_name)
+    )
+    data_type = (type_result.scalar_one_or_none() or "").lower()
+    expr = col_q
+    if data_type == "timestamp with time zone":
+        expr = utc_timestamptz_text(col_q)
+    elif (
+        data_type
+        and data_type not in _NATIVE_VALUE_TYPES
+        and data_type not in _NUMERIC_TYPES - {"money"}
+    ):
+        expr = f"{col_q}::text"
+
     sql = text(
-        f"SELECT DISTINCT {col_q} AS val "
+        # codeql[py/sql-injection]
+        f"SELECT DISTINCT {expr} AS val "
         f"FROM {table_ref} "
         f"WHERE {col_q} IS NOT NULL "
         f"ORDER BY val LIMIT :limit"
     ).bindparams(limit=limit)
 
     result = await session.execute(sql)
-    return [row[0] for row in result.all()]
+    return [_json_number(row[0]) for row in result.all()]
 
 
 async def get_column_null_cardinality(
