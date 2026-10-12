@@ -1236,3 +1236,255 @@ async def test_dcat_raster_without_anonymous_download_omits_the_cog_url(
     assert resp.status_code == 200
     assert len(_raster_tile_distributions(resp.json(), ds.id)) == 1
     assert not _cog_download_distributions(resp.json(), ds.id)
+
+
+# ---------------------------------------------------------------------------
+# Anonymous catalog feed cache
+# ---------------------------------------------------------------------------
+
+_FEED_URLS = [
+    "/datasets/dcat/",
+    "/datasets/dcat-us/3.0/",
+    "/datasets/geodcat-ap/",
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("url", _FEED_URLS)
+async def test_cached_anonymous_feed_never_leaks_private_dataset(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    url: str,
+):
+    """An authenticated response is never stored for, or served to, anonymous callers."""
+    admin_id = await get_user_id(test_db_session, "admin")
+    private = await _create_dcat_dataset(
+        test_db_session,
+        created_by=admin_id,
+        name="Cache Private",
+        visibility="private",
+    )
+    key = "dataset" if "dcat-us" in url else "dcat:dataset"
+
+    first = await client.get(url)
+    assert str(private.id) not in first.text
+
+    admin = await client.get(url, headers=admin_auth_header)
+    assert str(private.id) in admin.text, "admin must still see the private dataset"
+
+    second = await client.get(url)
+    assert second.status_code == 200
+    assert str(private.id) not in second.text
+    assert second.json()[key] == first.json()[key]
+
+
+@pytest.mark.anyio
+async def test_anonymous_feed_is_cached_then_reflects_new_dataset_after_ttl(
+    client: AsyncClient,
+    test_db_session,
+    monkeypatch,
+):
+    from app.modules.catalog.datasets.api.feed_response import FEED_CACHE_TTL
+    from app.platform.cache import memory
+
+    admin_id = await get_user_id(test_db_session, "admin")
+    one = await _create_dcat_dataset(
+        test_db_session, created_by=admin_id, name="Cache One"
+    )
+    first = await client.get("/datasets/dcat/")
+    assert str(one.id) in first.text
+
+    two = await _create_dcat_dataset(
+        test_db_session, created_by=admin_id, name="Cache Two"
+    )
+    cached = await client.get("/datasets/dcat/")
+    assert str(two.id) not in cached.text
+    for header in (
+        "content-type",
+        "content-language",
+        "x-geolens-source-dataset-count",
+    ):
+        assert cached.headers[header] == first.headers[header]
+
+    real = memory.time.monotonic
+    monkeypatch.setattr(memory.time, "monotonic", lambda: real() + FEED_CACHE_TTL + 1)
+    fresh = await client.get("/datasets/dcat/")
+    assert str(two.id) in fresh.text
+
+
+@pytest.mark.anyio
+async def test_feed_cache_is_keyed_on_page(
+    client: AsyncClient,
+    test_db_session,
+):
+    admin_id = await get_user_id(test_db_session, "admin")
+    for n in range(2):
+        await _create_dcat_dataset(
+            test_db_session, created_by=admin_id, name=f"Cache Page {n}"
+        )
+    page_one = await client.get("/datasets/dcat/", params={"limit": 1})
+    page_two = await client.get("/datasets/dcat/", params={"limit": 1, "offset": 1})
+    assert page_one.json()["dcat:dataset"] != page_two.json()["dcat:dataset"]
+    assert len(page_one.json()["dcat:dataset"]) == 1
+
+
+@pytest.mark.anyio
+async def test_feed_render_holds_no_pooled_connection(
+    client: AsyncClient, test_db_session, monkeypatch
+):
+    """Rendering runs in a thread, so the request's connection goes back first."""
+    import app.core.db as db_module
+    from app.modules.catalog.datasets.api import router_export
+    from sqlalchemy import event
+
+    admin_id = await get_user_id(test_db_session, "admin")
+    await _create_dcat_dataset(test_db_session, created_by=admin_id, name="Pool Feed")
+
+    live = {"n": 0}
+
+    def _out(*_):
+        live["n"] += 1
+
+    def _in(*_):
+        live["n"] -= 1
+
+    engine = db_module.engine.sync_engine
+    event.listen(engine, "checkout", _out)
+    event.listen(engine, "checkin", _in)
+    seen: dict = {}
+    real = router_export.catalog_to_dcat
+
+    def _probe(*args, **kwargs):
+        seen["during"] = live["n"]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(router_export, "catalog_to_dcat", _probe)
+    try:
+        baseline = live["n"]
+        resp = await client.get("/datasets/dcat/")
+    finally:
+        event.remove(engine, "checkout", _out)
+        event.remove(engine, "checkin", _in)
+
+    assert resp.status_code == 200
+    assert seen["during"] == baseline
+
+
+@pytest.mark.anyio
+async def test_feed_cache_stores_a_bounded_number_of_live_keys(
+    client: AsyncClient, test_db_session, monkeypatch
+):
+    from app.modules.catalog.datasets.api import feed_response
+    from app.platform.cache import get_cache
+
+    monkeypatch.setattr(feed_response, "_FEED_CACHE_MAX_KEYS", 2)
+    monkeypatch.setattr(feed_response, "_stored_keys", {})
+    for offset in range(3):
+        await client.get("/datasets/dcat/", params={"limit": 1, "offset": offset})
+
+    keys = list(feed_response._stored_keys)
+    assert len(keys) == 2
+    assert await get_cache().get(keys[0]) is not None
+
+
+@pytest.mark.anyio
+async def test_cold_feed_renders_are_capped_and_identical_ones_coalesce(
+    client: AsyncClient, test_db_session, monkeypatch
+):
+    import asyncio
+    import threading
+    import time
+
+    from app.modules.catalog.datasets.api import feed_response, router_export
+
+    admin_id = await get_user_id(test_db_session, "admin")
+    await _create_dcat_dataset(test_db_session, created_by=admin_id, name="Render Cap")
+    monkeypatch.setattr(feed_response, "_render_slots", asyncio.Semaphore(2))
+
+    lock = threading.Lock()
+    state = {"live": 0, "peak": 0, "calls": 0}
+    real = router_export.catalog_to_dcat
+
+    def _slow(*args, **kwargs):
+        with lock:
+            state["live"] += 1
+            state["calls"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+        time.sleep(0.2)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            with lock:
+                state["live"] -= 1
+
+    monkeypatch.setattr(router_export, "catalog_to_dcat", _slow)
+
+    distinct = await asyncio.gather(
+        *(client.get("/datasets/dcat/", params={"offset": n}) for n in range(6))
+    )
+    assert all(r.status_code == 200 for r in distinct)
+    assert state["peak"] <= 2
+
+    state["calls"] = 0
+    same = await asyncio.gather(
+        *(client.get("/datasets/dcat/", params={"offset": 50}) for _ in range(4))
+    )
+    assert all(r.status_code == 200 for r in same)
+    assert state["calls"] == 1
+
+
+@pytest.mark.anyio
+async def test_feed_waiting_for_a_render_slot_holds_no_pooled_connection(
+    client: AsyncClient, test_db_session, monkeypatch
+):
+    import asyncio
+
+    import app.core.db as db_module
+    from app.modules.catalog.datasets.api import feed_response
+    from sqlalchemy import event
+
+    admin_id = await get_user_id(test_db_session, "admin")
+    await _create_dcat_dataset(test_db_session, created_by=admin_id, name="Slot Wait")
+    slots = asyncio.Semaphore(1)
+    monkeypatch.setattr(feed_response, "_render_slots", slots)
+
+    live = {"n": 0}
+
+    def _out(*_):
+        live["n"] += 1
+
+    def _in(*_):
+        live["n"] -= 1
+
+    engine = db_module.engine.sync_engine
+    event.listen(engine, "checkout", _out)
+    event.listen(engine, "checkin", _in)
+    try:
+        baseline = live["n"]
+        await slots.acquire()
+        waiting = asyncio.create_task(client.get("/datasets/dcat/"))
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        held_while_waiting = live["n"]
+        slots.release()
+        assert (await waiting).status_code == 200
+    finally:
+        event.remove(engine, "checkout", _out)
+        event.remove(engine, "checkin", _in)
+
+    assert held_while_waiting == baseline
+
+
+@pytest.mark.anyio
+async def test_catalog_invalidation_drops_cached_feeds(
+    client: AsyncClient, test_db_session
+):
+    from app.platform.cache.tiles import invalidate_catalog_cache
+
+    admin_id = await get_user_id(test_db_session, "admin")
+    await client.get("/datasets/dcat/")
+    ds = await _create_dcat_dataset(test_db_session, created_by=admin_id, name="Inval")
+    await invalidate_catalog_cache()
+
+    assert str((await client.get("/datasets/dcat/")).text).count(str(ds.id)) >= 1

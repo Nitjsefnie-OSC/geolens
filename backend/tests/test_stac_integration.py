@@ -339,3 +339,97 @@ class TestSTACSearch:
         resp = await client.get("/stac/search", params={"limit": 1})
         assert resp.status_code == 200
         assert len(resp.json()["features"]) <= 1
+
+
+# ---------------------------------------------------------------------------
+# Anonymous landing page and collection list cache
+# ---------------------------------------------------------------------------
+
+
+async def _add_collection(
+    session: "AsyncSession", admin_id: uuid.UUID, ds
+) -> Collection:
+    coll = Collection(name=f"stac-cache-{uuid.uuid4().hex[:8]}", created_by=admin_id)
+    session.add(coll)
+    await session.flush()
+    session.add(
+        CollectionDataset(collection_id=coll.id, dataset_id=ds.id, added_by=admin_id)
+    )
+    await session.commit()
+    return coll
+
+
+class TestSTACAnonymousCache:
+    async def test_private_collection_never_leaks_through_cache(
+        self, client: AsyncClient, admin_auth_header: dict, test_db_session
+    ):
+        admin_id = await get_user_id(test_db_session, "admin")
+        ds = await _create_raster_dataset(
+            test_db_session, created_by=admin_id, visibility="private"
+        )
+        coll = await _add_collection(test_db_session, admin_id, ds)
+
+        for path in ("/stac/", "/stac/collections"):
+            anon = await client.get(path)
+            assert str(coll.id) not in anon.text
+            admin = await client.get(path, headers=admin_auth_header)
+            assert str(coll.id) in admin.text
+            again = await client.get(path)
+            assert str(coll.id) not in again.text
+
+    async def test_new_public_collection_appears_after_ttl(
+        self, client: AsyncClient, test_db_session, monkeypatch
+    ):
+        from app.platform.cache import memory
+        from app.standards.stac.router import _STAC_ANON_CACHE_TTL
+
+        admin_id = await get_user_id(test_db_session, "admin")
+        for path in ("/stac/", "/stac/collections"):
+            await client.get(path)
+        ds = await _create_raster_dataset(test_db_session, created_by=admin_id)
+        coll = await _add_collection(test_db_session, admin_id, ds)
+
+        for path in ("/stac/", "/stac/collections"):
+            assert str((await client.get(path)).status_code) == "200"
+            assert str(coll.id) not in (await client.get(path)).text
+
+        real = memory.time.monotonic
+        monkeypatch.setattr(
+            memory.time, "monotonic", lambda: real() + _STAC_ANON_CACHE_TTL + 1
+        )
+        for path in ("/stac/", "/stac/collections"):
+            assert str(coll.id) in (await client.get(path)).text
+
+    async def test_catalog_invalidation_drops_cached_listings(
+        self, client: AsyncClient, test_db_session
+    ):
+        from app.platform.cache.tiles import invalidate_catalog_cache
+
+        admin_id = await get_user_id(test_db_session, "admin")
+        for path in ("/stac/", "/stac/collections"):
+            await client.get(path)
+        ds = await _create_raster_dataset(test_db_session, created_by=admin_id)
+        coll = await _add_collection(test_db_session, admin_id, ds)
+        await invalidate_catalog_cache()
+
+        for path in ("/stac/", "/stac/collections"):
+            assert str(coll.id) in (await client.get(path)).text
+
+    async def test_cache_stores_a_bounded_number_of_live_keys(
+        self, client: AsyncClient, monkeypatch
+    ):
+        from app.platform.cache import get_cache
+        from app.standards.stac import router as stac_router
+        from app.standards.stac.schemas import StacCatalog
+
+        monkeypatch.setattr(stac_router, "_STAC_ANON_CACHE_MAX_KEYS", 2)
+        monkeypatch.setattr(stac_router, "_stac_stored_keys", {})
+        catalog = StacCatalog(
+            id="c", title="c", description="c", conformsTo=[], links=[]
+        )
+        for name in ("k1", "k2", "k3"):
+            await stac_router._anon_cache_put(f"stac:{name}", catalog)
+
+        assert list(stac_router._stac_stored_keys) == ["stac:k1", "stac:k2"]
+        assert await get_cache().get("stac:k1") is not None
+        assert await get_cache().get("stac:k3") is None
