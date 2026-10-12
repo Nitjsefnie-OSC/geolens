@@ -18,7 +18,10 @@ from app.core.identity import Identity
 from app.core.permissions import EDIT_METADATA, UPLOAD
 from app.modules.audit.service import AuditEvent, audit_emit
 from app.modules.auth.service import get_user_identity
-from app.modules.catalog.authorization import get_user_roles
+from app.modules.catalog.authorization import (
+    check_vrt_audiences_after_change,
+    get_user_roles,
+)
 from app.modules.catalog.maps.service import (
     filter_layer_rows_by_dataset_visibility,
     get_map_with_layers,
@@ -119,12 +122,18 @@ async def transfer_dataset_owner(
     *,
     actor: Identity,
     ip_address: str | None,
+    visibility: str | None = None,
+    record_status: str | None = None,
 ) -> None:
     """Make ``owner_id`` the owner of the dataset and write one audit row.
 
+    ``visibility`` and ``record_status`` are the values the same request will
+    set, so the VRT audience check sees the request's final state.
+
     Call after the dataset's catalog rows are locked. A transfer to the
     current owner changes nothing, vets nothing and writes no row. Raises 422
-    for a target that is unknown, inactive or lacks ``upload``, and 409 while
+    for a target that is unknown, inactive or lacks ``upload``, or one that
+    would leave a VRT reaching past one of its members, and 409 while
     a refresh, re-upload or VRT regeneration is pending or running. Does not
     commit.
     """
@@ -146,6 +155,13 @@ async def transfer_dataset_owner(
                 ),
             },
         )
+    await check_vrt_audiences_after_change(
+        db,
+        dataset,
+        visibility=visibility,
+        record_status=record_status,
+        owner_id=new_owner.id,
+    )
     record.created_by = new_owner.id
     record.updated_by = actor.id
     # Signed tile templates bind this counter, and the previous owner may

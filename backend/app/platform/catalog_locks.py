@@ -320,13 +320,53 @@ async def bump_publication_version_on(
     Sets the instance attribute to the returned value without marking it
     dirty, mirroring :func:`bump_tile_cache_version_on`. The one spelling for
     a request handler, whose instance was loaded before it waited for the row.
+
+    Also rolls every VRT that links the dataset: a VRT serves its members'
+    pixels, so its signed templates and shared-cache keys must not outlive a
+    change to who may read one of them.
     """
     version = await bump_publication_version_atomic(
         session, dataset_cls=type(dataset), dataset_id=dataset.id
     )
+    await session.execute(
+        text(
+            "UPDATE catalog.datasets "
+            "SET publication_version = coalesce(publication_version, 0) + 1 "
+            "WHERE id IN (SELECT vrt_dataset_id FROM catalog.vrt_source_links "
+            "WHERE source_dataset_id = :dataset_id)"
+        ),
+        {"dataset_id": dataset.id},
+    )
     if version is not None:
         set_committed_value(dataset, "publication_version", version)
     return version
+
+
+async def bump_publication_versions_for_owner(
+    session: AsyncSession, owner_id: uuid.UUID
+) -> None:
+    """Roll ``publication_version`` on every dataset ``owner_id`` owns and on
+    every VRT linking one, before the owner is deleted.
+
+    Deleting the owner clears ``created_by`` through the foreign key, which
+    moves who may read those datasets without passing
+    :func:`bump_publication_version_on`.
+    """
+    await session.execute(
+        text(
+            "UPDATE catalog.datasets d "
+            "SET publication_version = coalesce(d.publication_version, 0) + 1 "
+            "WHERE d.id IN ("
+            "SELECT owned.id FROM catalog.datasets owned "
+            "JOIN catalog.records r ON r.id = owned.record_id "
+            "WHERE r.created_by = :owner_id "
+            "UNION SELECT vsl.vrt_dataset_id FROM catalog.vrt_source_links vsl "
+            "JOIN catalog.datasets s ON s.id = vsl.source_dataset_id "
+            "JOIN catalog.records sr ON sr.id = s.record_id "
+            "WHERE sr.created_by = :owner_id)"
+        ),
+        {"owner_id": owner_id},
+    )
 
 
 async def bump_tile_cache_version_on(session: AsyncSession, dataset: Any) -> int | None:
