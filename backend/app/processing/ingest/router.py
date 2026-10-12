@@ -34,7 +34,11 @@ from app.core.async_io import (
     run_in_thread_draining,
     run_in_thread_draining_capture_cancel,
 )
-from app.modules.auth.dependencies import get_current_active_user, require_permission
+from app.modules.auth.dependencies import (
+    get_current_active_user,
+    require_mode_permission,
+    require_permission,
+)
 from app.core.config import settings
 from app.core.db.tenant_session import defer_async_with_tenant
 from app.core.dependencies import get_db
@@ -154,6 +158,10 @@ from app.platform.service_auth import (
     service_credential_from_request,
 )
 from app.platform.storage import get_storage
+from app.platform.upload_filenames import (
+    refuse_control_characters,
+    safe_upload_basename,
+)
 from app.platform.storage.titiler_url import resolve_current_storage_key
 from app.standards.ogc.errors import (
     BAD_GATEWAY_RESPONSE,
@@ -163,6 +171,15 @@ from app.standards.ogc.errors import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Each bulk-register item holds a pooled connection while it runs.
+_BULK_REGISTER_CONCURRENCY = 4
+
+# A table in the data schema has no owner until it is registered, so only an
+# administrator may list, claim or alter one.
+require_table_registrar = require_mode_permission(
+    single_tenant="manage_settings", multi_tenant="manage_tenants"
+)
 
 router = APIRouter(
     prefix="/ingest",
@@ -301,6 +318,8 @@ async def request_presigned_upload(
             detail="Presigned uploads only available in S3 mode",
         )
 
+    refuse_control_characters(request.filename)
+    staged_name = safe_upload_basename(request.filename)
     await _refuse_upload(db, request.filename, request.kind)
 
     # Reject files exceeding configured size limit at request time
@@ -325,7 +344,7 @@ async def request_presigned_upload(
 
     job = await create_ingest_job(db, request.filename, "", user.id)
     storage = get_storage()
-    s3_key = f"staging/{job.id}/{request.filename}"
+    s3_key = f"staging/{job.id}/{staged_name}"
     physical_s3_key = resolve_current_storage_key(s3_key)
     threshold = settings.presigned_multipart_threshold_mb * 1024 * 1024
     # fix(#1235): gate only, return discarded — refuses a dead-lifetime job
@@ -1206,13 +1225,13 @@ async def commit_fan_out(
 )
 async def register_table(
     request: RegisterRequest,
-    user: Identity = Depends(require_permission("upload")),
+    user: Identity = Depends(require_table_registrar),
     db: AsyncSession = Depends(get_db),
 ) -> TableRegisterResponse:
     """Register an existing PostGIS table as a dataset.
 
     Verifies the table exists, extracts metadata, and creates a
-    catalog entry.
+    catalog entry. Administrators only.
     """
     from app.modules.catalog.authorization import check_public_visibility_allowed
 
@@ -1258,7 +1277,7 @@ async def discover_tables(
         le=5000,
         description="Maximum number of tables to return. Capped at 5000.",
     ),
-    user: Identity = Depends(require_permission("upload")),
+    user: Identity = Depends(require_table_registrar),
     db: AsyncSession = Depends(get_db),
 ) -> DiscoverResponse:
     """Discover unregistered tables in the data schema.
@@ -1267,6 +1286,7 @@ async def discover_tables(
     system tables. Includes geometry type, SRID, and estimated row count.
     Bounded by ``limit`` (default 1000, max 5000) so instances with
     thousands of orphan tables don't blow up the response payload.
+    Administrators only.
     """
     tables = await discover_unregistered_tables(db, limit=limit)
     return DiscoverResponse(tables=tables)
@@ -1279,15 +1299,15 @@ async def discover_tables(
 )
 async def bulk_register_tables(
     request: BulkRegisterRequest,
-    user: Identity = Depends(require_permission("upload")),
+    user: Identity = Depends(require_table_registrar),
     db: AsyncSession = Depends(get_db),
 ) -> BulkRegisterResponse:
     """Bulk-register multiple existing PostGIS tables as datasets.
 
-    Each table is registered independently -- one failure does not block
-    others. Tables are processed in parallel via ``asyncio.gather`` with
-    a fresh session per task, which keeps transaction isolation while
-    removing the sequential per-table latency.
+    Administrators only. Each table is registered independently -- one
+    failure does not block others. Each table gets its own session, and at most
+    ``_BULK_REGISTER_CONCURRENCY`` run at once so one batch cannot drain the
+    shared connection pool.
     """
     from app.core.db import async_session
 
@@ -1299,10 +1319,12 @@ async def bulk_register_tables(
     if any(item.visibility == "public" for item in request.tables):
         await check_public_visibility_allowed(db, user, "public")
 
+    slots = asyncio.Semaphore(_BULK_REGISTER_CONCURRENCY)
+
     async def _register_one(
         table_req: BulkRegisterItem,
     ) -> BulkRegisterResult:
-        async with async_session() as task_db:
+        async with slots, async_session() as task_db:
             try:
                 reg_request = RegisterRequest(
                     table_name=table_req.table_name,

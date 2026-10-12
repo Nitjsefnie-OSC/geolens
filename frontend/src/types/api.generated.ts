@@ -3159,6 +3159,7 @@ export interface paths {
          *     system tables. Includes geometry type, SRID, and estimated row count.
          *     Bounded by ``limit`` (default 1000, max 5000) so instances with
          *     thousands of orphan tables don't blow up the response payload.
+         *     Administrators only.
          */
         get: operations["discover_tables_ingest_discover__get"];
         put?: never;
@@ -3232,7 +3233,7 @@ export interface paths {
          * @description Register an existing PostGIS table as a dataset.
          *
          *     Verifies the table exists, extracts metadata, and creates a
-         *     catalog entry.
+         *     catalog entry. Administrators only.
          */
         post: operations["register_table_ingest_register__post"];
         delete?: never;
@@ -3254,10 +3255,10 @@ export interface paths {
          * Bulk Register Tables
          * @description Bulk-register multiple existing PostGIS tables as datasets.
          *
-         *     Each table is registered independently -- one failure does not block
-         *     others. Tables are processed in parallel via ``asyncio.gather`` with
-         *     a fresh session per task, which keeps transaction isolation while
-         *     removing the sequential per-table latency.
+         *     Administrators only. Each table is registered independently -- one
+         *     failure does not block others. Each table gets its own session, and at most
+         *     ``_BULK_REGISTER_CONCURRENCY`` run at once so one batch cannot drain the
+         *     shared connection pool.
          */
         post: operations["bulk_register_tables_ingest_register_bulk__post"];
         delete?: never;
@@ -6984,7 +6985,7 @@ export interface components {
         BulkRegisterRequest: {
             /**
              * Tables
-             * @description List of tables to register as datasets in a single request.
+             * @description Tables to register as datasets in a single request, at most 100.
              */
             tables: components["schemas"]["BulkRegisterItem"][];
         };
