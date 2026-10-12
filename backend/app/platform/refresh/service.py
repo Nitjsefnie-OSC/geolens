@@ -62,7 +62,7 @@ RUN_ORIGIN_KINDS: tuple[str, ...] = (
 
 # How long a run may sit in pending/running before the sweep is allowed to
 # consider it abandoned. Matches the ingest stale-job abandonment policy in
-# platform/jobs/router.py. A legitimately long GDAL run is protected by the
+# platform/jobs/sweep.py. A legitimately long GDAL run is protected by the
 # live-Procrastinate-job predicate below rather than by this number, so the
 # cutoff only has to be longer than the gap between dispatch and claim.
 ABANDONED_RUN_CUTOFF_SECONDS = 3600
@@ -634,18 +634,6 @@ async def claim_admitted_run_for_job(
     return result.scalar_one_or_none()
 
 
-async def claim_scheduled_run_for_job(
-    session: AsyncSession,
-    ingest_job_id: uuid.UUID,
-    *,
-    execution_key: uuid.UUID,
-) -> uuid.UUID | None:
-    """Compatibility wrapper for callers that only admit scheduled work."""
-    return await claim_admitted_run_for_job(
-        session, ingest_job_id, execution_key=execution_key
-    )
-
-
 async def reject_pending_admitted_refresh(
     session: AsyncSession,
     *,
@@ -764,11 +752,6 @@ async def expire_unclaimed_admitted_runs(session: AsyncSession) -> list[uuid.UUI
         if run_id is not None:
             expired.append(run_id)
     return expired
-
-
-async def expire_unclaimed_scheduled_runs(session: AsyncSession) -> list[uuid.UUID]:
-    """Compatibility wrapper for the historical scheduled-only recovery name."""
-    return await expire_unclaimed_admitted_runs(session)
 
 
 async def cancel_active_run_for_job(

@@ -293,7 +293,9 @@ def _redact_sensitive_fields(
             # whole log line. Falling back to a placeholder keeps the line.
             try:
                 event_dict[key] = redact_nested(value)
-            except Exception:  # noqa: BLE001 - see comment above
+            except (
+                Exception
+            ):  # broad: a hostile container must not cost the whole log line
                 event_dict[key] = "[UNREDACTABLE]"
     event = event_dict.get("event")
     if isinstance(event, str):
@@ -397,16 +399,11 @@ def apply_http_logger_levels(root_level: int | str) -> None:
         logging.getLogger(_log).setLevel(level)
 
 
-def setup_logging(
-    json_logs: bool = False, log_level: str = "INFO", *, production: bool = False
-) -> None:
+def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
     """Configure structlog + stdlib logging with shared processor chain.
 
-    fix(#1746): `production` no longer selects the exception-
-    rendering posture -- dev and production render exceptions identically
-    (plain, scrubbed, no rich), since `format_exc_info` runs unconditionally.
-    `production` is still threaded through from `settings.is_production` in
-    case a future difference needs it; today it affects nothing here.
+    Dev and production render exceptions identically (plain, scrubbed, no
+    rich), since `format_exc_info` runs unconditionally.
     """
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
