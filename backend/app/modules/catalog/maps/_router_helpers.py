@@ -292,6 +292,16 @@ async def _stored_image_cache_control(
     return "private, no-cache"
 
 
+async def _is_map_owner_or_admin(
+    map_obj: Map,
+    user: Identity | None,
+    db: AsyncSession,
+) -> bool:
+    if user is None:
+        return False
+    return map_obj.created_by == user.id or "admin" in await get_user_roles(db, user)
+
+
 async def _can_edit_map(
     map_obj: Map,
     user: Identity | None,
@@ -317,9 +327,13 @@ def _build_map_response(
     forked_from_name: str | None = None,
     created_by_username: str | None = None,
     *,
+    include_notes: bool,
     terrain_dataset_ids: set[str] | None = None,
 ) -> MapResponse:
     """Build the map response.
+
+    Notes are private to the map's owner and administrators, so pass
+    ``include_notes`` only for one of them.
 
     ``terrain_dataset_ids`` is for reads filtered by what the caller may see:
     the stored terrain binding then survives only when its DEM is one of those
@@ -334,7 +348,7 @@ def _build_map_response(
         id=map_obj.id,
         name=map_obj.name,
         description=map_obj.description,
-        notes=map_obj.notes,
+        notes=map_obj.notes if include_notes else None,
         center_lng=map_obj.center_lng,
         center_lat=map_obj.center_lat,
         zoom=map_obj.zoom,

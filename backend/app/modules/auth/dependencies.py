@@ -59,6 +59,23 @@ def _predates_revocation_horizon(payload: Mapping, user: User) -> bool:
     return issued_at + 1 <= user.sessions_revoked_at.timestamp()
 
 
+# Download tokens carry the user's token_version under their own claim name.
+# The bearer path reads ``token_version``, and a download token must never
+# pass that check as a session token.
+DOWNLOAD_TOKEN_VERSION_CLAIM = "download_token_version"
+
+
+def download_token_is_current(payload: Mapping, user: User) -> bool:
+    """True when a user-bound download token postdates the user's last revocation.
+
+    A token without the claim, minted before it existed, is refused.
+    """
+    version = payload.get(DOWNLOAD_TOKEN_VERSION_CLAIM)
+    if not isinstance(version, int) or version < user.token_version:
+        return False
+    return not _predates_revocation_horizon(payload, user)
+
+
 # fix(#875): read_only API keys authenticate only these methods. Method-based
 # rather than capability-based: every read surface a key client uses is GET,
 # and classifying the whole permission matrix as read/write would be a much
@@ -641,6 +658,23 @@ async def get_current_active_user(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Inactive user",
+        )
+    return current_user
+
+
+async def require_session_credential(
+    request: Request,
+    current_user: Annotated[Identity, Depends(get_current_active_user)],
+) -> Identity:
+    """The signed-in user, refusing a request that presents an API key.
+
+    A key able to mint another key would let a leaked key outlive its own
+    revocation.
+    """
+    if _supplied_api_key(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API keys can't be created with an API key; sign in instead",
         )
     return current_user
 

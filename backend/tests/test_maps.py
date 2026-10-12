@@ -806,6 +806,85 @@ class TestUpdateMap:
         assert fetched.status_code == 200
         assert fetched.json()["notes"] == "Keep these notes"
 
+    async def test_map_notes_are_returned_only_to_owner_and_admin(
+        self,
+        client: AsyncClient,
+        admin_auth_header: dict,
+        editor_auth_header: dict,
+        viewer_auth_header: dict,
+    ):
+        """GET /maps/{id} returns notes to the owner and admins, and null to other readers."""
+        created = await _create_map(client, editor_auth_header)
+        map_id = created["id"]
+        resp = await client.put(
+            f"/maps/{map_id}",
+            json={"notes": "Owner-only notes", "visibility": "public"},
+            headers=editor_auth_header,
+        )
+        assert resp.status_code == 200, resp.text
+
+        for headers, expected in (
+            (editor_auth_header, "Owner-only notes"),
+            (admin_auth_header, "Owner-only notes"),
+            (viewer_auth_header, None),
+            ({}, None),
+        ):
+            fetched = await client.get(f"/maps/{map_id}", headers=headers)
+            assert fetched.status_code == 200, fetched.text
+            assert fetched.json()["notes"] == expected
+
+    async def test_owner_without_edit_permission_still_reads_notes(
+        self,
+        client: AsyncClient,
+        viewer_auth_header: dict,
+        test_db_session,
+    ):
+        """An owner whose role can't edit maps still gets their map's notes."""
+        me = await client.get("/auth/me/", headers=viewer_auth_header)
+        map_obj = Map(
+            name=f"Owned by viewer {uuid.uuid4().hex[:6]}",
+            notes="Still mine",
+            created_by=uuid.UUID(me.json()["id"]),
+        )
+        test_db_session.add(map_obj)
+        await test_db_session.commit()
+
+        fetched = await client.get(f"/maps/{map_obj.id}", headers=viewer_auth_header)
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["notes"] == "Still mine"
+
+    async def test_fork_keeps_notes_only_for_the_source_owner(
+        self,
+        client: AsyncClient,
+        editor_auth_header: dict,
+        viewer_auth_header: dict,
+    ):
+        """A fork copies the source's notes only when the forker owns the source."""
+        created = await _create_map(client, editor_auth_header)
+        map_id = created["id"]
+        resp = await client.put(
+            f"/maps/{map_id}",
+            json={"notes": "Owner-only notes", "visibility": "public"},
+            headers=editor_auth_header,
+        )
+        assert resp.status_code == 200, resp.text
+
+        foreign = await client.post(
+            f"/maps/{map_id}/duplicate/", headers=viewer_auth_header
+        )
+        assert foreign.status_code == 201, foreign.text
+        assert foreign.json()["notes"] is None
+        refetched = await client.get(
+            f"/maps/{foreign.json()['id']}", headers=viewer_auth_header
+        )
+        assert refetched.json()["notes"] is None
+
+        own = await client.post(
+            f"/maps/{map_id}/duplicate/", headers=editor_auth_header
+        )
+        assert own.status_code == 201, own.text
+        assert own.json()["notes"] == "Owner-only notes"
+
     async def test_update_map_viewport(
         self, client: AsyncClient, admin_auth_header: dict
     ):
