@@ -24,6 +24,7 @@ from app.modules.auth.cookies import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     REFRESH_COOKIE_NAME,
+    api_path_is_cookie_scoped,
     clear_browser_session,
     enforce_csrf,
     issue_browser_session,
@@ -35,6 +36,15 @@ from app.modules.auth.dependencies import (
     get_optional_user,
     get_optional_user_fail_open,
     require_session_credential,
+)
+from app.modules.auth.login_throttle import (
+    account_binding,
+    device_cookie_fits,
+    issue_device_cookie,
+    redeem_trust_token,
+    reserve_login_attempt,
+    settle_login_failure,
+    settle_login_success,
 )
 from app.modules.auth.models import ApiKey, Role, User, UserRole
 from app.core.identity import Identity
@@ -62,6 +72,7 @@ from app.modules.quota.schemas import UserQuotaUsage
 from app.modules.quota.service import get_user_quota_usage
 from app.core.config import settings
 from app.core.dependencies import get_client_ip, get_db
+from app.core.public_urls import PublicUrlNotConfiguredError, get_public_api_url
 from app.core.tenancy import is_multi_tenant
 from app.core.persistent_config import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -173,6 +184,7 @@ async def login(
         )
         await db.commit()
 
+    throttle = await reserve_login_attempt(db, request, form_data.username)
     provider = LocalAuthProvider(db)
     try:
         identity = await provider.authenticate(
@@ -182,12 +194,16 @@ async def login(
         # user_id stays None: LocalAuthProvider deliberately doesn't disclose
         # whether the username exists (both branches raise identically, a
         # timing-attack guard), and the audit row must not either.
+        await settle_login_failure(db, request, throttle)
         await _audit_login_failure("invalid_credentials", user_id=None)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Denials past this point follow a correct password, so they don't count.
+    await settle_login_success(db, throttle)
 
     # Check user status before issuing token
     result = await db.execute(select(User).where(User.id == identity.user_id))
@@ -263,6 +279,12 @@ async def login(
 
     if wants_cookie_auth(request):
         issue_browser_session(response, request, refresh_token, expire_days)
+        issue_device_cookie(
+            response,
+            request,
+            throttle.account_key,
+            account_binding(user.id, user.key_epoch),
+        )
         return TokenResponse(
             access_token=token,
             refresh_token=None,
@@ -273,6 +295,71 @@ async def login(
         refresh_token=refresh_token,
         expires_in=expire_minutes * 60,
     )
+
+
+def _trust_refusal(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status_code, detail={"code": code, "message": message}
+    )
+
+
+@router.post(
+    "/login/device-trust",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+@limiter.limit("10/minute")
+async def trust_login_device(
+    request: Request,
+    token: str = Query(default="", max_length=128),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Remember this browser for one account, from a link minted on the host.
+
+    The link is single use, and grants only what a past sign-in would: this
+    browser may try a password while the account refuses unknown clients.
+    The SPA's own page posts here, so the request is same-site and, under
+    the device cookies' path, carries them for the cap check. The deletion
+    commits last, so any refusal or failure leaves the link usable.
+    """
+    # The cookie-mode header proves the app's own script sent this: a
+    # cross-site form can't set it, and would arrive without the device
+    # cookies the cap check needs.
+    if not wants_cookie_auth(request):
+        raise _trust_refusal(
+            status.HTTP_400_BAD_REQUEST,
+            "device_trust_unavailable",
+            "Open the link in the browser to remember.",
+        )
+    try:
+        api_url = await get_public_api_url(db, request=request, for_external_use=True)
+    except PublicUrlNotConfiguredError:
+        api_url = None
+    if api_url is not None and not api_path_is_cookie_scoped(request, api_url):
+        raise _trust_refusal(
+            status.HTTP_409_CONFLICT,
+            "device_trust_unavailable",
+            "This deployment's API address can't hold a remembered browser.",
+        )
+    redeemed = await redeem_trust_token(db, token)
+    if redeemed is None:
+        await db.commit()
+        raise _trust_refusal(
+            status.HTTP_404_NOT_FOUND,
+            "device_trust_link_invalid",
+            "This link is invalid, expired or already used.",
+        )
+    if not device_cookie_fits(request, redeemed[0]):
+        await db.rollback()
+        raise _trust_refusal(
+            status.HTTP_409_CONFLICT,
+            "device_trust_browser_full",
+            "This browser already remembers as many accounts as it can.",
+        )
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    issue_device_cookie(response, request, *redeemed)
+    await db.commit()
+    return response
 
 
 # Every page load in the SPA spends one refresh, so many users behind one

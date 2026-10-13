@@ -157,6 +157,7 @@ const CURRENT_AUDIT_ACTIONS = [
   'user.export',
   'user.login.failure',
   'user.login.success',
+  'user.login.throttled',
   'user.logout',
   'user.password_reset',
   'user.register',

@@ -11,6 +11,26 @@ describe('API error localization boundary', () => {
     });
   });
 
+  it('maps the trust-link refusals to their own keys', () => {
+    expect(classifyApiError({ code: 'device_trust_link_invalid', message: 'x' }, 404)).toEqual({
+      key: 'errors.deviceTrustLinkInvalid',
+    });
+    expect(classifyApiError({ code: 'device_trust_browser_full', message: 'x' }, 409)).toEqual({
+      key: 'errors.deviceTrustBrowserFull',
+    });
+    expect(classifyApiError({ code: 'device_trust_unavailable', message: 'x' }, 409)).toEqual({
+      key: 'errors.deviceTrustUnavailable',
+    });
+  });
+
+  it('names the way back in when sign-in is throttled for an account', () => {
+    const detail = { code: 'login_throttled', message: 'Too many failed sign-ins' };
+    expect(classifyApiError(detail, 429)).toEqual({ key: 'errors.loginThrottled' });
+    expect(translateApiErrorDetail(detail, 429)).toBe(
+      "Too many failed sign-ins for this account. Use a browser you've signed in with before, or sign in with SSO.",
+    );
+  });
+
   // fix(#1746): the ArcGIS-worded auth-required refusal (ArcGISTokenError
   // path) previously fell through to the generic 403 "Access denied" because
   // only the WFS/OGC wording of the same refusal was mapped.

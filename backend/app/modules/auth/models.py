@@ -316,3 +316,72 @@ class EmailVerificationToken(Base):
     )
 
     user: Mapped["User"] = relationship("User", lazy="selectin")
+
+
+class LoginAttempt(Base):
+    """One password sign-in attempt counted against an account's throttle.
+
+    ``device_key`` is set when the attempt came from a remembered browser and
+    names that browser's own budget; NULL is the budget every other client
+    shares. Outside the tenant RLS boundary, like ``arcgis_signin_attempts``:
+    ``account_key`` is a keyed digest over the tenant and the lowercased
+    username, so tenants never share a bucket, and a row holds no username,
+    user id, tenant id or nonce for a policy to protect. The throttle runs
+    before any user lookup, so it must not depend on one.
+    """
+
+    __tablename__ = "login_attempts"
+    __table_args__ = (
+        # Serves both budgets' windowed counts.
+        Index(
+            "ix_catalog_login_attempts_bucket_time",
+            "account_key",
+            "device_key",
+            "attempted_at",
+        ),
+        Index("ix_catalog_login_attempts_attempted_at", "attempted_at"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set when the password was wrong; an unsettled row counts only briefly.
+    failed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # The attempt that filled its bucket, so a window is audited once.
+    tripped: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LoginTrustToken(Base):
+    """A single-use link that remembers one browser for one account.
+
+    Stores the token's sha256 digest, never the token. Outside the RLS
+    boundary like :class:`LoginAttempt`: it is redeemed before any tenant
+    check could apply, and the token itself is the capability.
+    """
+
+    __tablename__ = "login_trust_tokens"
+    __table_args__ = (
+        Index("ix_catalog_login_trust_tokens_expires_at", "expires_at"),
+        Index("ix_login_trust_tokens_user_id", "user_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    account_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog.users.id", ondelete="CASCADE"), nullable=False
+    )
+    # The user id and key_epoch at minting; a credential reset voids the link.
+    binding: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
