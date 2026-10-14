@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { LayerLegend } from '../LayerLegend';
+import { MAP_COLORS } from '@/lib/map-colors';
 import type { DrawnLayer } from '@/components/map/legend-facts';
 import { SAVED_LAYERS, toSharedLayer } from '@/test/fixtures/saved-layers';
 import type { MapLayerResponse, MapTerrainConfig, SharedLayerResponse } from '@/types/api';
@@ -141,6 +142,31 @@ describe('LayerLegend notes under an entry', () => {
     expect(entry('Bike racks').getByText('Bounded cluster')).toBeInTheDocument();
     expect(entry('Street trees').getByText('Server cluster')).toBeInTheDocument();
     expect(entry('Survey points').getByText('Point fallback')).toBeInTheDocument();
+  });
+
+  it('explains the cluster circle colours with their point counts', () => {
+    renderLegend(clusters);
+
+    const trees = entry('Street trees');
+    expect(trees.getByText('Points per cluster')).toBeInTheDocument();
+    expect(trees.getByText('< 100')).toBeInTheDocument();
+    expect(trees.getByText('\u2265 100')).toBeInTheDocument();
+    expect(entry('Bike racks').queryByText('Points per cluster')).not.toBeInTheDocument();
+    expect(entry('Survey points').queryByText('Points per cluster')).not.toBeInTheDocument();
+  });
+
+  it('draws the cluster swatches with the cluster circle stroke', () => {
+    renderLegend([SAVED_LAYERS.serverCluster]);
+
+    const circle = entry('Street trees').getByText('< 100').closest('li')!.querySelector('circle');
+    expect(circle).toHaveAttribute('fill', '#bbf7d0');
+    expect(circle).toHaveAttribute('stroke', MAP_COLORS.cluster.stroke);
+  });
+
+  it('drops the cluster counts when the map drew single points', () => {
+    renderLegend(clusters, new Map([[SAVED_LAYERS.serverCluster.id, { drawsAs: 'circle' }]]));
+
+    expect(entry('Street trees').queryByText('Points per cluster')).not.toBeInTheDocument();
   });
 
   it('names a bounded cluster the map drew as single points a point fallback', () => {

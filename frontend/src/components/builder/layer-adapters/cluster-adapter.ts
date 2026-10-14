@@ -67,13 +67,12 @@ function numericBuilderValue(value: unknown, fallback: number, min: number, max:
     : fallback;
 }
 
-// #347 (BLDR-02): build the cluster circle-color value. With a 2+ stop ramp (sorted
-// ascending by point_count) emit a MapLibre `step` expression — parity with the
-// MapLibre "create and style clusters" example. Otherwise fall back to the flat
-// color so existing single-color clusters are unchanged. Step inputs must be
-// strictly ascending and > 0, so duplicate/out-of-order thresholds are dropped.
-export function clusterColorValue(ramp: unknown, flatColor: string): unknown {
-  if (!Array.isArray(ramp)) return flatColor;
+// #347 (BLDR-02): the cluster circle-color ramp as MapLibre reads it. With a 2+ stop ramp
+// (sorted ascending by point_count) the lowest stop is the base color and each later stop
+// starts at its count. Step inputs must be strictly ascending and > 0, so duplicate or
+// out-of-order thresholds are dropped. Null when fewer than two usable stops remain.
+export function clusterColorSteps(ramp: unknown): { colors: string[]; breaks: number[] } | null {
+  if (!Array.isArray(ramp)) return null;
   const stops = ramp
     .filter(
       (s): s is { count: number; color: string } =>
@@ -83,17 +82,29 @@ export function clusterColorValue(ramp: unknown, flatColor: string): unknown {
         typeof s.color === 'string',
     )
     .sort((a, b) => a.count - b.count);
-  if (stops.length < 2) return flatColor;
-  const expr: unknown[] = ['step', ['get', 'point_count'], stops[0].color];
+  if (stops.length < 2) return null;
+  const colors = [stops[0].color];
+  const breaks: number[] = [];
   let lastCount = 0;
   for (let i = 1; i < stops.length; i++) {
     const count = stops[i].count;
-    if (count <= lastCount) continue; // step inputs must be strictly ascending & > 0
-    expr.push(count, stops[i].color);
+    if (count <= lastCount) continue;
+    colors.push(stops[i].color);
+    breaks.push(count);
     lastCount = count;
   }
-  // need a base plus at least one threshold (length > 3) to be a valid ramp
-  return expr.length > 3 ? expr : flatColor;
+  return breaks.length > 0 ? { colors, breaks } : null;
+}
+
+// Build the cluster circle-color value: a MapLibre `step` expression on point_count (parity
+// with the MapLibre "create and style clusters" example), or the flat color when the ramp
+// has no usable steps, so existing single-color clusters are unchanged.
+export function clusterColorValue(ramp: unknown, flatColor: string): unknown {
+  const steps = clusterColorSteps(ramp);
+  if (!steps) return flatColor;
+  const expr: unknown[] = ['step', ['get', 'point_count'], steps.colors[0]];
+  steps.breaks.forEach((count, i) => expr.push(count, steps.colors[i + 1]));
+  return expr;
 }
 
 export function getClusterSourceOptions(input: AdapterLayerInput) {
@@ -128,6 +139,8 @@ function unclusteredPointPaint(input: AdapterLayerInput) {
 // cluster-count paint are built ONCE here and consumed by both the add-time and
 // sync-time paths, so the step bucket thresholds (100/750) and stroke/text styling
 // can no longer drift between first render and a subsequent sync.
+export const CLUSTER_STROKE_WIDTH = 1.5;
+
 function clusterCirclePaint(input: AdapterLayerInput): Record<string, unknown> {
   const { circleColor } = clusterStyle(input);
   const opacity = input.opacity ?? 1;
@@ -136,7 +149,7 @@ function clusterCirclePaint(input: AdapterLayerInput): Record<string, unknown> {
     'circle-radius': ['step', ['get', 'point_count'], 16, 100, 21, 750, 27],
     'circle-opacity': opacity,
     'circle-stroke-color': MAP_COLORS.cluster.stroke,
-    'circle-stroke-width': 1.5,
+    'circle-stroke-width': CLUSTER_STROKE_WIDTH,
     'circle-stroke-opacity': Math.min(opacity + 0.1, 1),
   };
 }
