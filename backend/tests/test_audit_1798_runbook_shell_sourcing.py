@@ -50,8 +50,14 @@ def test_runbook_uses_the_env_value_wrapper_for_postgres_settings() -> None:
     body = _read("RUNBOOK.md")
     assert "scripts/env-value.sh POSTGRES_USER" in body
     assert "scripts/env-value.sh POSTGRES_DB" in body
-    assert "scripts/env-value.sh GEOLENS_RUNTIME_DB_ROLE" in body
-    assert "scripts/env-value.sh GEOLENS_RUNTIME_DB_PASSWORD" in body
+
+
+def test_runbook_keeps_the_runtime_password_off_the_host_command_line() -> None:
+    body = _read("RUNBOOK.md")
+    # Expanding the password in the host shell puts it in `ps` output; the
+    # snippet must read it from the db container's own environment instead.
+    assert 'sh -c \'PGPASSWORD="$GEOLENS_RUNTIME_DB_PASSWORD"' in body
+    assert "env PGPASSWORD=" not in body
 
 
 def test_env_value_wrapper_script_exists_and_is_executable() -> None:
