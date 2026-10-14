@@ -90,7 +90,31 @@ env_value_into COMPOSE_FILE COMPOSE_FILE .env || true
 env_value_into CURRENT_VERSION GEOLENS_VERSION .env || true
 : "${CURRENT_VERSION:=}"
 
-if [ "$COMPOSE_FILE" != "docker-compose.prod.yml" ]; then
+# COMPOSE_FILE may list several files separated by ":" (prod file plus
+# overrides). Every entry has to exist, and `-f` flags for the hints below are
+# built from the whole list so a printed command never drops an override.
+shell_quote() {
+  case "$1" in
+    *[!A-Za-z0-9_./:@%+=,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+COMPOSE_FLAGS=""
+COMPOSE_IS_PREBUILT=0
+_cf_ifs=$IFS
+IFS=:
+set -f
+for _cf_entry in $COMPOSE_FILE; do
+  [ -n "$_cf_entry" ] || continue
+  [ -f "$_cf_entry" ] || fail "COMPOSE_FILE lists $_cf_entry, which does not exist in $PROJECT_ROOT."
+  COMPOSE_FLAGS="$COMPOSE_FLAGS -f $(shell_quote "$_cf_entry")"
+  # Any spelling of the prod file (./, absolute, a/../) counts.
+  [ "$(compose_clean_path "$_cf_entry")" != "$PROJECT_ROOT/docker-compose.prod.yml" ] || COMPOSE_IS_PREBUILT=1
+done
+set +f
+IFS=$_cf_ifs
+COMPOSE_FLAGS=${COMPOSE_FLAGS# }
+if [ "$COMPOSE_IS_PREBUILT" != "1" ]; then
   say "This install builds images from source (COMPOSE_FILE=$COMPOSE_FILE)."
   say ""
   say "scripts/upgrade.sh upgrades PREBUILT-IMAGE installs only. To upgrade a"
@@ -111,6 +135,22 @@ if [ "$COMPOSE_FILE" != "docker-compose.prod.yml" ]; then
   say "Take the backup with api + worker already stopped (see UPGRADING.md)."
   say "No changes were made."
   exit 0
+fi
+
+# The prod file does not reset a build definition or a source bind mount merged
+# in from another file. `pull --ignore-buildable` would skip a buildable image,
+# and a mounted ./backend/app or ./backend/alembic hides the target image's code,
+# so the old checkout would run. The db service builds locally by design.
+_rendered="$(compose config 2>/dev/null)" || _rendered=""
+_buildable="$(printf '%s\n' "$_rendered" | awk '
+  /^services:/ { in_services = 1; next }
+  /^[^ ]/ { in_services = 0 }
+  in_services && /^  [A-Za-z0-9_-]+:/ { service = $1; sub(":", "", service) }
+  in_services && /^    build:/ && service != "db" { print service }
+  in_services && /^ +source: .*\/backend\/(app|alembic)\/?$/ { print service }
+')"
+if [ -n "$_buildable" ]; then
+  fail "COMPOSE_FILE makes $(printf '%s' "$_buildable" | sort -u | tr '\n' ' ')build or run from the checkout. This script upgrades prebuilt-image installs only."
 fi
 
 export GEOLENS_VERSION="${CURRENT_VERSION:-latest}"
@@ -583,7 +623,7 @@ previous_app_settled() {
 report_restore() {
   if ! restore_previous_app; then
     warn "Could not start api + worker on GeoLens ${PREVIOUS_VERSION} — this instance is DOWN."
-    warn "  docker compose -f $COMPOSE_FILE logs api"
+    warn "  docker compose $COMPOSE_FLAGS logs api"
     return 0
   fi
   if previous_app_settled; then
@@ -594,7 +634,7 @@ report_restore() {
   warn "If the migration got far enough to commit a revision, the previous release"
   warn "cannot start against it: its own boot-time 'alembic upgrade heads' does not"
   warn "know that revision. Check with:"
-  warn "  docker compose -f $COMPOSE_FILE logs api"
+  warn "  docker compose $COMPOSE_FLAGS logs api"
   warn "If that is what happened, going back means restoring the pre-upgrade dump"
   warn "(step 2 below), not restarting containers."
 }
@@ -653,7 +693,7 @@ print_rollback() {
   say "2. Restore the pre-upgrade database dump:"
   say "     scripts/restore.sh \"$BACKUP_FILE\""
   say "3. Bring the previous version back up:"
-  say "     docker compose -f $COMPOSE_FILE up -d"
+  say "     docker compose $COMPOSE_FLAGS up -d"
   say ""
   say "Note: 'alembic downgrade' is NOT a supported rollback — restore the dump."
   say "======================================================================="

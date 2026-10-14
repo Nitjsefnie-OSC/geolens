@@ -61,6 +61,7 @@ make_stubs() {
   _migrate_mode="$1"
   CALLLOG="$WORK/calls.log"
   : > "$CALLLOG"
+  : > "$CALLLOG.files"
   GITLOG="$WORK/git.log"
   : > "$GITLOG"
 
@@ -84,7 +85,10 @@ if [ "$1" = "compose" ]; then
   # emits `--project-directory VALUE` (see scripts/lib/common.sh) -- skip
   # any number of "-f VALUE" / "--project-directory VALUE" pairs, in
   # whichever order compose() sends them, before checking the subcommand.
-  while [ "$1" = "-f" ] || [ "$1" = "--project-directory" ]; do shift 2; done
+  while [ "$1" = "-f" ] || [ "$1" = "--project-directory" ]; do
+    [ "$1" = "-f" ] && printf '%s\n' "$2" >> "$LOG.files"
+    shift 2
+  done
   case "$1" in
     version) exit 0 ;;
     stop)    echo "stop_app" >> "$LOG"; [ "$STOP_MODE" = "fail" ] && exit 1; exit 0 ;;
@@ -192,6 +196,9 @@ if [ "$1" = "compose" ]; then
       case "$*" in
         *--images*db*)
           [ -n "${DOCKER_DB_IMAGE_TAG:-}" ] && printf '%s\n' "${DOCKER_DB_IMAGE_TAG}"
+          ;;
+        *)
+          [ -n "${DOCKER_CONFIG_OUT:-}" ] && printf '%b' "${DOCKER_CONFIG_OUT}"
           ;;
       esac
       exit 0 ;;
@@ -407,6 +414,7 @@ run_upgrade() {  # $1=migrate mode, rest=args to upgrade.sh
       GIT_DOCKERFILE_SYNC_TEST="${DOCKERFILE_SYNC_TEST:-}" \
       DOCKER_DB_RECREATE_MODE="${DB_RECREATE_MODE:-ok}" \
       DOCKER_DB_IMAGE_TAG="${DB_IMAGE_TAG:-}" \
+      DOCKER_CONFIG_OUT="${CONFIG_OUT:-}" \
       DOCKER_DB_PS_FAIL="${DB_PS_FAIL:-0}" \
       DOCKER_DB_RUNNING_IMAGE_ID="${DB_RUNNING_IMAGE_ID:-}" \
       DOCKER_DB_BUILT_IMAGE_ID="${DB_BUILT_IMAGE_ID:-}" \
@@ -965,6 +973,114 @@ if [ ! -s "$WORK/calls.log" ]; then
   ok "source-build install makes NO compose/backup calls (safe no-op)"
 else
   bad "source-build install touched the stack: $(tr '\n' ',' < "$WORK/calls.log")"
+fi
+
+# ============================================================================
+# CASE 3b — a COMPOSE_FILE list (prod file + override) is a prebuilt install;
+# every compose call keeps the override.
+# ============================================================================
+seed_prod_env
+printf 'COMPOSE_FILE=docker-compose.prod.yml:override.yml:%s/abs-override.yml\nGEOLENS_VERSION=1.2.3\nPOSTGRES_USER=geolens\nPOSTGRES_DB=geolens\n' "$FAKE" > "$FAKE/.env"
+printf 'services: {}\n' > "$FAKE/override.yml"
+printf 'services: {}\n' > "$FAKE/abs-override.yml"
+run_upgrade ok 1.2.4
+if [ "$(cat "$WORK/code.txt")" = "0" ] && [ -n "$(pos_of migrate_up)" ]; then
+  ok "a COMPOSE_FILE list with the prod file upgrades like a plain prod install"
+else
+  bad "a COMPOSE_FILE list was refused (exit=$(cat "$WORK/code.txt"))"
+  sed 's/^/    # /' "$WORK/out.txt"
+fi
+if grep -q "^$FAKE/override.yml\$" "$CALLLOG.files" \
+   && grep -q "^$FAKE/docker-compose.prod.yml\$" "$CALLLOG.files" \
+   && grep -q "^$FAKE/abs-override.yml\$" "$CALLLOG.files"; then
+  ok "compose is invoked with every file in the list"
+else
+  bad "compose calls dropped the override: $(sort -u "$CALLLOG.files" | tr '\n' ',')"
+fi
+
+# Equivalent spellings of the prod file still classify as a prebuilt install.
+FAKE_ABS="$(cd "$FAKE" && pwd)"
+mkdir -p "$FAKE/overrides"
+for spelling in "./docker-compose.prod.yml" "$FAKE_ABS/docker-compose.prod.yml" "overrides/../docker-compose.prod.yml"; do
+  seed_prod_env
+  printf 'COMPOSE_FILE=%s\nGEOLENS_VERSION=1.2.3\nPOSTGRES_USER=geolens\nPOSTGRES_DB=geolens\n' "$spelling" > "$FAKE/.env"
+  run_upgrade ok 1.2.4
+  if [ "$(cat "$WORK/code.txt")" = "0" ] && [ -n "$(pos_of migrate_up)" ]; then
+    ok "COMPOSE_FILE=$spelling is upgraded as a prebuilt install"
+  else
+    bad "COMPOSE_FILE=$spelling was not treated as the prod file (exit=$(cat "$WORK/code.txt"))"
+  fi
+done
+
+# An override that gives an app service a build definition is neither install
+# type: the later pull skips buildable images and the checkout would run.
+seed_prod_env
+printf 'COMPOSE_FILE=docker-compose.prod.yml:override.yml\nGEOLENS_VERSION=1.2.3\n' > "$FAKE/.env"
+printf 'services: {}\n' > "$FAKE/override.yml"
+CONFIG_OUT='services:\n  db:\n    build:\n      context: db\n  api:\n    build:\n      context: backend\n'
+run_upgrade ok 1.2.4
+CONFIG_OUT=
+if [ "$(cat "$WORK/code.txt")" != "0" ] && grep -q 'build or run from the checkout' "$WORK/out.txt" \
+   && [ -z "$(pos_of backup)" ]; then
+  ok "a COMPOSE_FILE list that makes api buildable is refused before any backup"
+else
+  bad "a buildable api was not refused (exit=$(cat "$WORK/code.txt"))"
+fi
+CONFIG_OUT='services:\n  db:\n    build:\n      context: db\n'
+run_upgrade ok 1.2.4
+CONFIG_OUT=
+if [ "$(cat "$WORK/code.txt")" = "0" ]; then
+  ok "the db service's own build definition does not block an upgrade"
+else
+  bad "a buildable db blocked the upgrade (exit=$(cat "$WORK/code.txt"))"
+fi
+
+CONFIG_OUT='services:\n  api:\n    volumes:\n      - type: bind\n        source: /srv/geolens/backend/app\n        target: /app/app\n'
+run_upgrade ok 1.2.4
+CONFIG_OUT=
+if [ "$(cat "$WORK/code.txt")" != "0" ] && grep -q 'run from the checkout' "$WORK/out.txt" \
+   && [ -z "$(pos_of backup)" ]; then
+  ok "a source bind mount over the app code is refused before any backup"
+else
+  bad "a backend/app bind mount was not refused (exit=$(cat "$WORK/code.txt"))"
+fi
+
+# A glob character in an entry is literal, not a pattern.
+seed_prod_env
+printf 'services: {}\n' > "$FAKE/over[1].yml"
+printf 'services: {}\n' > "$FAKE/over1.yml"
+printf 'COMPOSE_FILE=docker-compose.prod.yml:over[1].yml\nGEOLENS_VERSION=1.2.3\n' > "$FAKE/.env"
+run_upgrade ok 1.2.4
+if [ "$(cat "$WORK/code.txt")" = "0" ] && grep -qF "$FAKE/over[1].yml" "$CALLLOG.files" \
+   && ! grep -qF "$FAKE/over1.yml" "$CALLLOG.files"; then
+  ok "a glob character in a COMPOSE_FILE entry is taken literally"
+else
+  bad "a glob in a COMPOSE_FILE entry was expanded: $(sort -u "$CALLLOG.files" | tr '\n' ',')"
+fi
+rm -f "$FAKE/over[1].yml" "$FAKE/over1.yml"
+
+# Entries with spaces stay copy-pasteable in the recovery hints.
+mkdir -p "$FAKE/my overrides"
+printf 'services: {}\n' > "$FAKE/my overrides/o.yml"
+seed_prod_env
+printf 'COMPOSE_FILE=docker-compose.prod.yml:my overrides/o.yml\nGEOLENS_VERSION=1.2.3\n' > "$FAKE/.env"
+STOP_MODE=ok MIGRATE_FAIL_ON_PURPOSE=1 run_upgrade fail 1.2.4
+if grep -q "docker compose -f docker-compose.prod.yml -f 'my overrides/o.yml' up -d" "$WORK/out.txt"; then
+  ok "recovery commands quote compose paths that contain spaces"
+else
+  bad "recovery commands did not quote a path with a space"
+  sed 's/^/    # /' "$WORK/out.txt" | tail -15
+fi
+rm -rf "$FAKE/my overrides"
+
+rm -f "$FAKE/override.yml" "$FAKE/abs-override.yml"
+seed_prod_env
+printf 'COMPOSE_FILE=docker-compose.prod.yml:override.yml\nGEOLENS_VERSION=1.2.3\n' > "$FAKE/.env"
+run_upgrade ok 1.2.4
+if [ "$(cat "$WORK/code.txt")" != "0" ] && grep -q 'override.yml' "$WORK/out.txt" && [ -z "$(pos_of backup)" ]; then
+  ok "a COMPOSE_FILE entry that does not exist is refused before any backup"
+else
+  bad "a missing override file was not refused (exit=$(cat "$WORK/code.txt"))"
 fi
 
 # ============================================================================

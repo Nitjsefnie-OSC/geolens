@@ -61,9 +61,44 @@
 # derive its own caller's project root the same way for every shell that
 # sources it) and this codebase already relies on that convention for
 # `.env` lookups elsewhere.
+# A COMPOSE_FILE entry as an absolute path with "." and ".." resolved
+# lexically, the way Compose records it in container labels.
+compose_clean_path() {
+  case "$1" in
+    /*) _ccp_path=$1 ;;
+    *) _ccp_path=$PROJECT_ROOT/$1 ;;
+  esac
+  _ccp_dir="$(cd "$(dirname "$_ccp_path")" 2>/dev/null && pwd)" || {
+    printf '%s' "$_ccp_path"
+    return 0
+  }
+  printf '%s/%s' "${_ccp_dir%/}" "$(basename "$_ccp_path")"
+}
+
 compose() {
   [ -n "${PROJECT_ROOT:-}" ] || fail "compose(): PROJECT_ROOT must be set by the caller before sourcing common.sh"
-  docker compose -f "$PROJECT_ROOT/$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" "$@"
+  # COMPOSE_FILE is a list, as Compose itself reads it: each entry becomes its
+  # own -f, so overrides stay in effect.
+  _cf_argc=$#
+  _cf_ifs=$IFS
+  IFS=:
+  set -f
+  for _cf_entry in $COMPOSE_FILE; do
+    case "$_cf_entry" in
+      "") ;;
+      /*) set -- "$@" -f "$_cf_entry" ;;
+      *) set -- "$@" -f "$PROJECT_ROOT/$_cf_entry" ;;
+    esac
+  done
+  set +f
+  IFS=$_cf_ifs
+  set -- "$@" --project-directory "$PROJECT_ROOT"
+  while [ "$_cf_argc" -gt 0 ]; do
+    set -- "$@" "$1"
+    shift
+    _cf_argc=$((_cf_argc - 1))
+  done
+  docker compose "$@"
 }
 
 say() {
