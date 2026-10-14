@@ -249,13 +249,22 @@ def _scrub_param(match: re.Match[str]) -> str:
     return f"{lead}{name}={value}"
 
 
+_HEADER_NAME = r"(?:proxy-)?authorization|cookie|set-cookie|(?:x[-_]?)?api[-_]?key"
+_HEADER_SEP = r"\s*[:=]\s*"
+_QUOTED = r"\"(?:[^\"\\\r\n]|\\.?)*(?:\"|(?=[\r\n])|$)|'(?:[^'\\\r\n]|\\.?)*(?:'|(?=[\r\n])|$)"
+# After ?, & # or ; the match is a URL parameter and ends at the next
+# delimiter. An authorization value may hold spaces, commas and quoted parts
+# ("Digest u=x, r=y"); a cookie value holds spaces, semicolons and quoted parts.
 _HEADER = re.compile(
-    r"\b((?:proxy-)?authorization|cookie|set-cookie|(?:x[-_]?)?api[-_]?key|x-esri-authorization)"
-    r"(\s*[:=]\s*)[^\r\n]+",
+    rf"(?<=[?&#;])(?P<aname>(?:x-esri-|proxy-)?authorization)(?P<asep>{_HEADER_SEP})(?:{_QUOTED}|[^&#;\r\n\"'])*"
+    rf"|(?<=[?&#;])(?P<cname>(?:set-)?cookie)(?P<csep>{_HEADER_SEP})(?:{_QUOTED}|[^&#\r\n\"'])*"
+    rf"|(?<=[?&#;])(?P<uname>{_HEADER_NAME})(?P<usep>{_HEADER_SEP})[^&#;\s]*"
+    rf"|\b(?P<name>x-esri-authorization|{_HEADER_NAME})(?P<sep>{_HEADER_SEP})[^\r\n]+",
     re.IGNORECASE,
 )
 _SCHEME_CREDENTIAL = re.compile(
-    r"\b(Bearer|Basic|Token|Digest)(\s+)([A-Za-z0-9._~+/=-]{12,})", re.IGNORECASE
+    r"((?:[=:]\s*)?)\b(Bearer|Basic|Token|Digest)(\s+)([A-Za-z0-9._~+/=-]{12,}[^\s<>\"'`{}|()\[\],;&?#]*)",
+    re.IGNORECASE,
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
 _PEM = re.compile(
@@ -268,8 +277,21 @@ _MAX_EMBEDDED_DEPTH = 3
 
 
 def _scrub_scheme(match: re.Match[str]) -> str:
-    scheme, space, _ = match.groups()
-    return f"{scheme}{space}[REDACTED]"
+    assigned, scheme, space, value = match.groups()
+    # Bearer is rarely prose; the other schemes also open ordinary sentences
+    # ("Basic configuration options"), so a lowercase word after them is left
+    # alone, except as the value of an assignment, whose name may be encoded.
+    if scheme.lower() != "bearer" and not assigned and re.fullmatch(r"[a-z]+", value):
+        return match.group(0)
+    return f"{assigned}{scheme}{space}[REDACTED]"
+
+
+def _scrub_header(match: re.Match[str]) -> str:
+    groups = match.groupdict()
+    for key in ("a", "c", "u", ""):
+        if groups[f"{key}name"] is not None:
+            return f"{groups[f'{key}name']}{groups[f'{key}sep']}[REDACTED]"
+    raise AssertionError("unreachable")
 
 
 def _scrub_pair(match: re.Match[str]) -> str:
@@ -297,7 +319,7 @@ def _scrub_text(text: str, redact: Redactor, depth: int = 0) -> str:
             return json.dumps(_redact_json(embedded, redact, depth + 1))
     text = redact(text)
     text = _PEM.sub("[REDACTED]", text)
-    text = _HEADER.sub(r"\1\2[REDACTED]", text)
+    text = _HEADER.sub(_scrub_header, text)
     text = _SCHEME_CREDENTIAL.sub(_scrub_scheme, text)
     text = _JWT.sub("[REDACTED]", text)
     text = _AWS_KEY_ID.sub("[REDACTED]", text)

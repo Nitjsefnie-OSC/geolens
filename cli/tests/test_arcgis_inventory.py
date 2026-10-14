@@ -2746,6 +2746,50 @@ def _nested(value):
         ('prefix {"clientSecret": "abc123KEY"} suffix', "abc123KEY"),
         ('{"nested": "{\\"apiKey\\": \\"abc123KEY\\"}"}', "abc123KEY"),
         ("a=1&secret=abc123KEY", "abc123KEY"),
+        ("https://s.example/q?token=abc123KEY&f=json", "abc123KEY"),
+        ("https://s.example/q?api-key=abc123KEY&layer=2", "abc123KEY"),
+        ("https://s.example/q?api-key=abc123KEY#frag", "abc123KEY"),
+        ("https://s.example/q?authorization=Bearer%20abc123KEY&m=1", "abc123KEY"),
+        ("https://s.example/q?authorization=Bearer abc123KEY&m=1", "abc123KEY"),
+        (
+            "https://s.example/q?authorization=Negotiate abc123KEYabc&m=1",
+            "abc123KEYabc",
+        ),
+        (
+            "https://s.example/q?api-key=firstKEY123&cookie=sessionSECRET456",
+            "sessionSECRET456",
+        ),
+        (
+            'https://s.example/q?authorization=Digest u="x", response="deadbeefSECRET123"&m=1',
+            "deadbeefSECRET123",
+        ),
+        ("Token Abcdefghijkl", "Abcdefghijkl"),
+        ("Token abcdefghijkl!secret", "secret"),
+        ("https://s.example/q?" + "api-key=Kx9&" * 3000, "Kx9"),
+        ("https://s.example/q?cookie=sid=abc123KEY;theme=dark", "theme=dark"),
+        (
+            'https://s.example/q?authorization=Digest uri="/d;p=x", response="deadbeefSECRET123"&m=1',
+            "deadbeefSECRET123",
+        ),
+        (
+            "https://s.example/q?cookie=sid=abc123KEY; session=sessionSECRET456&f=json",
+            "sessionSECRET456",
+        ),
+        (
+            'https://s.example/q?authorization=Digest uri="/d?x=1&y=2", response="deadbeefSECRET123"&m=1',
+            "deadbeefSECRET123",
+        ),
+        (
+            'https://s.example/q?authorization=Digest uri="/d?x=\\"a&b\\"", response="deadbeefSECRET123"&m=1',
+            "deadbeefSECRET123",
+        ),
+        (
+            'https://s.example/q?cookie=sid="a&b"; session=sessionSECRET456&f=json',
+            "sessionSECRET456",
+        ),
+        ("https://s.example/q?author%69zation=Token abcdefghijkl&m=1", "abcdefghijkl"),
+        ("Authorization: Bearer abc.def", "abc.def"),
+        ("Authorization: Basic configuration", "configuration"),
     ],
 )
 def test_string_scrubber_masks_each_credential_shape(raw, gone):
@@ -2760,6 +2804,8 @@ def test_string_scrubber_masks_each_credential_shape(raw, gone):
         "Bearer tokens",
         "Bearer tokens are described elsewhere",
         "Token ring network",
+        "Basic configuration options",
+        "Token authentication required",
         "authorization of the county board",
         "eyJ is a prefix",
         "keywords=parcels&title=Roads",
@@ -2771,6 +2817,102 @@ def test_string_scrubber_keeps_ordinary_text(raw):
     cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
     kept = cleaned["a"]["b"]["c"]["note"]
     assert json.loads(kept) == json.loads(raw) if raw.startswith("{") else kept == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "https://s.example/q?api-key=abc123KEY&layer=2",
+            "https://s.example/q?api-key=[REDACTED]&layer=2",
+        ),
+        (
+            "https://s.example/q?authorization=Bearer%20abc123KEY&mode=edit",
+            "https://s.example/q?authorization=[REDACTED]&mode=edit",
+        ),
+        (
+            "https://s.example/q?api-key=abc123KEY;layer=2",
+            "https://s.example/q?api-key=[REDACTED];layer=2",
+        ),
+        (
+            "https://s.example/q?authorization=Bearer abc123KEY\nkeep=this",
+            "https://s.example/q?authorization=[REDACTED]\nkeep=this",
+        ),
+        (
+            "https://s.example/q?f=json;api-key=abc123KEY;layer=2",
+            "https://s.example/q?f=json;api-key=[REDACTED];layer=2",
+        ),
+        (
+            "https://s.example/q?authorization=Bearer abc123KEY;layer=2",
+            "https://s.example/q?authorization=[REDACTED];layer=2",
+        ),
+        (
+            "https://s.example/q?api-key=abc123KEY#frag",
+            "https://s.example/q?api-key=[REDACTED]#frag",
+        ),
+    ],
+)
+def test_url_header_parameter_masks_only_its_value(raw, expected):
+    cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert cleaned["a"]["b"]["c"]["note"] == expected
+
+
+def test_scheme_token_masking_stops_before_markup():
+    raw = "<p>Use Token abc123KEYabc</p><p>Next field</p>"
+    cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert cleaned["a"]["b"]["c"]["note"] == (
+        "<p>Use Token [REDACTED]</p><p>Next field</p>"
+    )
+
+
+def test_scheme_token_masking_stops_before_markdown_link_end():
+    raw = "[Token abc123KEYabc](https://example.com/docs)"
+    cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert (
+        cleaned["a"]["b"]["c"]["note"] == "[Token [REDACTED]](https://example.com/docs)"
+    )
+
+
+def test_scheme_token_masking_stops_at_a_comma():
+    cleaned = inventory.redact_json(
+        _nested("Token abc123KEYabc,field=value"), inventory.Redactor()
+    )
+    assert cleaned["a"]["b"]["c"]["note"] == "Token [REDACTED],field=value"
+
+
+@pytest.mark.parametrize(
+    "tail", ["&layer=2", "?mode=edit", "#frag", "` then", "} x", "|status=active"]
+)
+def test_scheme_token_masking_stops_at_url_separators(tail):
+    cleaned = inventory.redact_json(
+        _nested("Token abc123KEYabc" + tail), inventory.Redactor()
+    )
+    assert cleaned["a"]["b"]["c"]["note"] == "Token [REDACTED]" + tail
+
+
+@pytest.mark.parametrize("name", ["authorization", "cookie"])
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("end", ["", "\nkeep=this"])
+def test_unterminated_quote_ending_in_a_backslash_is_masked(name, quote, end):
+    raw = f"https://s.example/q?{name}=Digest {quote}AAAA1111\\{end}"
+    cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert "AAAA1111" not in json.dumps(cleaned)
+
+
+@pytest.mark.parametrize("name", ["authorization", "cookie"])
+def test_header_parameter_scan_is_linear_on_quote_runs(name):
+    raw = f"https://s.example/q?{name}=" + '\\"' * 30000 + "&x=1"
+    started = time.perf_counter()
+    inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert time.perf_counter() - started < 1
+
+
+def test_prose_with_many_scheme_words_scrubs_in_linear_time():
+    raw = "Basic configuration " * 10000
+    started = time.perf_counter()
+    cleaned = inventory.redact_json(_nested(raw), inventory.Redactor())
+    assert time.perf_counter() - started < 1
+    assert cleaned["a"]["b"]["c"]["note"] == raw
 
 
 def test_json_text_inside_a_string_keeps_its_structure():
