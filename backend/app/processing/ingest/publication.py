@@ -163,6 +163,21 @@ _DATASET_DELETED = Failure(
 )
 
 
+class WriteAccessRevoked(Exception):
+    """The account that started the attempt can no longer write its dataset."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The account that started this job can no longer modify this "
+            "dataset, so its data was not replaced."
+        )
+
+
+# Recorded on the job and its run without a notice: the account it would
+# go to has lost access to the dataset.
+_WRITE_ACCESS_REVOKED = Failure("write_access_revoked", notify=False, refused=True)
+
+
 class ReplacementStrategy(Protocol):
     """One kind of replacement's own steps; the seam decides their order."""
 
@@ -369,11 +384,12 @@ async def settle_replacement(
         failed = await _publish(strategy, attempt)
     except Exception as exc:  # broad: every failure before the commit is recorded once
         failed = True
-        failure = (
-            _DATASET_DELETED
-            if isinstance(exc, DatasetDeleted)
-            else strategy.classify(exc)
-        )
+        if isinstance(exc, DatasetDeleted):
+            failure = _DATASET_DELETED
+        elif isinstance(exc, WriteAccessRevoked):
+            failure = _WRITE_ACCESS_REVOKED
+        else:
+            failure = strategy.classify(exc)
         logger.exception("Ingest task failed", job_id=job_id, task=strategy.task)
         await _record_failure(strategy.task, attempt, exc, failure)
         if failure.refused:
@@ -522,6 +538,7 @@ async def _publish(strategy: ReplacementStrategy, attempt: _Attempt) -> bool:
 
         await strategy.install(session, dataset)
         await _take_catalog_rows(session, strategy, dataset)
+        await _require_submitter_can_write(session, dataset, job.created_by)
         published = await strategy.write(session, dataset)
         if published.tiles_changed:
             await bump_tile_cache_version_on(session, dataset)
@@ -559,6 +576,72 @@ async def _publish(strategy: ReplacementStrategy, attempt: _Attempt) -> bool:
             session, job_id=job_id, attempt_id=attempt_id, task=strategy.task
         )
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class _Role:
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Submitter:
+    """The job's submitter as an ``Identity``, read as committed now."""
+
+    id: uuid.UUID
+    username: str
+    email: str | None
+    is_active: bool
+    roles: tuple[_Role, ...]
+    created_at: datetime
+
+
+# In SQL, since processing may not import the auth models.
+_SUBMITTER = text(
+    "SELECT u.id, u.username, u.email, u.is_active, u.created_at, "
+    "ARRAY(SELECT r.name FROM catalog.user_roles ur "
+    "JOIN catalog.roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles "
+    "FROM catalog.users u WHERE u.id = :uid"
+)
+
+
+async def _require_submitter_can_write(
+    session: AsyncSession, dataset: Any, submitter_id: uuid.UUID | None
+) -> None:
+    """Raise ``WriteAccessRevoked`` unless the job's submitter may still write
+    the dataset, as committed now.
+
+    Call holding the catalog rows, which an ownership transfer also takes.
+    """
+    from fastapi import HTTPException
+
+    from app.platform.extensions import get_processing_port
+
+    row = None
+    if submitter_id is not None:
+        row = (await session.execute(_SUBMITTER, {"uid": submitter_id})).first()
+    if row is None or not row.is_active:
+        raise WriteAccessRevoked
+    submitter = _Submitter(
+        id=row.id,
+        username=row.username,
+        email=row.email,
+        is_active=row.is_active,
+        roles=tuple(_Role(name) for name in row.roles),
+        created_at=row.created_at,
+    )
+    await session.refresh(
+        dataset.record, attribute_names=["created_by", "visibility", "record_status"]
+    )
+    try:
+        await get_processing_port().check_dataset_write_access(
+            session,
+            dataset,
+            dataset.id,
+            submitter,
+            user_roles={role.name for role in submitter.roles},
+        )
+    except HTTPException:
+        raise WriteAccessRevoked from None
 
 
 async def _take_catalog_rows(
