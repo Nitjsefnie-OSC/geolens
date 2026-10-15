@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -47,32 +47,69 @@ logger = structlog.stdlib.get_logger(__name__)
 
 
 def get_anthropic_client() -> AsyncAnthropic:
-    """Return the cached Anthropic SDK client.
+    """Return the cached Claude SDK client for ``ANTHROPIC_PLATFORM``.
 
-    Cache lives on DefaultAnthropicProvider._client; used by streaming.py
-    and metadata_service.py directly (deferred-scope dispatch, not through
-    the provider Protocol). Surfaces the missing-key failure as a clear
-    ValueError rather than an opaque AuthenticationError, mirroring the
-    guard at DefaultAnthropicProvider.complete().
+    The one construction site for every Claude call: the tool loop, streamed
+    chat and structured output. Cache lives on DefaultAnthropicProvider._client.
+    Surfaces missing settings as a clear ValueError rather than an opaque
+    AuthenticationError on the first request.
     """
-    if not settings.anthropic_api_key:
-        raise ValueError("Anthropic API key not configured")
+    from app.core.ai_credentials import anthropic_unconfigured_reason
 
-    # Deferred imports:
-    #   - DefaultAnthropicProvider — avoids module-import cycle
-    #     (llm_loop -> defaults -> imports _LLM_TIMEOUT etc. from llm_loop)
-    #   - AsyncAnthropic — keeps the SDK out of module-import scope so
-    #     `processing/` carries zero top-level provider-SDK imports
-    from anthropic import AsyncAnthropic
+    if reason := anthropic_unconfigured_reason():
+        raise ValueError(reason)
+
+    # Deferred import: DefaultAnthropicProvider would be a module-import cycle
+    # (llm_loop -> defaults -> imports _LLM_TIMEOUT etc. from llm_loop).
     from app.platform.extensions.defaults import DefaultAnthropicProvider
 
     if DefaultAnthropicProvider._client is None:
-        DefaultAnthropicProvider._client = AsyncAnthropic(
-            api_key=reveal(settings.anthropic_api_key),
-            timeout=_LLM_TIMEOUT,
-            max_retries=2,
-        )
+        DefaultAnthropicProvider._client = _build_anthropic_client()
     return DefaultAnthropicProvider._client
+
+
+def _build_anthropic_client() -> AsyncAnthropic:
+    # SDK classes are imported here so `processing/` carries no top-level
+    # provider-SDK imports. The platform clients aren't all AsyncAnthropic
+    # subclasses, but they serve the same messages API.
+    import anthropic
+
+    from app.core.ai_credentials import bedrock_credentials
+
+    # No redirects: an endpoint that answers a Messages call with a 3xx could
+    # otherwise carry the credential header to another origin. Operators may
+    # point a gateway at a private host, so the SSRF-guarded client won't do.
+    common: dict[str, Any] = {
+        "timeout": _LLM_TIMEOUT,
+        "max_retries": 2,
+        "http_client": anthropic.DefaultAsyncHttpxClient(follow_redirects=False),
+    }
+    platform = settings.anthropic_platform
+    if platform == "foundry":
+        return anthropic.AsyncAnthropicFoundry(
+            api_key=reveal(settings.anthropic_foundry_api_key),
+            resource=settings.anthropic_foundry_resource,
+            **common,
+        )
+    if platform == "bedrock":
+        return anthropic.AsyncAnthropicBedrock(
+            aws_region=settings.anthropic_bedrock_aws_region,
+            **bedrock_credentials(),
+            **common,
+        )
+    if platform == "vertex":
+        return anthropic.AsyncAnthropicVertex(
+            region=settings.cloud_ml_region,
+            project_id=settings.anthropic_vertex_project_id,
+            **common,
+        )
+    # Explicit even when unset: Compose passes a blank ANTHROPIC_BASE_URL,
+    # which the SDK would otherwise read as the URL.
+    return anthropic.AsyncAnthropic(
+        api_key=reveal(settings.anthropic_api_key),
+        base_url=settings.anthropic_base_url or "https://api.anthropic.com",
+        **common,
+    )
 
 
 def get_openai_client(base_url: str) -> AsyncOpenAI:

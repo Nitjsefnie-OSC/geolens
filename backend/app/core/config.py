@@ -15,6 +15,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.auth_settings import AuthSettings
+from app.core.config_ai import ClaudeSettings
 
 
 def reveal(secret: SecretStr | None) -> str | None:
@@ -284,7 +285,7 @@ MIN_SIGNABLE_JOB_LIFETIME_SECONDS = 60
 MAX_PRESIGNED_URL_LIFETIME_SECONDS = 604800
 
 
-class Settings(AuthSettings, BaseSettings):
+class Settings(AuthSettings, ClaudeSettings, BaseSettings):
     postgres_user: str = "geolens"
     postgres_password: SecretStr
     postgres_host: str = "localhost"
@@ -410,9 +411,6 @@ class Settings(AuthSettings, BaseSettings):
     #                                boot guard (GUARD-01) fails loud without them.
     # An invalid value raises a Pydantic ValidationError at boot.
     geolens_tenancy_mode: Literal["single_tenant", "multi_tenant"] = "single_tenant"
-
-    anthropic_api_key: SecretStr | None = None
-    llm_model: str = "claude-sonnet-5"
 
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4o"
@@ -644,7 +642,6 @@ class Settings(AuthSettings, BaseSettings):
     notification_admin_email: str | None = None
 
     @field_validator(
-        "anthropic_api_key",
         "openai_api_key",
         "openai_model_light",
         "openai_base_url",
