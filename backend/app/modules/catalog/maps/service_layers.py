@@ -25,7 +25,7 @@ from app.modules.catalog.maps.service_shared import (
     get_dataset_meta,
     normalize_dem_style_config,
 )
-from app.modules.catalog.write_recheck import recheck_admitted_writer
+from app.modules.catalog.write_recheck import admit_writer, recheck_admitted_writer
 
 MAP_WRITE_DENIED = "Not authorized to modify this map"
 
@@ -101,7 +101,8 @@ _LAYER_LOCK_TIMEOUT = "2s"
 
 
 async def lock_map_layers(session: AsyncSession, map_id: uuid.UUID) -> None:
-    """Serialize the writers that change one map's layer count.
+    """Serialize the writers that change one map's layers or the tokens that
+    share it.
 
     Take it before reading the layers a write will count or reconcile, and hold
     it through the caller's commit: a writer that counted first would otherwise
@@ -109,7 +110,8 @@ async def lock_map_layers(session: AsyncSession, map_id: uuid.UUID) -> None:
     this lock is bounded; a wait that outlasts the bound answers 409. The lock
     leaves the map's key shareable, so a layer delete holding its rows can still
     insert the history event that references the map. Re-checks the writer
-    ``check_map_ownership`` admitted.
+    ``check_map_ownership`` admitted, so a write that leaves the map row itself
+    unchanged takes it before its first write too.
     """
     await session.execute(
         text("SELECT set_config('lock_timeout', :timeout, true)"),
@@ -129,6 +131,18 @@ async def lock_map_layers(session: AsyncSession, map_id: uuid.UUID) -> None:
         ) from exc
     await session.execute(text("RESET lock_timeout"))
     await recheck_map_ownership(session, map_id)
+
+
+async def lock_maps_for_admin_write(
+    session: AsyncSession, map_ids: Iterable[uuid.UUID], user: Identity
+) -> None:
+    """Take each map's row with ``lock_map_layers``, in map id order, for an
+    admin write to the tokens that share them, and re-check ``user`` under
+    each: still active, an admin or the map's owner, and still granted the
+    capabilities ``require_permission`` admitted the request under."""
+    for map_id in sorted(set(map_ids)):
+        admit_writer(session, ("map", map_id), user)
+        await lock_map_layers(session, map_id)
 
 
 async def recheck_map_ownership(session: AsyncSession, map_id: uuid.UUID) -> None:
@@ -249,13 +263,13 @@ async def remove_layer(
     session: AsyncSession,
     layer_id: uuid.UUID,
     *,
-    map_id: uuid.UUID | None = None,
+    map_id: uuid.UUID,
 ) -> bool:
     """Delete a map layer by ID. Returns True if deleted, False if not found."""
-    stmt = delete(MapLayer).where(MapLayer.id == layer_id)
-    if map_id is not None:
-        stmt = stmt.where(MapLayer.map_id == map_id)
-    result = await session.execute(stmt)
+    await lock_map_layers(session, map_id)
+    result = await session.execute(
+        delete(MapLayer).where(MapLayer.id == layer_id, MapLayer.map_id == map_id)
+    )
     # SQLAlchemy CursorResult exposes rowcount for DML; the async Result
     # type stub is less specific so mypy can't narrow it here.
     return result.rowcount > 0  # type: ignore[attr-defined]
@@ -276,6 +290,7 @@ async def remove_layers_bulk(
     if not layer_ids:
         return [], []
 
+    await lock_map_layers(session, map_id)
     existing_result = await session.execute(
         select(MapLayer.id).where(
             MapLayer.map_id == map_id,

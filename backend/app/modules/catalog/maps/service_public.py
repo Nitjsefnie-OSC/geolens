@@ -33,6 +33,10 @@ from app.modules.catalog.maps.sharing_policy import (
     resolve_share_expiration as _resolve_share_expiration,
 )
 from app.modules.catalog.maps.service_crud import get_map
+from app.modules.catalog.maps.service_layers import (
+    lock_map_layers,
+    lock_maps_for_admin_write,
+)
 from app.modules.catalog.maps.service_shared import (
     _apply_map_visibility_filter,
     _extract_dem_vertical_units,
@@ -189,18 +193,23 @@ async def create_share_token(
 ) -> MapShareToken:
     """Create a share token for a map. Reuses existing token if one exists. Does NOT commit."""
     resolved_expiration = _resolve_share_expiration(expires_at, expires_in_days)
-    visible_map_id = await session.scalar(select(Map.id).where(Map.id == map_id))
+    await lock_map_layers(session, map_id)
+    # Read under the lock: a change to private may have committed since the
+    # caller's own check.
+    visibility = await session.scalar(select(Map.visibility).where(Map.id == map_id))
     visible_creator_id = await session.scalar(
         select(User.id).where(User.id == created_by)
     )
-    if visible_map_id is None or visible_creator_id is None:
+    if visibility is None or visible_creator_id is None:
         raise ValueError("Map not found")
+    if visibility != "public":
+        raise ValueError("Map must be public before sharing")
 
     # Check for existing token
     existing = await session.execute(
         select(MapShareToken)
         .join(Map, MapShareToken.map_id == Map.id)
-        .where(MapShareToken.map_id == visible_map_id)
+        .where(MapShareToken.map_id == map_id)
     )
     token_obj = existing.scalar_one_or_none()
     if token_obj is not None:
@@ -221,7 +230,7 @@ async def create_share_token(
     # 32 bytes per SEC-10
     raw_token = secrets.token_urlsafe(32)
     token_obj = MapShareToken(
-        map_id=visible_map_id,
+        map_id=map_id,
         token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
         token_hint=raw_token[:8],
         created_by=visible_creator_id,
@@ -241,6 +250,7 @@ async def update_share_token(
 ) -> MapShareToken | None:
     """Update expiration on the active share token for a map. Returns None if no active token."""
     resolved_expiration = _resolve_share_expiration(expires_at, expires_in_days)
+    await lock_map_layers(session, map_id)
     result = await session.execute(
         select(MapShareToken)
         .join(Map, MapShareToken.map_id == Map.id)
@@ -777,8 +787,14 @@ async def list_share_tokens(
 async def revoke_share_token(
     session: AsyncSession,
     token_id: uuid.UUID,
+    *,
+    actor: Identity | None = None,
 ) -> MapShareToken | None:
-    """Soft-revoke a share token by setting is_active=False. Returns token if found, None otherwise."""
+    """Soft-revoke a share token by setting is_active=False. Returns token if found, None otherwise.
+
+    With ``actor``, an admin acting on someone else's map, the map's row is
+    taken first and ``actor`` re-checked under it, before the token changes.
+    """
     result = await session.execute(
         select(MapShareToken)
         .join(Map, MapShareToken.map_id == Map.id)
@@ -787,6 +803,8 @@ async def revoke_share_token(
     token_obj = result.scalar_one_or_none()
     if token_obj is None:
         return None
+    if actor is not None:
+        await lock_maps_for_admin_write(session, [token_obj.map_id], actor)
     token_obj.is_active = False
     return token_obj
 
@@ -873,7 +891,13 @@ async def revoke_share_token_by_map(
     session: AsyncSession,
     map_id: uuid.UUID,
 ) -> bool:
-    """Revoke all share tokens for a map. Returns True if any were revoked."""
+    """Revoke all share tokens for a map. Returns True if any were revoked.
+
+    Takes the map row lock first, so a caller that revokes the map's embed
+    tokens afterwards writes their cache denials only once the writer is
+    re-checked.
+    """
+    await lock_map_layers(session, map_id)
     result = await session.execute(
         select(MapShareToken)
         .join(Map, MapShareToken.map_id == Map.id)

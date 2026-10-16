@@ -7,7 +7,6 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import structlog
 from fastapi import HTTPException, Request
@@ -17,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm import joinedload
 
+from app.core.permissions import UPLOAD
 from app.core.async_io import (
     run_in_thread_draining,
     run_in_thread_draining_capture_cancel,
@@ -25,7 +25,7 @@ from app.core.config import settings
 from app.core.failure_reason import prefixed_failure_reason
 from app.core.geo import unknown_srid_refusal
 from app.core.db.tenant_session import defer_async_with_tenant
-from app.core.identity import Identity
+from app.core.identity import Identity, IdentitySnapshot
 from app.core.persistent_config import UPLOAD_MAX_SIZE_MB, get_allowed_extensions_list
 from app.platform.extensions import get_catalog_port, get_processing_port
 from app.platform.extensions.entitlement import enforce_limit
@@ -35,10 +35,17 @@ from app.platform.jobs.defer_guard import (
     settle_ingest_job_failed,
 )
 from app.platform.jobs.sweep import JOB_TIMEOUT_SECONDS
+from app.platform.catalog_locks import CatalogLockConflict
 from app.platform.refresh.service import DatasetBusyError, create_pending_run
 
 from app.platform.jobs import ledger
-from app.platform.jobs.models import MANIFEST_FINGERPRINT_METADATA_KEY, IngestJob
+from app.platform.jobs.models import (
+    ADMITTED_CAPABILITY_METADATA_KEY,
+    ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY,
+    ADMITTED_RAW_SOURCE_METADATA_KEY,
+    MANIFEST_FINGERPRINT_METADATA_KEY,
+    IngestJob,
+)
 from app.processing.ingest.manifest_reservation import (
     RESERVATION_LOST_MESSAGE,
     bind_reservation_to_staged_source,
@@ -50,6 +57,7 @@ from app.processing.ingest.manifest_reservation import (
     release_manifest_reservation,
     staged_source_is_referenced,
 )
+from app.processing.ingest.publication import WriteAccessRevoked
 from app.processing.ingest.manifest_schemas import (
     ManifestApplyEntryResult,
     ManifestApplyRequest,
@@ -82,13 +90,6 @@ MANIFEST_STAGE_MAX_SECONDS = JOB_TIMEOUT_SECONDS // 2
 MANIFEST_ADMIT_MAX_SECONDS = JOB_TIMEOUT_SECONDS // 4
 
 log = structlog.get_logger()
-
-
-@dataclass(frozen=True)
-class _ManifestCaller:
-    """Rollback-stable identity subset used by the per-entry apply loop."""
-
-    id: uuid.UUID
 
 
 @dataclass
@@ -656,15 +657,18 @@ async def _classify_dataset(
 async def _admit_refresh_run(
     db: AsyncSession, job: IngestJob, dataset_id: uuid.UUID, user: Identity
 ) -> None:
-    """Take the dataset's one active-run slot for this update.
+    """Take the dataset's one active-run slot for this update, then its
+    catalog rows, the order a re-upload commit takes them in.
 
-    Raises ``DatasetBusyError`` while another refresh or re-upload of the
-    dataset is active. ``trigger`` is ``api``, as the refresh endpoints record.
+    Raises ``DatasetBusyError`` while the dataset has another active run or
+    another writer holds its catalog rows past the lock budget, and
+    ``WriteAccessRevoked`` when the caller has lost the dataset, or is no
+    longer the admin a raw seed source needs. ``trigger`` is ``api``.
     """
-    Dataset = get_processing_port().get_dataset_orm_class()
-    dataset = (
-        await db.execute(select(Dataset.feature_count).where(Dataset.id == dataset_id))
-    ).one_or_none()
+    from app.modules.catalog.authorization import lock_dataset_rows_for_write
+
+    raw_source = bool((job.user_metadata or {}).get(ADMITTED_RAW_SOURCE_METADATA_KEY))
+    dataset = await get_processing_port().get_dataset(db, dataset_id)
     if dataset is None:
         raise ManifestSourceError(
             "The dataset this entry updates was deleted while its source was "
@@ -679,6 +683,16 @@ async def _admit_refresh_run(
         ingest_job_id=job.id,
         feature_count_before=dataset.feature_count,
     )
+    try:
+        await lock_dataset_rows_for_write(db, dataset)
+    except CatalogLockConflict as exc:
+        raise DatasetBusyError(str(exc)) from exc
+    except HTTPException as exc:
+        raise WriteAccessRevoked from exc
+    if raw_source and "admin" not in await get_processing_port().get_user_roles(
+        db, user
+    ):
+        raise WriteAccessRevoked
 
 
 async def _fail_unqueued_job(job: IngestJob, exc: BaseException) -> None:
@@ -775,6 +789,14 @@ async def _reserve_entry(
     if dataset_id is not None:
         metadata["reupload"] = True
         metadata["dataset_id"] = str(dataset_id)
+        metadata[ADMITTED_CAPABILITY_METADATA_KEY] = UPLOAD
+        from app.modules.catalog.authorization import admitted_public_visibility
+
+        # What this entry's restricted-public gate decided, not a later read.
+        if admitted_public_visibility(db, user.id):
+            metadata[ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY] = True
+        if prepared.kind != "http":
+            metadata[ADMITTED_RAW_SOURCE_METADATA_KEY] = True
 
     # fix(#1814): `running`, not `pending`. A pending row with no
     # file_path and no queue task is reapable by four actors while its source
@@ -860,6 +882,7 @@ async def _settle_under_reset(
     body: Callable[[], Awaitable[None]],
     *,
     job_id: uuid.UUID,
+    attempt_id: uuid.UUID | None = None,
 ) -> bool:
     """Run every statement of one settlement on a session that was just reset.
 
@@ -870,10 +893,13 @@ async def _settle_under_reset(
     # fix(#1814): pinned once, never re-read. A retry can rotate the token
     # between the two attempts, and a reset reloads the new one, so the retry
     # body would settle a fresh attempt for the previous attempt's error.
-    pinned_attempt = getattr(job, "attempt_id", None)
+    pinned_attempt = attempt_id or getattr(job, "attempt_id", None)
     for attempt in (1, 2):
         await reset_session_for_settlement(job, db=db)
         if sa_inspect(job, raiseerr=False) is not None:
+            # The reset reloads the job, but a failed reload must not leave the
+            # body reading an expired id.
+            set_committed_value(job, "id", job_id)
             set_committed_value(job, "attempt_id", pinned_attempt)
         try:
             await body()
@@ -913,16 +939,19 @@ async def _settle_staged_entry(
     db: AsyncSession,
     job: IngestJob,
     exc: BaseException,
+    ids: tuple[uuid.UUID, uuid.UUID | None],
     *,
     prepared: ManifestPreparedSource,
     file_path: str,
 ) -> None:
     """Settle an entry that failed after its source was staged, then reap the copy.
 
+    ``ids`` are the job's id and attempt, read before the failure.
+
     fix(#1814): the row decides, not the exception — the two settlements
     fence on disjoint states, and read and settlement share one body.
     """
-    job_id = job.id
+    job_id, attempt_id = ids
     # The safe default if neither attempt can read: keep the bytes, because
     # orphaned ones are reclaimable and ones a durable row names are not.
     referenced = True
@@ -931,13 +960,19 @@ async def _settle_staged_entry(
     async def _decide_and_settle() -> None:
         nonlocal referenced, failed
         referenced = await staged_source_is_referenced(db, job_id, file_path=file_path)
-        if not await release_manifest_reservation(
-            db, job, prefixed_failure_reason("Failed to stage manifest source", exc)
-        ):
+        if not await release_manifest_reservation(db, job, reason):
             await _fail_unqueued_job(job, exc)
         failed = await _settled_failed(db, job_id)
 
-    committed = await _settle_under_reset(db, job, _decide_and_settle, job_id=job_id)
+    # A refusal under the catalog rows reads as one; anything else is staging.
+    reason = (
+        str(exc)
+        if isinstance(exc, WriteAccessRevoked)
+        else prefixed_failure_reason("Failed to stage manifest source", exc)
+    )
+    committed = await _settle_under_reset(
+        db, job, _decide_and_settle, job_id=job_id, attempt_id=attempt_id
+    )
     # Outside the retry: the filesystem is not part of the transaction, and an
     # HTTP download is owned by this attempt while a raw operator seed is not.
     # fix(#1888): only a committed settlement may reap; a failed row has no retry.
@@ -958,6 +993,8 @@ async def _finalize_reserved_entry(
 ) -> ManifestApplyEntryResult:
     """Stage the reserved entry's source, admit it, and queue the job."""
     job = reserved.job
+    # A failed admission rolls back, which expires ``job``.
+    ids = (job.id, job.attempt_id)
     prepared = reserved.prepared
     try:
         file_path = await _stage_source_if_needed(
@@ -1009,7 +1046,9 @@ async def _finalize_reserved_entry(
                 incoming_bytes=staged.incoming_bytes,
                 creates_dataset=reserved.creates_dataset,
             )
-        await _settle_staged_entry(db, job, exc, prepared=prepared, file_path=file_path)
+        await _settle_staged_entry(
+            db, job, exc, ids, prepared=prepared, file_path=file_path
+        )
         raise
 
     try:
@@ -1022,7 +1061,9 @@ async def _finalize_reserved_entry(
             incoming_bytes=staged.incoming_bytes,
             creates_dataset=reserved.creates_dataset,
         )
-        await _settle_staged_entry(db, job, exc, prepared=prepared, file_path=file_path)
+        await _settle_staged_entry(
+            db, job, exc, ids, prepared=prepared, file_path=file_path
+        )
         raise
 
     if reserved.dataset_id is None:
@@ -1193,10 +1234,10 @@ async def apply_manifest(
     http_request: Request,
 ) -> ManifestApplyResponse:
     """Apply a manifest payload through existing ingest/reupload queues."""
-    # AsyncSession.rollback() expires ORM instances; keep the caller id
-    # outside that lifecycle so a rejected entry can't trigger a
-    # synchronous lazy load (MissingGreenlet) in the next entry's auth check.
-    caller = cast(Identity, _ManifestCaller(id=user.id))
+    # AsyncSession.rollback() expires ORM instances; a snapshot outside that
+    # lifecycle keeps a rejected entry from triggering a synchronous lazy load
+    # (MissingGreenlet) in the next entry's auth check.
+    caller = IdentitySnapshot.of(user)
     results: list[ManifestApplyEntryResult] = []
     quota = _ManifestQuotaReservation()
     for dataset in request.datasets:

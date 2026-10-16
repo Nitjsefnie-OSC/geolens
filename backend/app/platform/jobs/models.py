@@ -96,6 +96,18 @@ MANIFEST_STAGE_METADATA_KEY = "manifest_stage"
 # entry it has already imported or is importing.
 MANIFEST_FINGERPRINT_METADATA_KEY = "manifest_fingerprint"
 
+# The capability the door that queued a VRT regeneration required, which the
+# publish checks again. Absent for a door that required none.
+ADMITTED_CAPABILITY_METADATA_KEY = "admitted_capability"
+
+# Set when an admin's request under restrict_public_visibility made the data
+# public, which the publish checks they still are.
+ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY = "admitted_public_visibility"
+
+# Set when the door admitted an admin-only raw seed source, a local staging
+# path or a same-bucket object key, which the publish checks they still are.
+ADMITTED_RAW_SOURCE_METADATA_KEY = "admitted_raw_source"
+
 # The unpacked total the tileset upload door measured, which the commit door
 # checks against the quota again.
 TILESET_UNPACKED_BYTES_FIELD = "tileset_unpacked_bytes"

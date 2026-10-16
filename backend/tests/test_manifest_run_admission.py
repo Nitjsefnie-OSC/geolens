@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -11,11 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import Request
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 from app.core.config import settings
 from app.modules.auth.models import User
 from app.modules.catalog.datasets.domain.models import Dataset
+from app.platform.extensions import DefaultPermissionExtension
 from app.platform.jobs.models import IngestJob
 from app.platform.refresh.models import DatasetRefreshRun
 from app.platform.refresh.service import (
@@ -428,3 +432,332 @@ class TestManifestUpdateRunAdmission:
         queue.assert_awaited_once()
         [free_run] = await _runs(test_db_session, free_id)
         assert free_run.ingest_job_id == response.results[1].job_id
+
+
+def _stage_then(after) -> tuple[list[str], AsyncMock]:
+    """Wrap staging to record the staged path and run ``after`` once staged."""
+    staged: list[str] = []
+    original = manifest_service._stage_source_if_needed
+
+    async def stage_then(*args, **kwargs):
+        path = await original(*args, **kwargs)
+        staged.append(path)
+        await after()
+        return path
+
+    return staged, stage_then
+
+
+async def _settled(key: str) -> tuple[str, str | None, bool]:
+    """The newest job for ``key``: its status and error, and whether the key
+    still reads as in flight."""
+    import app.core.db as db_module
+    from app.processing.ingest.manifest_reservation import (
+        latest_in_flight_manifest_job,
+    )
+
+    async with db_module.async_session() as session:
+        job = await _newest_job(session, key)
+        in_flight = await latest_in_flight_manifest_job(session, key)
+    return job.status, job.error_message, in_flight is not None
+
+
+class TestManifestAdmissionUnderTheCatalogRows:
+    async def test_a_held_dataset_row_answers_busy_and_settles_the_entry(
+        self, test_db_session, clean_tables
+    ):
+        import app.core.db as db_module
+
+        _stage_fixture()
+        user = await _admin(test_db_session)
+        dataset_id = await _applied_dataset(test_db_session, user, "row-held")
+        holder = db_module.async_session()
+        session = await holder.__aenter__()
+
+        async def hold_the_row() -> None:
+            await session.execute(
+                select(Dataset.id)
+                .where(Dataset.id == dataset_id)
+                .with_for_update(key_share=True)
+            )
+
+        staged, stage_then = _stage_then(hold_the_row)
+        try:
+            with (
+                _reupload_task() as task,
+                patch.object(manifest_service, "_stage_source_if_needed", stage_then),
+            ):
+                response = await apply_manifest(
+                    test_db_session, _update("row-held"), user, _http_request()
+                )
+        finally:
+            await session.rollback()
+            await holder.__aexit__(None, None, None)
+
+        assert response.results[0].errors == ["dataset_busy"]
+        task.defer_async.assert_not_awaited()
+        status, _error, in_flight = await _settled("row-held")
+        assert status == "failed"
+        assert not in_flight
+        assert staged and not Path(staged[0]).exists()
+        assert await _runs(test_db_session, dataset_id) == []
+
+    async def test_a_caller_deactivated_while_staging_is_refused_as_revoked(
+        self, test_db_session, clean_tables, client, admin_auth_header
+    ):
+        from app.processing.ingest.publication import WriteAccessRevoked
+        from tests.factories import create_user
+        from tests.write_recheck_races import _commit, _deactivate
+
+        _stage_fixture()
+        # Local sources are admin-only, so the caller starts as an admin.
+        _, caller_id = await create_user(client, admin_auth_header, "admin")
+        caller = await test_db_session.get(User, uuid.UUID(caller_id))
+        await _applied_dataset(test_db_session, caller, "row-lost")
+
+        async def deactivate() -> None:
+            await _commit(_deactivate(uuid.UUID(caller_id)))
+
+        staged, stage_then = _stage_then(deactivate)
+        with (
+            _reupload_task() as task,
+            patch.object(manifest_service, "_stage_source_if_needed", stage_then),
+        ):
+            response = await apply_manifest(
+                test_db_session, _update("row-lost"), caller, _http_request()
+            )
+
+        assert response.results[0].action == "error"
+        assert response.results[0].message == str(WriteAccessRevoked())
+        task.defer_async.assert_not_awaited()
+        status, error, in_flight = await _settled("row-lost")
+        assert (status, error, in_flight) == (
+            "failed",
+            str(WriteAccessRevoked()),
+            False,
+        )
+        assert staged and not Path(staged[0]).exists()
+
+
+async def _wait_until_it_blocks_a_writer(session) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        # The activity view is snapshotted once per transaction.
+        await session.execute(text("SELECT pg_stat_clear_snapshot()"))
+        if await session.scalar(
+            text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))"
+            )
+        ):
+            return
+        await asyncio.sleep(0.1)
+    pytest.fail("the re-upload commit never waited on the manifest")
+
+
+class TestManifestAdmissionAgainstAReuploadCommit:
+    async def test_a_commit_racing_the_admission_is_refused_busy(
+        self, test_db_session, clean_tables, client, admin_auth_header
+    ):
+        """A re-upload commit that reaches the dataset while the manifest holds
+        its catalog rows queues behind the manifest and answers dataset_busy."""
+        from app.modules.catalog import authorization
+
+        _stage_fixture()
+        user = await _admin(test_db_session)
+        dataset_id = await _applied_dataset(test_db_session, user, "commit-race")
+        reupload = IngestJob(
+            dataset_id=dataset_id,
+            status="pending",
+            attempt_id=uuid.uuid4(),
+            source_filename="parcels.gpkg",
+            file_path="/tmp/commit-race-reupload.gpkg",
+            created_by=user.id,
+            user_metadata={"reupload": True, "dataset_id": str(dataset_id)},
+        )
+        test_db_session.add(reupload)
+        await test_db_session.commit()
+        reupload_id = reupload.id
+        original_lock = authorization.lock_dataset_rows_for_write
+        commits: list[asyncio.Task] = []
+
+        async def lock_then_race(db, dataset, **kwargs):
+            await original_lock(db, dataset, **kwargs)
+            if db is test_db_session and not commits:
+                # A context of its own, as a separate request has: the
+                # manifest's lock-timeout marker must not leak into it.
+                commits.append(
+                    asyncio.create_task(
+                        client.post(
+                            f"/datasets/{dataset_id}/reupload/{reupload_id}/commit",
+                            json={},
+                            headers=admin_auth_header,
+                        ),
+                        context=contextvars.Context(),
+                    )
+                )
+                await _wait_until_it_blocks_a_writer(db)
+
+        with (
+            _reupload_task() as task,
+            patch.object(authorization, "lock_dataset_rows_for_write", lock_then_race),
+            patch(
+                "app.modules.catalog.datasets.api.router_reupload.defer_with_orphan_guard",
+                new=AsyncMock(),
+            ),
+        ):
+            response = await apply_manifest(
+                test_db_session, _update("commit-race"), user, _http_request()
+            )
+            refused = await commits[0]
+
+        result = response.results[0]
+        assert result.action == "update", result
+        task.defer_async.assert_awaited_once()
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"]["code"] == "dataset_busy"
+        [run] = await _runs(test_db_session, dataset_id)
+        assert run.ingest_job_id == result.job_id
+        await test_db_session.refresh(reupload)
+        assert reupload.status == "pending"
+
+
+class _ContractReadingExtension(DefaultPermissionExtension):
+    """Reads the whole identity contract on every check, as an overlay may."""
+
+    def __init__(self) -> None:
+        self.denied = False
+
+    @staticmethod
+    def _read(user) -> None:
+        _ = (user.id, user.username, user.email, user.is_active, user.created_at)
+        _ = [role.name for role in user.roles]
+
+    async def can_access_dataset(self, db, dataset, dataset_id, user, *, user_roles):
+        if user is not None:
+            self._read(user)
+        if self.denied:
+            return False
+        return await super().can_access_dataset(
+            db, dataset, dataset_id, user, user_roles=user_roles
+        )
+
+    async def check_permission(self, db, user, capability, **kwargs):
+        self._read(user)
+        return await super().check_permission(db, user, capability, **kwargs)
+
+
+class TestManifestAdmissionWithAnOverlayPermissionExtension:
+    @pytest.mark.parametrize("denied", [False, True])
+    async def test_the_admission_hands_the_extension_a_full_identity(
+        self, test_db_session, clean_tables, monkeypatch, denied
+    ):
+        from app.platform import extensions
+        from app.processing.ingest.publication import WriteAccessRevoked
+
+        _stage_fixture()
+        user = await _admin(test_db_session)
+        await _applied_dataset(test_db_session, user, "overlay-identity")
+        extension = _ContractReadingExtension()
+        monkeypatch.setitem(extensions._extensions, "permission", extension)
+
+        async def deny() -> None:
+            extension.denied = denied
+
+        _staged, stage_then = _stage_then(deny)
+        with (
+            _reupload_task() as task,
+            patch.object(manifest_service, "_stage_source_if_needed", stage_then),
+        ):
+            response = await apply_manifest(
+                test_db_session, _update("overlay-identity"), user, _http_request()
+            )
+
+        result = response.results[0]
+        if denied:
+            assert result.action == "error"
+            assert result.message == str(WriteAccessRevoked())
+            task.defer_async.assert_not_awaited()
+        else:
+            assert result.action == "update", result
+            task.defer_async.assert_awaited_once()
+
+
+_S3_BUCKET = "manifest-seed-bucket"
+
+
+def _raw_source_entry(key: str, uri: str) -> dict:
+    entry = _entry(key, title="Updated roads")
+    entry["sources"] = [{"type": "vector", "uri": uri, "format": "geojson"}]
+    return entry
+
+
+class TestRawSeedSourceNeedsAnAdmin:
+    """Local staging paths and same-bucket keys are admin-only seed sources, so
+    an update that reads one is held to its caller still being an admin."""
+
+    @pytest.mark.parametrize("demoted", [True, False])
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            _FIXTURE,
+            f"./{_FIXTURE}",
+            f"{Path(settings.upload_staging_dir).name}/{_FIXTURE}",
+            f"s3://{_S3_BUCKET}/seed/roads.geojson",
+        ],
+    )
+    async def test_a_raw_source_update_rechecks_its_admin(
+        self,
+        test_db_session,
+        clean_tables,
+        client,
+        admin_auth_header,
+        monkeypatch,
+        uri,
+        demoted,
+    ):
+        from app.processing.ingest.publication import WriteAccessRevoked
+        from tests.factories import create_user
+        from tests.write_recheck_races import _commit, _move_to_role
+
+        _stage_fixture()
+        _, caller_id = await create_user(client, admin_auth_header, "admin")
+        caller = await test_db_session.get(User, uuid.UUID(caller_id))
+        dataset_id = await _applied_dataset(test_db_session, caller, "raw-seed")
+        # Reloaded after the commits above expired it.
+        caller = await test_db_session.get(User, uuid.UUID(caller_id))
+
+        async def demote() -> None:
+            if demoted:
+                await _commit(_move_to_role(uuid.UUID(caller_id), "editor"))
+
+        staged, stage_then = _stage_then(demote)
+        if uri.startswith("s3://"):
+            monkeypatch.setattr(settings, "storage_provider", "s3")
+            monkeypatch.setattr(settings, "s3_bucket", _S3_BUCKET)
+            # The test storage serves keys from the staging directory.
+            key = Path(settings.upload_staging_dir) / "seed/roads.geojson"
+            key.parent.mkdir(parents=True, exist_ok=True)
+            copyfile(Path(settings.upload_staging_dir) / _FIXTURE, key)
+        with (
+            _reupload_task() as task,
+            patch.object(manifest_service, "_stage_source_if_needed", stage_then),
+        ):
+            response = await apply_manifest(
+                test_db_session,
+                _request(_raw_source_entry("raw-seed", uri)),
+                caller,
+                _http_request(),
+            )
+
+        result = response.results[0]
+        if demoted:
+            assert result.action == "error", result
+            assert result.message == str(WriteAccessRevoked())
+            task.defer_async.assert_not_awaited()
+            assert await _runs(test_db_session, dataset_id) == []
+        else:
+            assert result.action == "update", result
+            task.defer_async.assert_awaited_once()
+            job = await _newest_job(test_db_session, "raw-seed")
+            assert job.user_metadata["admitted_raw_source"] is True

@@ -133,17 +133,44 @@ def _role_names(user_id: Any) -> Select[tuple[str]]:
     )
 
 
-def user_standing_columns(user_id: Any) -> tuple[ColumnElement, ColumnElement]:
-    """``user_id``'s role names (``roles``, an array) and whether the account
-    is active (``active``, NULL for no account), as columns for another
-    statement to select."""
+def user_standing_columns(user_id: Any) -> tuple[ColumnElement, ...]:
+    """``user_id``'s role names (``roles``, an array), whether the account is
+    active (``active``, NULL for no account), and its ``username``, ``email``
+    and ``created_at``, as columns for another statement to select."""
+
+    def column(attribute: Any, label: str) -> ColumnElement:
+        return (
+            select(attribute).where(User.id == user_id).scalar_subquery().label(label)
+        )
+
     return (
         func.array(_role_names(user_id).scalar_subquery()).label("roles"),
-        select(User.is_active)
-        .where(User.id == user_id)
-        .scalar_subquery()
-        .label("active"),
+        column(User.is_active, "active"),
+        column(User.username, "username"),
+        column(User.email, "email"),
+        column(User.created_at, "created_at"),
     )
+
+
+_ADMITTED_CAPABILITIES = "admitted_capabilities"
+
+
+def admit_capabilities(
+    db: AsyncSession, user_id: Any, capabilities: Any, matrix: dict
+) -> None:
+    """Record that ``require_permission`` admitted ``user_id`` under
+    ``capabilities``, read against ``matrix``, for this session."""
+    admitted = db.info.setdefault(_ADMITTED_CAPABILITIES, {})
+    held, _ = admitted.get(user_id, (frozenset(), matrix))
+    admitted[user_id] = (held | frozenset(capabilities), matrix)
+
+
+def admitted_capabilities(
+    db: AsyncSession, user_id: Any
+) -> tuple[frozenset[str], dict]:
+    """The capabilities and matrix :func:`admit_capabilities` recorded for
+    ``user_id`` in this session; none when nothing was recorded."""
+    return db.info.get(_ADMITTED_CAPABILITIES, {}).get(user_id, (frozenset(), {}))
 
 
 # ---------------------------------------------------------------------------

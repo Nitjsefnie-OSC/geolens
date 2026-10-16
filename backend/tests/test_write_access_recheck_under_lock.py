@@ -20,7 +20,7 @@ from sqlalchemy import delete, event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.core.db as db_module
-from app.modules.auth.models import User, UserRole
+from app.modules.auth.models import Role, User, UserRole
 from app.modules.catalog.authorization import (
     DATASET_WRITE_DENIED,
     check_dataset_write_access,
@@ -31,6 +31,7 @@ from app.modules.catalog.datasets.domain.service import get_dataset
 from app.modules.catalog.features.service import lock_catalog_rows_for_write
 from app.modules.catalog.maps import router as maps_router
 from app.modules.catalog.maps.models import Map
+from app.platform.extensions import DefaultPermissionExtension
 from app.modules.catalog.maps.service import (
     check_map_ownership,
     get_map,
@@ -113,6 +114,41 @@ async def test_owner_patch_is_refused_when_a_transfer_lands_mid_request(
     )
 
     assert resp.status_code == 403, resp.text
+    title = await test_db_session.scalar(
+        select(Record.title).where(Record.id == record_id)
+    )
+    assert title != "renamed"
+
+
+async def test_owner_patch_is_refused_when_the_role_loses_edit_metadata(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+    people: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_headers, owner_id = people["owner"]
+    dataset = await create_dataset(test_db_session, created_by=owner_id)
+    dataset_id, record_id = dataset.id, dataset.record_id
+    original = datasets_router.check_public_visibility_allowed
+    viewer = select(Role.id).where(Role.name == "viewer").scalar_subquery()
+
+    # Runs after require_permission and the write guard, before the lock.
+    async def demote_then_continue(db, user, visibility, **kwargs):
+        await test_db_session.execute(
+            update(UserRole).where(UserRole.user_id == owner_id).values(role_id=viewer)
+        )
+        await test_db_session.commit()
+        return await original(db, user, visibility, **kwargs)
+
+    monkeypatch.setattr(
+        datasets_router, "check_public_visibility_allowed", demote_then_continue
+    )
+    resp = await client.patch(
+        f"/datasets/{dataset_id}", json={"title": "renamed"}, headers=owner_headers
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "Missing permission: edit_metadata"
     title = await test_db_session.scalar(
         select(Record.title).where(Record.id == record_id)
     )
@@ -387,3 +423,86 @@ async def test_a_map_deleted_before_the_lock_is_not_found(
     await test_db_session.commit()
 
     assert await _refused(lock_map_layers(request_session, map_id)) == 404
+
+
+async def test_a_stand_in_writer_reaches_the_extension_as_a_full_identity(
+    test_db_session: AsyncSession,
+    request_session: AsyncSession,
+    people: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guard handed only the caller's id still gives an overlay the contract."""
+    from types import SimpleNamespace
+
+    from app.platform import extensions
+    from tests.test_manifest_run_admission import _ContractReadingExtension
+
+    _, owner_id = people["owner"]
+    created = await create_dataset(test_db_session, created_by=owner_id)
+    dataset = await get_dataset(request_session, created.id)
+    # The guard is handed a caller object carrying the id alone.
+    stand_in = SimpleNamespace(id=owner_id)
+    await check_dataset_write_access(
+        request_session, dataset, created.id, stand_in, user_roles={"editor"}
+    )
+    monkeypatch.setitem(
+        extensions._extensions, "permission", _ContractReadingExtension()
+    )
+
+    await lock_catalog_rows_for_write(request_session, dataset)
+
+
+class _RolesDecideExtension(DefaultPermissionExtension):
+    """Grants from the identity's own roles, ignoring the roles it is handed."""
+
+    async def check_permission(self, db, user, capability, **kwargs):
+        kwargs["user_roles"] = {role.name for role in user.roles}
+        return await super().check_permission(db, user, capability, **kwargs)
+
+
+@pytest.mark.parametrize("demoted", [True, False])
+@pytest.mark.parametrize("kind", ["dataset", "map"])
+async def test_an_overlay_deciding_from_identity_roles_sees_them_as_committed(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+    people: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    demoted: bool,
+) -> None:
+    from app.platform import extensions
+
+    owner_headers, owner_id = people["owner"]
+    monkeypatch.setitem(extensions._extensions, "permission", _RolesDecideExtension())
+    viewer = select(Role.id).where(Role.name == "viewer").scalar_subquery()
+    router = datasets_router if kind == "dataset" else maps_router
+    original = router.check_public_visibility_allowed
+
+    # Runs after require_permission and the write guard, before the lock.
+    async def demote_then_continue(db, user, visibility, **kwargs):
+        if demoted:
+            await test_db_session.execute(
+                update(UserRole)
+                .where(UserRole.user_id == owner_id)
+                .values(role_id=viewer)
+            )
+            await test_db_session.commit()
+        return await original(db, user, visibility, **kwargs)
+
+    monkeypatch.setattr(router, "check_public_visibility_allowed", demote_then_continue)
+    if kind == "dataset":
+        dataset = await create_dataset(test_db_session, created_by=owner_id)
+        resp = await client.patch(
+            f"/datasets/{dataset.id}", json={"title": "renamed"}, headers=owner_headers
+        )
+    else:
+        map_id = (await create_map_via_api(client, owner_headers))["id"]
+        resp = await client.put(
+            f"/maps/{map_id}", json={"name": "renamed"}, headers=owner_headers
+        )
+
+    if demoted:
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == "Missing permission: edit_metadata"
+    else:
+        assert resp.status_code == 200, resp.text

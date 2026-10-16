@@ -33,7 +33,15 @@ from app.core.identity import Identity
 from app.core.permissions import EXPORT
 from app.modules.auth.permissions import get_effective_permissions
 from app.modules.auth.permissions import get_user_roles as _get_user_roles
-from app.modules.catalog.write_recheck import admit_writer
+from app.modules.catalog.write_recheck import (
+    PUBLIC_VISIBILITY_DENIED,
+    admit_public_visibility,
+    admit_writer,
+    admitted_public_visibility as admitted_public_visibility,
+    forget_public_visibility,
+    recheck_dataset_write_access,
+)
+from app.platform.catalog_locks import lock_catalog_rows
 from app.platform.extensions import (
     DefaultPermissionExtension,
     RecordAudienceQuery,
@@ -510,6 +518,34 @@ async def check_dataset_write_access(
 DATASET_WRITE_DENIED = "Only the dataset owner or an admin may modify this dataset."
 
 
+async def lock_dataset_rows_for_write(
+    db: AsyncSession, dataset: Any, *, raster_asset_cls: Any = None, also: Any = None
+) -> None:
+    """Take the dataset's catalog rows in the house order, then re-check the
+    writer :func:`check_dataset_write_access` admitted, with its 404 or 403.
+
+    ``also`` is a second dataset whose rows the write references. Both pairs
+    are taken in dataset id order, so two writes between the same datasets
+    in opposite directions queue instead of deadlocking.
+
+    The terms of :func:`~app.platform.catalog_locks.lock_catalog_rows`: call it
+    before the transaction's first write to either row, after any network I/O.
+    """
+    from app.modules.catalog.datasets.domain.models import Dataset, Record
+
+    held = {dataset.id: dataset} | ({also.id: also} if also is not None else {})
+    for dataset_id in sorted(held):
+        await lock_catalog_rows(
+            db,
+            dataset_cls=Dataset,
+            record_cls=Record,
+            dataset_id=dataset_id,
+            record_id=held[dataset_id].record_id,
+            raster_asset_cls=raster_asset_cls if dataset_id == dataset.id else None,
+        )
+    await recheck_dataset_write_access(db, dataset)
+
+
 async def require_dataset_editing_enabled(db: AsyncSession) -> None:
     """Enforce the `enable_dataset_editing` admin flag. Raises 403 when off.
 
@@ -547,7 +583,10 @@ async def check_public_visibility_allowed(
 
     Pass ``user_roles`` when already resolved to skip a lookup. Returns the
     resolved (or caller-provided) roles, or ``None`` when no lookup happened.
+    An admin it lets through is recorded, and the write's lock checks again
+    that they are still one. The record follows the caller's latest check.
     """
+    forget_public_visibility(db, user.id)
     if visibility != "public":
         return user_roles
 
@@ -561,15 +600,11 @@ async def check_public_visibility_allowed(
     if user_roles is None:
         user_roles = await get_user_roles(db, user)
     if "admin" in user_roles:
+        admit_public_visibility(db, user.id)
         return user_roles
 
     raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=(
-            "Public visibility is restricted to administrators on this "
-            "instance. Choose a narrower visibility or ask an admin to "
-            "make this content public."
-        ),
+        status_code=status.HTTP_403_FORBIDDEN, detail=PUBLIC_VISIBILITY_DENIED
     )
 
 

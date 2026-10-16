@@ -18,11 +18,16 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.core.db as db_module
+import app.modules.auth.permissions as permissions
 from app.core.identity import IdentityProtocol
-from app.modules.auth.models import User, UserRole
+from app.modules.auth.models import Role, User, UserRole
 from app.modules.catalog.datasets.domain.models import Record
 from app.platform.extensions import get_processing_port
-from app.platform.jobs.models import IngestJob
+from app.platform.jobs.models import (
+    ADMITTED_CAPABILITY_METADATA_KEY,
+    ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY,
+    IngestJob,
+)
 from app.platform.refresh.models import DatasetRefreshRun
 from app.platform.refresh.service import create_pending_run
 from app.processing.ingest.publication import WriteAccessRevoked
@@ -169,6 +174,85 @@ async def test_a_replacement_whose_admin_submitter_was_demoted_is_not_published(
     assert state["live"] == "before"
 
 
+async def _record_admission(seeded, capability: str | None) -> None:
+    """What the door that queued the seeded job records about its admission."""
+    async with db_module.async_session() as session:
+        job = await session.get(IngestJob, seeded.job_id)
+        metadata = dict(job.user_metadata or {})
+        metadata.pop(ADMITTED_CAPABILITY_METADATA_KEY, None)
+        if capability is not None:
+            metadata[ADMITTED_CAPABILITY_METADATA_KEY] = capability
+        job.user_metadata = metadata
+        await session.commit()
+
+
+def _matrix_without(monkeypatch: pytest.MonkeyPatch, capability: str) -> None:
+    """Editors lose ``capability`` and keep the rest."""
+    effective = permissions.get_effective_permissions
+
+    async def narrowed(db):
+        matrix = await effective(db)
+        matrix["editor"][capability] = False
+        return matrix
+
+    monkeypatch.setattr(permissions, "get_effective_permissions", narrowed)
+
+
+async def test_a_replacement_whose_submitter_was_moved_to_viewer_is_not_published(
+    submitted_by_editor, editor
+) -> None:
+    seeded = submitted_by_editor
+    _, editor_id = editor
+    await _record_admission(seeded, "edit_metadata")
+    viewer = select(Role.id).where(Role.name == "viewer").scalar_subquery()
+
+    async def demote() -> None:
+        await _commit(
+            update(UserRole).where(UserRole.user_id == editor_id).values(role_id=viewer)
+        )
+
+    await _settle(_Fake(seeded, during={"install": demote}))
+
+    state = await _state(seeded)
+    assert state["run"] == ("failed", "write_access_revoked")
+    assert state["live"] == "before"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "removed", "published"),
+    [
+        # A manifest apply admitted under upload, an editor without upload.
+        ("upload", "upload", False),
+        # A door that required only upload, an editor without edit_metadata.
+        ("upload", "edit_metadata", True),
+        # A re-upload, refresh or restore, an editor without edit_metadata.
+        ("edit_metadata", "edit_metadata", False),
+        # A door that required no capability, such as an overlay's sync door.
+        (None, "edit_metadata", True),
+    ],
+)
+async def test_a_replacement_rechecks_the_capability_its_door_recorded(
+    submitted_by_editor,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: str | None,
+    removed: str,
+    published: bool,
+) -> None:
+    seeded = submitted_by_editor
+    await _record_admission(seeded, recorded)
+    _matrix_without(monkeypatch, removed)
+
+    await _settle(_Fake(seeded))
+
+    state = await _state(seeded)
+    if published:
+        assert state["job"] == "complete"
+        assert state["live"] == "after"
+    else:
+        assert state["run"] == ("failed", "write_access_revoked")
+        assert state["live"] == "before"
+
+
 async def test_a_replacement_whose_submitter_still_owns_the_dataset_publishes(
     submitted_by_editor,
 ) -> None:
@@ -257,3 +341,186 @@ async def test_the_write_guard_is_handed_a_complete_identity(
 
     assert identities == [True]
     assert (await _state(submitted_by_editor))["job"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("restricted", "demoted", "published"),
+    [(True, True, False), (True, False, True), (False, True, True)],
+)
+async def test_a_public_replacement_rechecks_that_its_admin_still_is_one(
+    submitted_by_editor,
+    editor,
+    monkeypatch: pytest.MonkeyPatch,
+    restricted: bool,
+    demoted: bool,
+    published: bool,
+) -> None:
+    """An admin owner queued a replacement that makes the data public while
+    public visibility was restricted to admins."""
+    import app.core.persistent_config as persistent_config
+
+    seeded = submitted_by_editor
+    _, owner_id = editor
+    admin = select(Role.id).where(Role.name == "admin").scalar_subquery()
+    await _commit(
+        update(UserRole).where(UserRole.user_id == owner_id).values(role_id=admin)
+    )
+    async with db_module.async_session() as session:
+        job = await session.get(IngestJob, seeded.job_id)
+        job.user_metadata = {
+            **(job.user_metadata or {}),
+            ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY: True,
+        }
+        await session.commit()
+
+    class _Restriction:
+        async def get(self, _db):
+            return restricted
+
+    monkeypatch.setattr(persistent_config, "RESTRICT_PUBLIC_VISIBILITY", _Restriction())
+    editor_role = select(Role.id).where(Role.name == "editor").scalar_subquery()
+
+    async def demote() -> None:
+        if demoted:
+            await _commit(
+                update(UserRole)
+                .where(UserRole.user_id == owner_id)
+                .values(role_id=editor_role)
+            )
+
+    await _settle(_Fake(seeded, during={"install": demote}))
+
+    state = await _state(seeded)
+    if published:
+        assert state["job"] == "complete"
+        assert state["live"] == "after"
+    else:
+        assert state["run"] == ("failed", "write_access_revoked")
+        assert state["live"] == "before"
+
+
+async def test_a_public_manifest_update_keeps_the_admission_its_gate_made(
+    submitted_by_editor,
+    editor,
+    test_db_session,
+    clean_tables,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restriction is on at a manifest update's gate, off by the time its
+    job is reserved, and on again at publish, after its admin is demoted."""
+    import app.core.persistent_config as persistent_config
+    from app.modules.catalog import authorization
+    from app.processing.ingest.manifest_service import apply_manifest
+    from tests.test_manifest_run_admission import (
+        _admin,
+        _applied_dataset,
+        _entry,
+        _http_request,
+        _newest_job,
+        _request,
+        _reupload_task,
+        _stage_fixture,
+    )
+
+    restricted = True
+
+    class _Restriction:
+        async def get(self, _db):
+            return restricted
+
+    gate = authorization.check_public_visibility_allowed
+
+    async def gate_then_lift(db, user, visibility, **kwargs):
+        nonlocal restricted
+        roles = await gate(db, user, visibility, **kwargs)
+        restricted = False
+        return roles
+
+    monkeypatch.setattr(persistent_config, "RESTRICT_PUBLIC_VISIBILITY", _Restriction())
+    monkeypatch.setattr(
+        authorization, "check_public_visibility_allowed", gate_then_lift
+    )
+    _stage_fixture()
+    caller = await _admin(test_db_session)
+    await _applied_dataset(test_db_session, caller, "gate-lifted")
+    entry = _entry("gate-lifted", title="Published roads")
+    entry["publication"] = {"intent": "published"}
+    with _reupload_task():
+        response = await apply_manifest(
+            test_db_session, _request(entry), caller, _http_request()
+        )
+    assert response.results[0].action == "update", response.results[0]
+    queued = await _newest_job(test_db_session, "gate-lifted")
+
+    # The seeded replacement publishes under the admission the manifest recorded.
+    seeded = submitted_by_editor
+    _, owner_id = editor
+    admin = select(Role.id).where(Role.name == "admin").scalar_subquery()
+    await _commit(
+        update(UserRole).where(UserRole.user_id == owner_id).values(role_id=admin)
+    )
+    recorded = {
+        key: value
+        for key, value in queued.user_metadata.items()
+        if key == ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY
+    }
+    async with db_module.async_session() as session:
+        job = await session.get(IngestJob, seeded.job_id)
+        job.user_metadata = {**(job.user_metadata or {}), **recorded}
+        await session.commit()
+    restricted = True
+    editor_role = select(Role.id).where(Role.name == "editor").scalar_subquery()
+
+    async def demote() -> None:
+        await _commit(
+            update(UserRole)
+            .where(UserRole.user_id == owner_id)
+            .values(role_id=editor_role)
+        )
+
+    await _settle(_Fake(seeded, during={"install": demote}))
+
+    state = await _state(seeded)
+    assert state["run"] == ("failed", "write_access_revoked")
+    assert state["live"] == "before"
+
+
+@pytest.mark.parametrize(("demoted", "published"), [(True, False), (False, True)])
+async def test_a_raw_source_replacement_rechecks_that_its_admin_still_is_one(
+    submitted_by_editor, editor, demoted: bool, published: bool
+) -> None:
+    """An admin owner queued a replacement from an admin-only raw seed source."""
+    from app.platform.jobs.models import ADMITTED_RAW_SOURCE_METADATA_KEY
+
+    seeded = submitted_by_editor
+    _, owner_id = editor
+    admin = select(Role.id).where(Role.name == "admin").scalar_subquery()
+    await _commit(
+        update(UserRole).where(UserRole.user_id == owner_id).values(role_id=admin)
+    )
+    async with db_module.async_session() as session:
+        job = await session.get(IngestJob, seeded.job_id)
+        job.user_metadata = {
+            **(job.user_metadata or {}),
+            ADMITTED_RAW_SOURCE_METADATA_KEY: True,
+        }
+        await session.commit()
+    editor_role = select(Role.id).where(Role.name == "editor").scalar_subquery()
+
+    async def demote() -> None:
+        if demoted:
+            await _commit(
+                update(UserRole)
+                .where(UserRole.user_id == owner_id)
+                .values(role_id=editor_role)
+            )
+
+    await _settle(_Fake(seeded, during={"install": demote}))
+
+    state = await _state(seeded)
+    if published:
+        assert state["job"] == "complete"
+        assert state["live"] == "after"
+    else:
+        assert state["run"] == ("failed", "write_access_revoked")
+        assert state["live"] == "before"

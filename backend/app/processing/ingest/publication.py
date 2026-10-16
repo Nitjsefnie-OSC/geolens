@@ -24,6 +24,7 @@ from sqlalchemy.orm import joinedload
 
 from app.core.db.sqlstate import is_lock_conflict
 from app.core.failure_reason import FixedReason
+from app.core.identity import IdentityRole, IdentitySnapshot
 from app.platform.catalog_locks import (
     CatalogLockConflict,
     bump_tile_cache_version_on,
@@ -42,7 +43,13 @@ from app.platform.jobs.heartbeat import (
     stop_ingest_job_heartbeat,
 )
 from app.platform.jobs.ledger import hold
-from app.platform.jobs.models import ACTIVE_STATUSES, IngestJob
+from app.platform.jobs.models import (
+    ACTIVE_STATUSES,
+    ADMITTED_CAPABILITY_METADATA_KEY,
+    ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY,
+    ADMITTED_RAW_SOURCE_METADATA_KEY,
+    IngestJob,
+)
 from app.platform.refresh.service import (
     claim_run_for_job,
     record_refresh_failure,
@@ -538,7 +545,12 @@ async def _publish(strategy: ReplacementStrategy, attempt: _Attempt) -> bool:
 
         await strategy.install(session, dataset)
         await _take_catalog_rows(session, strategy, dataset)
-        await _require_submitter_can_write(session, dataset, job.created_by)
+        await require_submitter_can_write(
+            session,
+            dataset,
+            job,
+            capability=(job.user_metadata or {}).get(ADMITTED_CAPABILITY_METADATA_KEY),
+        )
         published = await strategy.write(session, dataset)
         if published.tiles_changed:
             await bump_tile_cache_version_on(session, dataset)
@@ -578,23 +590,6 @@ async def _publish(strategy: ReplacementStrategy, attempt: _Attempt) -> bool:
     return False
 
 
-@dataclass(frozen=True, slots=True)
-class _Role:
-    name: str
-
-
-@dataclass(frozen=True, slots=True)
-class _Submitter:
-    """The job's submitter as an ``Identity``, read as committed now."""
-
-    id: uuid.UUID
-    username: str
-    email: str | None
-    is_active: bool
-    roles: tuple[_Role, ...]
-    created_at: datetime
-
-
 # In SQL, since processing may not import the auth models.
 _SUBMITTER = text(
     "SELECT u.id, u.username, u.email, u.is_active, u.created_at, "
@@ -604,29 +599,33 @@ _SUBMITTER = text(
 )
 
 
-async def _require_submitter_can_write(
-    session: AsyncSession, dataset: Any, submitter_id: uuid.UUID | None
+async def require_submitter_can_write(
+    session: AsyncSession, dataset: Any, job: IngestJob, *, capability: str | None
 ) -> None:
     """Raise ``WriteAccessRevoked`` unless the job's submitter may still write
-    the dataset, as committed now.
+    the dataset, as committed now, and their roles still grant ``capability``,
+    the one the job's door admitted it under. With None, only the account and
+    owner-or-admin are checked. A job only an admin could queue, for a raw
+    seed source or public data under ``restrict_public_visibility``, also needs
+    them to still be an admin.
 
     Call holding the catalog rows, which an ownership transfer also takes.
     """
     from fastapi import HTTPException
 
-    from app.platform.extensions import get_processing_port
+    from app.platform.extensions import get_permission_extension, get_processing_port
 
     row = None
-    if submitter_id is not None:
-        row = (await session.execute(_SUBMITTER, {"uid": submitter_id})).first()
+    if job.created_by is not None:
+        row = (await session.execute(_SUBMITTER, {"uid": job.created_by})).first()
     if row is None or not row.is_active:
         raise WriteAccessRevoked
-    submitter = _Submitter(
+    submitter = IdentitySnapshot(
         id=row.id,
         username=row.username,
         email=row.email,
         is_active=row.is_active,
-        roles=tuple(_Role(name) for name in row.roles),
+        roles=tuple(IdentityRole(name) for name in row.roles),
         created_at=row.created_at,
     )
     await session.refresh(
@@ -642,6 +641,30 @@ async def _require_submitter_can_write(
         )
     except HTTPException:
         raise WriteAccessRevoked from None
+    if capability is not None and not await get_permission_extension().check_permission(
+        session, submitter, capability, user_roles=set(row.roles)
+    ):
+        raise WriteAccessRevoked
+    if await _no_longer_admin_to_publish(session, job, set(row.roles)):
+        raise WriteAccessRevoked
+
+
+async def _no_longer_admin_to_publish(
+    session: AsyncSession, job: IngestJob, roles: set[str]
+) -> bool:
+    """A job only an admin could queue, whose submitter is no longer one: it
+    reads a raw seed source, or makes data public while the restricted-public
+    setting is still on."""
+    from app.core.persistent_config import RESTRICT_PUBLIC_VISIBILITY
+
+    metadata = job.user_metadata or {}
+    if "admin" in roles:
+        return False
+    if metadata.get(ADMITTED_RAW_SOURCE_METADATA_KEY):
+        return True
+    if not metadata.get(ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY):
+        return False
+    return bool(await RESTRICT_PUBLIC_VISIBILITY.get(session))
 
 
 async def _take_catalog_rows(

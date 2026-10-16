@@ -13,6 +13,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.permissions import EDIT_METADATA
 from app.core.db.tenant_session import defer_async_with_tenant
 from app.core.identity import Identity
 from app.modules.catalog.datasets.domain.models import Dataset
@@ -23,7 +24,12 @@ from app.platform.jobs.defer_guard import (
     defer_with_orphan_guard,
     make_ingest_job_failed_rollback,
 )
-from app.platform.jobs.models import IngestJob
+from app.platform.jobs.models import (
+    ADMITTED_CAPABILITY_METADATA_KEY,
+    ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY,
+    ADMITTED_RAW_SOURCE_METADATA_KEY,
+    IngestJob,
+)
 from app.platform.refresh.models import DatasetRefreshRun
 from app.platform.refresh.verification import (
     REVIEW_SUPERSEDED,
@@ -189,6 +195,16 @@ def _upload_unavailable(message: str) -> HTTPException:
     )
 
 
+# The blocked job's admin-only admissions follow it into the accepted upload.
+_CARRIED_KEYS = frozenset(
+    {
+        "srid_override",
+        ADMITTED_PUBLIC_VISIBILITY_METADATA_KEY,
+        ADMITTED_RAW_SOURCE_METADATA_KEY,
+    }
+)
+
+
 def _accepted_upload_metadata(
     blocked_job: IngestJob,
     *,
@@ -201,7 +217,7 @@ def _accepted_upload_metadata(
     carried = {
         key: value
         for key, value in blocked.items()
-        if key == "srid_override"
+        if key in _CARRIED_KEYS
         or key.startswith("manifest_")
         or ("manifest_key" in blocked and key in _MANIFEST_RECORD_KEYS)
     }
@@ -209,6 +225,7 @@ def _accepted_upload_metadata(
         **carried,
         "reupload": True,
         "dataset_id": str(dataset_id),
+        ADMITTED_CAPABILITY_METADATA_KEY: EDIT_METADATA,
         "accepted_refresh_fingerprint": fingerprint,
         "accepted_refresh_run_id": str(run_id),
         "accepted_from_job_id": str(blocked_job.id),
