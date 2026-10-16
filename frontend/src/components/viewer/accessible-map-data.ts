@@ -4,9 +4,9 @@ import { substitutePopupTemplate } from '@/lib/popup-template';
 
 const EXCLUDED_PROPERTY_KEYS = new Set(['geom', 'geometry']);
 
-export const ACCESSIBLE_FEATURE_LIMIT = 100;
+const ACCESSIBLE_FEATURE_LIMIT = 100;
 
-export interface AccessibleMapFeature {
+interface AccessibleMapFeature {
   key: string;
   layerName: string;
   title: string | null;
@@ -22,7 +22,7 @@ export interface AccessibleMapFeatureResult {
   truncated: boolean;
 }
 
-export type ResolveAccessibleLayer = (
+type ResolveAccessibleLayer = (
   mapLayerId: string,
 ) => SharedLayerResponse | null;
 
