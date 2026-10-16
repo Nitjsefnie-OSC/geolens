@@ -309,18 +309,8 @@ class DefaultAnthropicProvider:
         del base_url
         import structlog
 
+        from app.processing.ai.claude_structured import claude_structured_reply
         from app.processing.ai.llm_loop import get_anthropic_client
-
-        client = get_anthropic_client()
-        model_schema = response_model.model_json_schema()
-        model_schema.pop("title", None)
-        model_schema.pop("description", None)
-
-        tool = {
-            "name": "output",
-            "description": "Output the structured result",
-            "input_schema": model_schema,
-        }
 
         structlog.stdlib.get_logger(__name__).info(
             "AI metadata request",
@@ -332,24 +322,14 @@ class DefaultAnthropicProvider:
         # Claude 4.6+ models reject a non-default `temperature` with a 400;
         # omit it on the Anthropic path (steering is prompt-based).
         del temperature
-        response = await client.messages.create(
+        return await claude_structured_reply(
+            get_anthropic_client(),
             model=model,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            response_model=response_model,
             max_tokens=max_tokens,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "output"},
         )
-
-        for block in response.content:
-            if block.type == "tool_use":
-                return (
-                    response_model.model_validate(block.input),
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
-                )
-
-        raise ValueError("No tool_use block in Anthropic response")
 
     async def resolve_runtime_config(  # type: ignore[no-untyped-def]
         self, db, settings: Mapping[str, object] | None = None
