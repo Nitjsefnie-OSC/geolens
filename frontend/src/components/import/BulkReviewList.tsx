@@ -326,13 +326,14 @@ export function BulkReviewList({
     });
   }
 
-  function formatLayerOption(layer: { name: string; feature_count: number; field_count: number }) {
+  function formatLayerOption(layer: { name: string; feature_count?: number | null; field_count?: number | null }) {
+    // GDAL can't always count a layer; an unknown count reads as unavailable, not as zero.
     const rows = t('bulk.rowCount', {
-      count: layer.feature_count,
+      count: layer.feature_count ?? 0,
       value: formatNumber(layer.feature_count),
     });
     const columns = t('bulk.columnCount', {
-      count: layer.field_count,
+      count: layer.field_count ?? 0,
       value: formatNumber(layer.field_count),
     });
 
