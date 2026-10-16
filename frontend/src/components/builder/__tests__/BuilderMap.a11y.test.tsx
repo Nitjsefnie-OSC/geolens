@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { act, render, screen, waitFor } from '@/test/test-utils';
 import { toast } from 'sonner';
 import { BuilderMap } from '../BuilderMap';
-import { ensureRasterDemTerrainSource, TERRAIN_SOURCE_ID } from '../map-sync';
+import { ensureRasterDemTerrainSource, getSourceIdForLayer, TERRAIN_SOURCE_ID } from '../map-sync';
 import type { MapLayerResponse, MapTerrainConfig } from '@/types/api';
 
 vi.mock('@/hooks/use-settings', () => ({
@@ -18,6 +18,12 @@ vi.mock('@/hooks/use-settings', () => ({
         id: 'openfreemap-bright',
         label: 'Bright',
         url: 'https://tiles.example.com/styles/bright',
+        enabled: true,
+      },
+      {
+        id: 'direct-json',
+        label: 'Direct',
+        url: 'https://tiles.example.com/style.json',
         enabled: true,
       },
     ],
@@ -276,6 +282,137 @@ describe('BuilderMap basemap connection toast (SF-08)', () => {
       ([, options]) => (options as { id?: string } | undefined)?.id === 'builder-map-error',
     );
     expect(mapErrorCalls.length).toBeGreaterThan(0);
+  });
+
+  describe('errors that are not a basemap outage', () => {
+    let nowSpy: { mockRestore(): void } | undefined;
+    afterEach(() => nowSpy?.mockRestore());
+
+    // Loads a basemap style with one source, then moves the clock past the
+    // post-load suppression window so every error reaches the banner decision.
+    async function renderLoaded(layers: MapLayerResponse[] = []) {
+      const style = {
+        version: 8,
+        sources: { openmaptiles: { type: 'vector', url: 'https://tiles.example.test/planet' } },
+        layers: [],
+      };
+      globalThis.fetch = vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(style) } as Response),
+      ) as typeof fetch;
+      render(<BuilderMap layers={layers} basemapStyle="openfreemap-positron" />);
+      await waitFor(() => {
+        expect(mapState.fakeMap.on).toHaveBeenCalledWith('error', expect.any(Function));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const later = Date.now() + 10_000;
+      nowSpy = vi.spyOn(Date, 'now').mockReturnValue(later);
+    }
+
+    it('keeps the basemap banner off for a style validation error', async () => {
+      await renderLoaded();
+
+      mapState.fakeMap.emit('error', {
+        error: { message: 'layers.x.paint.fill-color: Branch labels must be numbers or strings' },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('keeps the basemap banner off for a failing data layer source', async () => {
+      const layer = {
+        id: 'layer-1',
+        dataset_id: 'ds-1',
+        dataset_name: 'Parcels',
+        display_name: 'Parcels',
+        layer_type: 'vector_geolens',
+        visible: true,
+      } as MapLayerResponse;
+      await renderLoaded([layer]);
+
+      mapState.fakeMap.emit('error', {
+        error: { status: 503, message: 'Service Unavailable' },
+        sourceId: getSourceIdForLayer(layer),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('keeps the basemap banner off for a terrain source failure', async () => {
+      await renderLoaded();
+
+      mapState.fakeMap.emit('error', {
+        error: { message: 'Failed to fetch' },
+        sourceId: TERRAIN_SOURCE_ID,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('renders when a fetched basemap style has no sources', async () => {
+      globalThis.fetch = vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ version: 8, layers: [] }),
+        } as Response),
+      ) as typeof fetch;
+      render(<BuilderMap layers={[]} basemapStyle="openfreemap-positron" />);
+      await waitFor(() => {
+        expect(mapState.fakeMap.on).toHaveBeenCalledWith('error', expect.any(Function));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.getByTestId('mapgl')).toBeInTheDocument();
+    });
+
+    it('keeps the banner off for terrain on a style URL that MapLibre loads itself', async () => {
+      render(<BuilderMap layers={[]} basemapStyle="direct-json" />);
+      await waitFor(() => {
+        expect(mapState.fakeMap.on).toHaveBeenCalledWith('error', expect.any(Function));
+      });
+
+      mapState.fakeMap.emit('error', {
+        error: { message: 'Failed to fetch' },
+        sourceId: TERRAIN_SOURCE_ID,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole('status')).toBeNull();
+
+      mapState.fakeMap.emit('error', {
+        error: { message: 'Failed to fetch' },
+        sourceId: 'openmaptiles',
+      });
+      await waitFor(() => {
+        expect(screen.getByRole('status')).toHaveTextContent('Basemap connection issue');
+      });
+    });
+
+    it('shows the basemap banner for an unreachable request with no source', async () => {
+      await renderLoaded();
+
+      mapState.fakeMap.emit('error', {
+        error: { status: 0, message: 'Failed to fetch', url: 'https://tiles.example.test/style.json' },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole('status')).toHaveTextContent('Basemap connection issue');
+      });
+    });
+
+    it('shows the basemap banner for a status-less failure of a basemap source', async () => {
+      await renderLoaded();
+
+      mapState.fakeMap.emit('error', {
+        error: { message: 'Failed to fetch' },
+        sourceId: 'openmaptiles',
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole('status')).toHaveTextContent('Basemap connection issue');
+      });
+    });
   });
 
   // WR-02 (Phase 1050-rev): the latch must NOT permanently suppress 5xx

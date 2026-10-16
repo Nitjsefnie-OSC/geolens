@@ -299,6 +299,13 @@ export const BuilderMap = memo(function BuilderMap({
       setBasemapNotice('style');
     }, []),
   });
+  // Null for a style URL that MapLibre loads itself.
+  const basemapSourceIds = useMemo(
+    () => (typeof mapStyle === 'string' ? null : new Set(Object.keys(mapStyle.sources ?? {}))),
+    [mapStyle],
+  );
+  const basemapSourceIdsRef = useRef(basemapSourceIds);
+  basemapSourceIdsRef.current = basemapSourceIds;
 
   // Fetch tile tokens for all layers
   // Stable dataset ID list — only changes when layers are added/removed, not on paint edits
@@ -743,8 +750,6 @@ export const BuilderMap = memo(function BuilderMap({
           // masking ongoing outages.
           const loadedAt = basemapLoadedAtRef.current;
           if (loadedAt !== null && Date.now() - loadedAt < 3000) return;
-          sawTileErrorSinceLoadingRef.current = true;
-          setBasemapNotice('tiles');
           // Name the failing layer when the error carries a sourceId.
           // MapLibre attaches the source id to tile/source errors as they
           // bubble up; style/glyph errors have no sourceId, so fall back to
@@ -754,6 +759,17 @@ export const BuilderMap = memo(function BuilderMap({
           const failingLayer = failingSourceId
             ? layersRef.current.find((l) => getSourceIdForLayer(l) === failingSourceId)
             : undefined;
+          // Only the basemap style's own sources, or a request error with no
+          // source (style, sprite, glyphs; status 0 when unreachable), are a
+          // basemap outage. Data layers, terrain and a rejected expression are not.
+          const basemapFailed = failingSourceId
+            ? basemapSourceIdsRef.current?.has(failingSourceId)
+              ?? (!failingLayer && failingSourceId !== TERRAIN_SOURCE_ID)
+            : typeof status === 'number';
+          if (basemapFailed) {
+            sawTileErrorSinceLoadingRef.current = true;
+            setBasemapNotice('tiles');
+          }
           const failingName = failingLayer?.display_name || failingLayer?.dataset_name;
           toast.error(
             failingName
