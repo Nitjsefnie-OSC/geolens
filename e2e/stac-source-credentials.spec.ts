@@ -208,8 +208,9 @@ test.describe('STAC refresh dialog credential prompt', () => {
 
     await openRefreshDialogAndSubmit(page);
 
-    await page.getByLabel('Authentication', { exact: true }).selectOption('bearer');
-    await page.getByLabel('Bearer token', { exact: true }).fill('e2e-stac-token');
+    await page.getByLabel('Authentication', { exact: true }).click();
+    await page.getByRole('option', { name: 'Bearer token', exact: true }).click();
+    await page.getByRole('dialog').getByLabel('Bearer token', { exact: true }).fill('e2e-stac-token');
     await page.getByRole('button', { name: 'Start refresh' }).click();
 
     await expect(page.getByRole('dialog')).toHaveCount(0);
