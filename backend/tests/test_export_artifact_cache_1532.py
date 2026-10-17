@@ -435,6 +435,7 @@ async def test_head_answers_a_real_length_once_an_artifact_exists(
         {"dataset_title": "Renamed"},
         {"table_name": "other_table"},
         {"tile_cache_version": 9},
+        {"exporter_version": "2.0.0"},
     ],
 )
 def test_every_input_that_changes_the_bytes_changes_the_key(changed):
@@ -459,6 +460,7 @@ def test_every_input_that_changes_the_bytes_changes_the_key(changed):
         "target_crs": None,
         "bbox": None,
         "where": None,
+        "exporter_version": "1.0.0",
     }
 
     assert artifact_cache.selection_key(**base) != artifact_cache.selection_key(
@@ -482,6 +484,7 @@ def test_an_absent_filter_is_not_an_empty_one():
         "format_key": "geojson",
         "target_crs": None,
         "bbox": None,
+        "exporter_version": "1.0.0",
     }
     assert artifact_cache.selection_key(**base, where=None) != (
         artifact_cache.selection_key(**base, where="")
@@ -1235,7 +1238,7 @@ async def test_a_cached_parquet_probe_does_not_replan_per_range(
 
     async def _counted_plan(*args, **kwargs):
         plans["count"] += 1
-        return SimpleNamespace(columns=["gid"], where=None, bbox=None)
+        return SimpleNamespace(columns=["gid"], where=None, bbox=None, has_gid=False)
 
     async def _fake_export(*args, **kwargs):
         directory = os.path.join(root, uuid.uuid4().hex)
@@ -1425,17 +1428,10 @@ async def test_the_fallback_never_answers_a_range_with_a_slice(
     that fires precisely when things are going wrong. A full store, a contested
     selection and an exhausted budget all land here.
 
-    The mtime validators are asserted absent too. `FileResponse` sent an ETag
-    and a Last-Modified derived from the temp file, which the artifact path
-    never sends, so one URL disagreed with itself about which validators the
-    resource has — and #1532 measured that ETag changing between two conversions
-    of unchanged data, so a client that trusted it would resume across a
-    rebuild.
-
-    fix(#1532 review r18): the fallback DOES send an ETag now — the digest of
-    the bytes it streams, the same validator the artifact path sends for the
-    same bytes — so it is asserted equal to that digest rather than absent.
-    Last-Modified stays absent: nothing on either path sends one.
+    The response is also unresumable: these bytes are never recorded, so a
+    later bare Range can't be told apart from one against another version.
+    It says ``Accept-Ranges: none`` and sends no ETag or Last-Modified, which
+    leaves a client nothing to build an If-Range from.
     """
 
     def _down():
@@ -1455,12 +1451,10 @@ async def test_the_fallback_never_answers_a_range_with_a_slice(
     )
     assert resp.content == conversions.body
     assert "content-range" not in resp.headers
-    assert resp.headers.get("etag") == (
-        f'"{hashlib.sha256(conversions.body).hexdigest()}"'
-    ), (
-        f"the fallback published etag={resp.headers.get('etag')!r}; the only "
-        f"validator this path may send is the digest of the bytes it streams, "
-        f"which is what the artifact path sends for the same bytes"
+    assert resp.headers.get("accept-ranges") == "none"
+    assert "etag" not in resp.headers, (
+        f"the fallback sent etag={resp.headers.get('etag')!r}; a client could "
+        f"resume these unrecorded bytes against whatever the cache holds later"
     )
     assert "last-modified" not in resp.headers
 
@@ -4011,9 +4005,9 @@ async def test_the_fallback_path_carries_and_evaluates_the_validator(
     an expired-but-byte-identical export with a matching `If-None-Match` was
     retransmitted whole, and a stale `If-Match` was ignored rather than
     refused. The validator is now the digest of the built file, computed once
-    and handed to `store`, so it exists whether or not the artifact is kept —
-    and the fallback 200 sends it, so the next conditional request has
-    something to name.
+    and handed to `store`, so it exists whether or not the artifact is kept.
+    The fallback 200 itself sends no ETag, since its bytes are never recorded
+    and must not be resumable.
 
     Forced onto the fallback by exhausting the budget AFTER the first build,
     and `conversions.count == 2` pins that the second request really rebuilt:
@@ -4058,10 +4052,8 @@ async def test_the_fallback_path_carries_and_evaluates_the_validator(
     assert conversions.count == 2, "precondition: the second request rebuilt"
     assert resp.status_code == expected, resp.text
     if expected == 200:
-        assert resp.headers.get("etag") == etag, (
-            "the fallback 200 sent no validator (or a different one), so a client "
-            "on this path can never revalidate or resume against the bytes it got"
-        )
+        assert "etag" not in resp.headers
+        assert resp.headers.get("accept-ranges") == "none"
         assert resp.headers.get("content-encoding") != "gzip"
         assert await _export_rows() == before + 1
     else:
@@ -4104,14 +4096,12 @@ async def test_the_fallback_honours_a_proven_if_range_with_a_local_slice(
 ):
     """On the fallback, a Range behind THIS file's ETag is a local 206 or a 416.
 
-    fix(#1532 review r19): r18 gave the fallback the same validator the artifact
-    path sends, and then still answered every Range with the whole file. A
-    client whose `If-Range` names that ETag has proved its offsets belong to
-    these bytes — the export is byte-deterministic — and got a multi-gigabyte
-    200 on every resume attempt for as long as publication stayed unavailable.
-    r12's rule for the stored branch applies here too: proven, slice; a bare
-    Range or a mismatched `If-Range` still gets the whole thing, and a proven
-    Range naming nothing is a 416 that strands no directory and audits nothing.
+    A client whose `If-Range` names the ETag it took from an artifact of the
+    same bytes has proved its offsets belong to them, so it gets a slice of
+    the local file. A bare Range or a mismatched `If-Range` gets the whole
+    thing, and a proven Range naming nothing is a 416 that strands no
+    directory and audits nothing. None of these sends an ETag or advertises
+    ranges, since the fallback's own bytes are never recorded.
 
     Forced onto the fallback by exhausting the budget after the first build.
     """
@@ -4155,7 +4145,8 @@ async def test_the_fallback_honours_a_proven_if_range_with_a_local_slice(
 
     assert conversions.count == 2, "precondition: the second request rebuilt"
     assert resp.status_code == expected, resp.text
-    assert resp.headers.get("etag") == etag
+    assert "etag" not in resp.headers
+    assert resp.headers.get("accept-ranges") == "none"
     if expected == 206:
         assert resp.content == conversions.body[100:200]
         assert resp.headers["content-range"] == f"bytes 100-199/{size}"
@@ -4582,6 +4573,7 @@ async def test_the_artifact_is_stamped_with_the_snapshot_not_the_upload(
     """
     import asyncio
 
+    from app.api.main import app as api_app
     from app.processing.export import artifact_cache as cache
     from app.processing.export import router as export_router
 
@@ -4611,6 +4603,7 @@ async def test_the_artifact_is_stamped_with_the_snapshot_not_the_upload(
         target_crs=None,
         bbox=None,
         where=None,
+        exporter_version=api_app.version,
     )
     artifact = await cache.lookup(
         dataset.id, selection, filename="x.geojson", media_type="application/geo+json"
@@ -5076,3 +5069,727 @@ async def test_a_hit_inside_the_first_ttl_after_a_change_answers_bare_ranges_who
         f"answered {settled.status_code}; GDAL opens after a settled change must work"
     )
     assert settled.headers["etag"] == v2_etag
+
+
+# ---------------------------------------------------------------------------
+# A TTL rollover of unchanged data
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def parquet_conversions(conversions, monkeypatch):
+    """Route GeoParquet through the counting double.
+
+    Only parquet reads rows in a pinned order, so only parquet gets the
+    rebuild slice and the settled HEAD; the plan reports a ``gid``.
+    """
+    from app.processing.export import parquet as parquet_export
+    from app.processing.export.ogr import PARQUET_MEDIA_TYPE
+    from app.processing.export.service import export_descriptor
+
+    async def _plan(db, table_name, *, schema, bbox=None, where=None):
+        return parquet_export.ParquetExportPlan(["name"], "TRUE", {}, has_gid=True)
+
+    async def _export(
+        db, table_name, dataset_name, *, schema, plan, deadline=None, ordered=False
+    ):
+        conversions.count += 1
+        conversions.ordered.append(ordered)
+        filename, _ = export_descriptor(dataset_name, "parquet")
+        directory = os.path.join(conversions.root, uuid.uuid4().hex)
+        os.makedirs(directory)
+        path = os.path.join(directory, filename)
+        with open(path, "wb") as handle:
+            handle.write(conversions.body)
+        return path, filename, PARQUET_MEDIA_TYPE
+
+    conversions.ordered = []
+    monkeypatch.setattr(parquet_export, "plan_parquet_export", _plan)
+    monkeypatch.setattr(parquet_export, "export_parquet", _export)
+    return conversions
+
+
+def _parquet_url(dataset_id) -> str:
+    return f"/datasets/{dataset_id}/export?format=parquet"
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_an_unchanged_rebuild_after_the_ttl_still_slices_a_bare_range(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """DuckDB and GDAL read a footer with a bare Range, often a TTL after the probe.
+
+    The artifact expires every TTL whether or not the data moved, so the request
+    that lands after the rollover rebuilds. When the rebuild reproduces the
+    bytes the URL already served, and the URL holds nothing else, a client's
+    offsets point into these exact bytes, and the slice is the same one a hit
+    would have given. Answering whole made every rollover cost a reader the
+    whole file, and DuckDB retries a whole answer to a Range until it gives up.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Rollover Unchanged")
+    url = _parquet_url(dataset.id)
+
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200 and conversions.count == 1
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        footer = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 2, "the read after the rollover must rebuild"
+    assert footer.status_code == 206, (
+        f"a bare Range on a rebuild of unchanged data answered "
+        f"{footer.status_code}; the URL has only ever served these bytes"
+    )
+    assert footer.content == conversions.body[100:200]
+    assert footer.headers["content-range"] == f"bytes 100-199/{len(conversions.body)}"
+    assert footer.headers["etag"] == probe.headers["etag"]
+    assert conversions.ordered == [True, True], "an owned export reads by gid"
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_changed_rebuild_after_the_ttl_answers_a_bare_range_whole(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """The counterfactual: the data moved and nothing bumped the version.
+
+    The rebuild after the rollover lands under the same selection with other
+    bytes. A client holding offsets from the first artifact must get the whole
+    new file, not a slice of it.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Rollover Changed")
+    url = _parquet_url(dataset.id)
+
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200 and conversions.count == 1
+
+    conversions.body = bytes(reversed(conversions.body))
+    cache._ttl_seconds = lambda: 0
+    try:
+        resumed = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 2
+    assert resumed.status_code == 200, (
+        f"a bare Range on a rebuild with new bytes answered {resumed.status_code}; "
+        f"the client's earlier offsets were measured against the old artifact"
+    )
+    assert resumed.content == conversions.body
+    assert "content-range" not in resumed.headers
+    assert resumed.headers["etag"] != probe.headers["etag"]
+
+    # The data moves back. The next rebuild matches the first artifact, but the
+    # client that just took the whole second one holds offsets into that.
+    conversions.body = bytes(reversed(conversions.body))
+    cache._ttl_seconds = lambda: 0
+    try:
+        reverted = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 3
+    assert reverted.status_code == 200, (
+        f"a rebuild matching an earlier artifact answered {reverted.status_code} "
+        f"while the URL still holds other bytes a client may be reading"
+    )
+    assert reverted.headers["etag"] == probe.headers["etag"]
+
+
+async def test_url_held_only_these_bytes_refuses_any_other_bytes(
+    test_db_session, monkeypatch
+):
+    """``url_held_only_these_bytes`` needs one artifact and no rival, at any age.
+
+    An empty URL proves nothing. Other bytes anywhere under the URL, even in an
+    older version segment, refuse it, and so does a listing that fails.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Rollover Predecessor")
+    storage = get_storage()
+    payload = b"the bytes this URL serves"
+    digest = hashlib.sha256(payload).hexdigest()
+    selection = cache.selection_key(
+        dataset_id=dataset.id,
+        table_name="t",
+        dataset_title="Rollover Predecessor",
+        tile_cache_version=2,
+        format_key="geojson",
+        target_crs=None,
+        bbox=None,
+        where=None,
+        exporter_version="1.0.0",
+    )
+
+    async def _held() -> bool:
+        return await cache.url_held_only_these_bytes(dataset.id, selection, digest)
+
+    assert not await _held(), "a URL with no artifact proves nothing"
+
+    await _seed_aged_artifact(storage, dataset.id, selection, digest, payload, 120)
+    assert await _held()
+
+    older_version = selection.split("/", 1)[0] + "/" + "0" * 20
+    other = b"what this URL served before the change"
+    await _seed_aged_artifact(
+        storage,
+        dataset.id,
+        older_version,
+        hashlib.sha256(other).hexdigest(),
+        other,
+        3000,
+    )
+    assert not await _held(), "other bytes under the URL, at any age, refuse it"
+
+    def _down():
+        raise OSError("object store is down")
+
+    monkeypatch.setattr("app.processing.export.artifact_cache.get_storage", _down)
+    assert not await _held(), "an unreadable history must fail closed"
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_head_after_the_ttl_describes_unchanged_bytes_without_building(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """DuckDB ranges only into a length it learned from HEAD.
+
+    A HEAD that lands after the rollover finds nothing fresh. When the stored
+    artifact is the only bytes the URL holds, it answers that artifact's length
+    and ETag, and the conditional forms follow the same validator, all without
+    a conversion. The footer read that follows rebuilds and is sliced.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Head After Rollover")
+    url = _parquet_url(dataset.id)
+
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200 and conversions.count == 1
+    etag = probe.headers["etag"]
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        head = await client.head(url, headers=admin_auth_header)
+        revalidated = await client.head(
+            url, headers={**admin_auth_header, "If-None-Match": etag}
+        )
+        stale = await client.head(
+            url, headers={**admin_auth_header, "If-Match": '"last-weeks-export"'}
+        )
+        assert conversions.count == 1, "a HEAD must never build"
+        footer = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert head.status_code == 200
+    assert head.headers.get("content-length") == str(len(conversions.body)), (
+        f"a HEAD after the rollover answered content-length="
+        f"{head.headers.get('content-length')!r}; without a length DuckDB "
+        f"downloads the whole file"
+    )
+    assert head.headers.get("etag") == etag
+    assert revalidated.status_code == 304
+    assert stale.status_code == 412
+    assert footer.status_code == 206 and conversions.count == 2
+    assert footer.content == conversions.body[100:200]
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_head_after_a_change_is_size_less_again(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """Once the URL holds other bytes, a HEAD with nothing fresh can't promise either.
+
+    The counterfactual: an unsignalled change rebuilds to a second digest, so a
+    HEAD after that rollover keeps today's answer, no length and no validator,
+    and a revalidation naming the first artifact is not told it is current.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Head After Change")
+    url = _parquet_url(dataset.id)
+
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200
+    conversions.body = bytes(reversed(conversions.body))
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        rebuilt = await client.get(url, headers=admin_auth_header)
+        assert rebuilt.headers["etag"] != probe.headers["etag"]
+        head = await client.head(url, headers=admin_auth_header)
+        revalidated = await client.head(
+            url, headers={**admin_auth_header, "If-None-Match": probe.headers["etag"]}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 2
+    assert head.status_code == 200
+    assert "content-length" not in head.headers
+    assert "etag" not in head.headers
+    assert revalidated.status_code == 200
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_head_never_describes_an_artifact_past_the_sweep_horizon(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """A URL that only sees HEADs is never swept, since the sweep rides a build.
+
+    So the settled answer is bounded by the horizon itself: an artifact the
+    sweep would reclaim no longer lends a HEAD its length or a 304, and one
+    just inside the horizon still does.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Head Past Horizon")
+    url = _parquet_url(dataset.id)
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200
+    etag = probe.headers["etag"]
+
+    storage = get_storage()
+    prefix = f"export-cache/{cache._tenant_segment()}/{dataset.id}/"
+    (key,) = await storage.list(prefix)
+
+    async def _age_to(seconds_ago: float) -> None:
+        nonlocal key
+        _, size, digest = cache.parse_artifact_key(key)
+        selection = key.split(f"/{dataset.id}/", 1)[1].rsplit("/", 1)[0]
+        payload = await storage.get(key)
+        aged = cache._artifact_key(
+            dataset.id, selection, digest, size, time.time() - seconds_ago
+        )
+        await storage.put(aged, payload)
+        when = time.time() - seconds_ago
+        os.utime(Path(storage.base_dir) / aged, (when, when))
+        await storage.delete(key)
+        key = aged
+
+    await _age_to(cache._SWEEP_AGE_SECONDS - 60)
+    inside = await client.head(url, headers=admin_auth_header)
+    assert inside.headers.get("content-length") == str(len(conversions.body))
+
+    await _age_to(cache._SWEEP_AGE_SECONDS + 60)
+    past = await client.head(url, headers=admin_auth_header)
+    revalidated = await client.head(
+        url, headers={**admin_auth_header, "If-None-Match": etag}
+    )
+    assert conversions.count == 1
+    assert "content-length" not in past.headers and "etag" not in past.headers, (
+        "a HEAD described an artifact past the sweep horizon; with no build to "
+        "run the sweep, nothing else bounds how old that description can be"
+    )
+    assert revalidated.status_code == 200
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_sibling_that_appeared_during_the_build_is_not_a_predecessor(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    monkeypatch,
+):
+    """Predecessors come from the listing taken before the build, not from clocks.
+
+    An object store stamps LastModified on its own clock, S3 and Azure to the
+    second, so a sibling published while this request converted can carry a
+    time earlier than the request's start. Nothing was cached when the request
+    began, so its bare Range must still be answered whole.
+    """
+    from app.api.main import app as api_app
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Sibling During Build")
+    url = _parquet_url(dataset.id)
+    selection = cache.selection_key(
+        dataset_id=dataset.id,
+        table_name=dataset.table_name,
+        dataset_title=dataset.record.title,
+        tile_cache_version=dataset.tile_cache_version,
+        format_key="parquet",
+        target_crs=None,
+        bbox=None,
+        where=None,
+        exporter_version=api_app.version,
+    )
+    from app.processing.export import parquet as parquet_export
+
+    real_conversion = parquet_export.export_parquet
+
+    async def _sibling_lands_mid_build(*args, **kwargs):
+        await _seed_aged_artifact(
+            get_storage(),
+            dataset.id,
+            selection,
+            hashlib.sha256(conversions.body).hexdigest(),
+            conversions.body,
+            120,
+        )
+        return await real_conversion(*args, **kwargs)
+
+    monkeypatch.setattr(parquet_export, "export_parquet", _sibling_lands_mid_build)
+
+    cache._ttl_seconds = lambda: 0  # the backdated sibling is no incumbent
+    try:
+        resp = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 1
+    assert resp.status_code == 200, (
+        f"a bare Range answered {resp.status_code} on a URL that held nothing "
+        f"when the request began; the sibling only looked older"
+    )
+    assert "content-range" not in resp.headers
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_registered_table_resuming_an_unrecorded_version_is_answered_whole(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    monkeypatch,
+):
+    """A registered table can change by direct SQL without moving the key.
+
+    The cache holds A. The table changes to B and that build fails to publish,
+    so B goes out through the fallback and nothing records it. The table goes
+    back to A. A client resuming B must get the whole file: the rebuild matches
+    the only bytes the cache knows, but the key never saw B.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Registered Revert", source_format=None)
+    url = _parquet_url(dataset.id)
+    first = conversions.body
+
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+
+    async def _refuse(*args, **kwargs):
+        raise OSError("object store is full")
+
+    conversions.body = bytes(reversed(first))
+    cache._ttl_seconds = lambda: 0
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(cache, "_put_with_reclaim", _refuse)
+            unrecorded = await client.get(url, headers=admin_auth_header)
+        assert unrecorded.content == conversions.body
+
+        conversions.body = first
+        resumed = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 3
+    assert resumed.status_code == 200, (
+        f"a resume on a registered table answered {resumed.status_code}; the "
+        f"client may hold the unrecorded version, so a slice of A splices"
+    )
+    assert "content-range" not in resumed.headers
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+@pytest.mark.parametrize(
+    "if_none_match",
+    ["{etag}", "W/{etag}", '"another-export", {etag}'],
+    ids=["strong", "weak", "list"],
+)
+async def test_a_head_on_a_registered_table_stays_size_less_after_the_ttl(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    if_none_match,
+):
+    """Direct SQL on a registered table moves no key, so a HEAD can't vouch for bytes.
+
+    After the rollover the table has changed in place. The HEAD keeps the
+    size-less answer, and a revalidation naming the stored artifact, in any
+    tag form, is not told it is current.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Registered Head", source_format=None)
+    url = _parquet_url(dataset.id)
+    probe = await client.get(url, headers=admin_auth_header)
+    etag = probe.headers["etag"]
+    conversions.body = bytes(reversed(conversions.body))
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        head = await client.head(url, headers=admin_auth_header)
+        revalidated = await client.head(
+            url,
+            headers={
+                **admin_auth_header,
+                "If-None-Match": if_none_match.format(etag=etag),
+            },
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 1
+    assert "content-length" not in head.headers and "etag" not in head.headers, (
+        "a HEAD on a registered table described the stored artifact after the "
+        "TTL; nothing proves the table still holds those bytes"
+    )
+    assert revalidated.status_code == 200
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_head_with_a_where_filter_stays_size_less_after_the_ttl(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """A filter can select different rows as time passes, with no version change.
+
+    ``event_date = 'today'`` is a valid filter, and PostgreSQL resolves it
+    against the clock. So a filtered selection's bytes aren't pinned by the
+    key even on a table GeoLens owns: after the rollover the HEAD keeps the
+    size-less answer, a stale If-Match is refused as on any cold HEAD, and no
+    form of If-None-Match naming the stored artifact gets 304.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Filtered Head")
+    url = f"{_parquet_url(dataset.id)}&where=pop%20%3E%201000"
+    probe = await client.get(url, headers=admin_auth_header)
+    assert probe.status_code == 200
+    etag = probe.headers["etag"]
+    conversions.body = bytes(reversed(conversions.body))  # the clock moved
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        head = await client.head(url, headers=admin_auth_header)
+        if_match = await client.head(
+            url, headers={**admin_auth_header, "If-Match": etag}
+        )
+        revalidations = [
+            await client.head(url, headers={**admin_auth_header, "If-None-Match": tag})
+            for tag in (etag, f"W/{etag}", f'"another-export", {etag}')
+        ]
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 1
+    assert "content-length" not in head.headers and "etag" not in head.headers, (
+        "a filtered HEAD described the stored artifact after the TTL; the "
+        "filter may select other rows now"
+    )
+    assert if_match.status_code == 412 and "etag" not in if_match.headers, (
+        f"a stale If-Match on a filtered HEAD answered {if_match.status_code} "
+        f"with etag={if_match.headers.get('etag')!r}"
+    )
+    assert [r.status_code for r in revalidations] == [200, 200, 200]
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_filtered_export_resuming_an_unrecorded_version_is_answered_whole(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    monkeypatch,
+):
+    """A filter can select A, then B, then A again with no version change.
+
+    ``starts_at <= 'now' AND ends_at > 'now'`` does that on a table GeoLens
+    owns. A is cached; B goes out through the publish-failure fallback and is
+    never recorded; the window closes and the rebuild produces A again. A
+    client resuming B must get the whole file, though A's digest is the only
+    one the cache knows.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Filtered Revert")
+    url = f"{_parquet_url(dataset.id)}&where=pop%20%3E%201000"
+    first = conversions.body
+
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+
+    async def _refuse(*args, **kwargs):
+        raise OSError("object store is full")
+
+    conversions.body = bytes(reversed(first))
+    cache._ttl_seconds = lambda: 0
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(cache, "_put_with_reclaim", _refuse)
+            unrecorded = await client.get(url, headers=admin_auth_header)
+        assert unrecorded.content == conversions.body
+
+        conversions.body = first
+        resumed = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 3
+    assert resumed.status_code == 200, (
+        f"a resume on a filtered export answered {resumed.status_code}; the "
+        f"client may hold the unrecorded version, so a slice of A splices"
+    )
+    assert "content-range" not in resumed.headers
+
+
+@pytest.mark.usefixtures("parquet_conversions")
+async def test_a_matching_if_range_still_slices_a_filtered_rebuild(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """A strong If-Range names the client's bytes, so a filter doesn't matter."""
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Filtered If-Range")
+    url = f"{_parquet_url(dataset.id)}&where=pop%20%3E%201000"
+    probe = await client.get(url, headers=admin_auth_header)
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        resumed = await client.get(
+            url,
+            headers={
+                **admin_auth_header,
+                "Range": "bytes=100-199",
+                "If-Range": probe.headers["etag"],
+            },
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert conversions.count == 2
+    assert resumed.status_code == 206
+    assert resumed.content == conversions.body[100:200]
+
+
+async def test_an_ogr_format_rebuild_keeps_the_whole_answer(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, conversions
+):
+    """ogr2ogr reads a PostGIS layer in heap order, so its bytes aren't pinned.
+
+    An unchanged GeoJSON rebuild after the rollover answers a bare Range
+    whole, and a HEAD after the TTL has no length, as before.
+    """
+    from app.processing.export import artifact_cache as cache
+
+    dataset = await _dataset(test_db_session, "Ogr Rollover")
+    url = _url(dataset.id)
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+
+    cache._ttl_seconds = lambda: 0
+    try:
+        head = await client.head(url, headers=admin_auth_header)
+        footer = await client.get(
+            url, headers={**admin_auth_header, "Range": "bytes=100-199"}
+        )
+    finally:
+        cache._ttl_seconds = lambda: 600
+
+    assert "content-length" not in head.headers
+    assert footer.status_code == 200 and conversions.count == 2
+    assert "content-range" not in footer.headers
+
+
+async def test_an_app_upgrade_moves_the_export_key_but_not_the_url(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    monkeypatch,
+):
+    """Bytes built before an upgrade must not vouch for the same selection after.
+
+    The route keys on the running app's version. A new version lands on a new
+    version segment, so neither the settled HEAD nor the rebuild slice finds
+    the old artifact; the URL segment stays, so the URL's history still counts
+    it as other bytes.
+    """
+    from app.api.main import app as api_app
+
+    dataset = await _dataset(test_db_session, "App Upgrade")
+    url = _url(dataset.id)
+
+    monkeypatch.setattr(api_app, "version", "1.25.1")
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+    monkeypatch.setattr(api_app, "version", "1.26.0")
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+
+    assert conversions.count == 2, "the upgraded app reused a pre-upgrade artifact"
+    keys = await get_storage().list(
+        f"export-cache/{artifact_cache._tenant_segment()}/{dataset.id}/"
+    )
+    selections = {k.split(f"/{dataset.id}/", 1)[1].rsplit("/", 1)[0] for k in keys}
+    assert len(selections) == 2
+    assert len({selection.split("/")[0] for selection in selections}) == 1
+
+
+async def test_without_package_metadata_the_key_carries_the_release_version(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    test_db_session,
+    conversions,
+    monkeypatch,
+):
+    """A uv deployment installs the backend as a virtual project, with no metadata.
+
+    The app then reports the fallback version ``make bump`` rewrites, and the
+    export keys on that, never on a constant every release would share.
+    """
+    import importlib.metadata
+
+    from app.api import main
+
+    def _missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _missing)
+    monkeypatch.setattr(main.app, "version", main._resolve_app_version())
+
+    dataset = await _dataset(test_db_session, "No Metadata")
+    assert (
+        await client.get(_url(dataset.id), headers=admin_auth_header)
+    ).status_code == 200
+    (key,) = await get_storage().list(
+        f"export-cache/{artifact_cache._tenant_segment()}/{dataset.id}/"
+    )
+    stored_selection = key.split(f"/{dataset.id}/", 1)[1].rsplit("/", 1)[0]
+
+    def _selection(version: str) -> str:
+        return artifact_cache.selection_key(
+            dataset_id=dataset.id,
+            table_name=dataset.table_name,
+            dataset_title=dataset.record.title,
+            tile_cache_version=dataset.tile_cache_version,
+            format_key="geojson",
+            target_crs=None,
+            bbox=None,
+            where=None,
+            exporter_version=version,
+        )
+
+    assert stored_selection == _selection(main._FALLBACK_APP_VERSION)
+    assert stored_selection != _selection("source")

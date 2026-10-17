@@ -49,6 +49,7 @@ _MAX_PUBLISH_SECONDS = 600
 # conversion/ingest and the provider reports no capacity, so this is absolute.
 _BUDGET_BYTES = 8 * 1024 * 1024 * 1024
 
+
 _last_sweep_at = 0.0
 
 
@@ -110,14 +111,17 @@ def selection_key(
     target_crs: str | None,
     bbox: str | None,
     where: str | None,
+    exporter_version: str,
 ) -> str:
     """Identity of the requested bytes, as a storage path segment.
 
     Includes ``table_name`` (a replace swaps the physical table) and
     ``dataset_title`` (becomes the GPKG layer name). ``tile_cache_version`` is
     keyed here rather than checked at freshness time: a missed bump then only
-    costs bounded staleness, not a wrong download. ``None``/``""`` stay
-    distinct through the JSON encoding (#1546).
+    costs bounded staleness, not a wrong download. ``exporter_version`` is
+    the running app's version: an upgrade can write different bytes for the
+    same selection, and nothing built before it may vouch for them.
+    ``None``/``""`` stay distinct through the JSON encoding (#1546).
     """
     # #1585: two segments (URL identity, then version) so every artifact of
     # one URL shares a prefix for `url_answered_other_bytes_recently`.
@@ -126,7 +130,7 @@ def selection_key(
         separators=(",", ":"),
     )
     version_payload = json.dumps(
-        [table_name, dataset_title, tile_cache_version],
+        [table_name, dataset_title, tile_cache_version, exporter_version],
         separators=(",", ":"),
     )
     url_part = hashlib.sha256(url_payload.encode()).hexdigest()[:20]
@@ -164,6 +168,56 @@ async def url_answered_other_bytes_recently(
     except Exception:  # broad: unknown history reads as a recent change; whole is safe
         return True
     return False
+
+
+async def url_held_only_these_bytes(
+    dataset_id: uuid.UUID, selection: str, digest: str
+) -> bool:
+    """Does every artifact this URL still stores carry ``digest``, with one present?
+
+    At any age up to the sweep horizon, so a client holding offsets from any
+    of them holds offsets into these exact bytes. Fails CLOSED on a listing
+    error.
+    """
+    found = False
+    try:
+        async for page in get_storage().iter_object_pages(
+            _url_prefix(dataset_id, selection)
+        ):
+            for obj in page:
+                parsed = parse_artifact_key(obj.key)
+                if parsed is None:
+                    continue
+                if parsed[2] != digest:
+                    return False
+                found = True
+    except Exception:  # broad: unknown history proves nothing; whole is safe
+        return False
+    return found
+
+
+async def settled_artifact(
+    dataset_id: uuid.UUID, selection: str, *, filename: str, media_type: str
+) -> ExportArtifact | None:
+    """The newest artifact inside the sweep horizon, if the URL holds no other bytes.
+
+    Lets a HEAD that finds nothing fresh describe the export without building
+    it. The GET that follows rebuilds: unchanged data reproduces these bytes
+    and is sliced like a hit, and changed data is answered whole and leaves
+    the URL holding two digests, so the next HEAD is size-less again. Only
+    for a selection whose key pins its bytes: an owned table, whose every
+    write moves the key, and no ``where`` filter, which can select other rows
+    as the clock moves. Bytes changed otherwise would be vouched for until
+    the horizon.
+    """
+    artifact = await lookup(
+        dataset_id, selection, filename=filename, media_type=media_type, any_age=True
+    )
+    if artifact is None or artifact.contested:
+        return None
+    if not await url_held_only_these_bytes(dataset_id, selection, artifact.digest):
+        return None
+    return artifact
 
 
 def _selection_prefix(dataset_id: uuid.UUID, selection: str) -> str:
@@ -225,16 +279,21 @@ async def lookup(
     *,
     filename: str,
     media_type: str,
+    any_age: bool = False,
+    seen_digests: set[str] | None = None,
 ) -> ExportArtifact | None:
     """Newest usable artifact for this selection, or None.
 
-    "Usable" = published inside the TTL, not future-stamped, and intact (size
-    verified via one ``size()`` call, so an in-place-truncated ``put`` is a
-    miss rather than a served truncation). ``contested`` reports >1 distinct
-    digest among siblings. Every failure here is a miss.
+    "Usable" = published inside the TTL (inside the sweep horizon with
+    ``any_age``, so nothing the sweep would reclaim is described), not
+    future-stamped, and intact (size verified via one ``size()`` call, so an
+    in-place-truncated ``put`` is a miss rather than a served truncation).
+    ``contested`` reports >1 distinct digest among siblings, which are also
+    added to ``seen_digests``, so a caller that goes on to build knows what
+    this selection held before it began. Every failure here is a miss.
     """
     now = time.time()
-    cutoff = now - _ttl_seconds()
+    cutoff = now - (_SWEEP_AGE_SECONDS if any_age else _ttl_seconds())
     horizon = now + _CLOCK_SLACK_SECONDS
     # fix(#1532): freshness measures from modified time (put
     # completion, via `_published_at`) so a slow upload can't expire early.
@@ -275,6 +334,8 @@ async def lookup(
     # A selection with two distinct artifacts serves no ranges until sweep
     # clears the older; If-Range requests are already safe.
     contested = len(siblings) > 1
+    if seen_digests is not None:
+        seen_digests.update(siblings)
 
     for built_at, size, digest, key in sorted(candidates, reverse=True):
         try:

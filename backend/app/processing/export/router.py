@@ -22,6 +22,7 @@ from app.modules.auth.dependencies import get_optional_user
 from app.core.dependencies import get_db
 from app.core.db.tenant_schema import tenant_data_schema
 from app.core.db.tenant_session import current_tenant_var
+from app.platform.dataset_origin import geolens_owns_table
 from app.platform.extensions import get_processing_port
 from app.platform.http.ranges import (
     if_match_passes,
@@ -436,6 +437,7 @@ async def export_dataset_endpoint(
         target_crs=target_crs,
         bbox=bbox,
         where=where,
+        exporter_version=request.app.version,
     )
     # fix(#1532): filename/media_type are derived, not stored —
     # `export_descriptor` answers both from title+format without touching
@@ -443,11 +445,13 @@ async def export_dataset_endpoint(
     cached_filename, cached_media_type = export_descriptor(
         dataset.record.title, str(format)
     )
+    held_before_build: set[str] = set()
     artifact = await artifact_cache.lookup(
         dataset_id,
         selection,
         filename=cached_filename,
         media_type=cached_media_type,
+        seen_digests=held_before_build,
     )
 
     if artifact is not None:
@@ -600,8 +604,43 @@ async def export_dataset_endpoint(
     dataset_columns = dataset.column_info
     dataset_has_geometry = dataset.geometry_type is not None
     dataset_extent = dataset.record.spatial_extent
+    # Every in-app write to a table GeoLens owns rolls tile_cache_version or
+    # the title, both in the selection key. A registered table can change in
+    # place by direct SQL, and a `where` filter can resolve against the clock
+    # ('now', 'today'); only the TTL bounds either. Parquet only: ogr2ogr reads
+    # a PostGIS layer in heap order, which an UPDATE or synchronized scan moves.
+    bytes_follow_key = (
+        where is None
+        and parquet_plan is not None
+        and parquet_plan.has_gid
+        and geolens_owns_table(
+            dataset.source_format, dataset.record.record_type, dataset.origin_ref
+        )
+    )
     del dataset
     await db.rollback()
+
+    # A HEAD with nothing fresh still answers a real length and validator when
+    # the stored artifact is the only bytes this URL holds; it never builds.
+    if request.method == "HEAD" and bytes_follow_key:
+        settled = await artifact_cache.settled_artifact(
+            dataset_id,
+            selection,
+            filename=cached_filename,
+            media_type=cached_media_type,
+        )
+        if settled is not None:
+            if not if_match_passes(request.headers.get("if-match"), settled.etag):
+                raise HTTPException(
+                    status_code=status.HTTP_412_PRECONDITION_FAILED,
+                    detail="Export has changed since the version you hold",
+                    headers={"etag": settled.etag},
+                )
+            if if_none_match_matches(
+                request.headers.get("if-none-match"), settled.etag
+            ):
+                return not_modified_response(settled.etag)
+            return artifact_response.head_response(settled)
 
     # 6e. HEAD stops here — after every status-deciding gate, before the
     # conversion. No audit event: nothing exported.
@@ -655,6 +694,7 @@ async def export_dataset_endpoint(
                 dataset_title,
                 schema=data_schema,
                 plan=parquet_plan,
+                ordered=bytes_follow_key,
                 # fix(#1778): bound the row stream by the edge window the same
                 # way the ogr2ogr formats below are bounded.
                 deadline=request_deadline,
@@ -787,25 +827,35 @@ async def export_dataset_endpoint(
     # losing more than the export.
     try:
         if stored is not None:
-            # may_serve_range=False: this request BUILT the artifact (or
-            # lost the publish race), so it can't know what the client's
-            # offsets were measured against — whole is the safe half of
-            # RFC 9110 14.2. A matching If-Range or a byte-0 Range (a cold
-            # GDAL open's first request) overrides it, honoured unless this
-            # URL answered different bytes inside the last TTL (#1585 r1).
-            leading_slice_ok = not stored.contested
-            if leading_slice_ok and _leading_bare_range(request, stored.size):
-                leading_slice_ok = (
-                    not await artifact_cache.url_answered_other_bytes_recently(
+            # This request BUILT the artifact (or lost the publish race), so
+            # a bare Range is sliced only when the selection held these bytes
+            # before the build began, the URL holds nothing else and the key
+            # pins the bytes: a TTL rollover of unchanged data. Otherwise
+            # whole, the safe half of RFC 9110 14.2, except a byte-0 Range (a
+            # cold GDAL open's first request) while this URL answered no other
+            # bytes recently.
+            may_serve_range = False
+            leading_slice_ok = False
+            if not stored.contested and _bare_satisfiable_range(request, stored.size):
+                may_serve_range = (
+                    bytes_follow_key
+                    and stored.digest in held_before_build
+                    and await artifact_cache.url_held_only_these_bytes(
                         dataset_id, selection, stored.digest
                     )
                 )
+                if not may_serve_range and _leading_bare_range(request, stored.size):
+                    leading_slice_ok = (
+                        not await artifact_cache.url_answered_other_bytes_recently(
+                            dataset_id, selection, stored.digest
+                        )
+                    )
             response = artifact_response.read_response(
                 get_storage(),
                 stored,
                 range_header=request.headers.get("range"),
                 if_range=request.headers.get("if-range"),
-                may_serve_range=False,
+                may_serve_range=may_serve_range,
                 leading_slice_ok=leading_slice_ok,
                 background=BackgroundTask(_cleanup_export, temp_dir),
             )

@@ -5,10 +5,12 @@ whole representation goes back with 200 (RFC 9110 14.2) — a ``/vsicurl/``
 client sends no If-Range, so a rebuild can't tell it's a different file,
 and only a whole 200 can't splice two representations together.
 
-Exceptions: a Range starting at byte 0 is honoured on a fresh build (#1585,
-GDAL vsicurl's first request); ranges are answered whole for one TTL after
-a URL's bytes change; and a matching ``If-Range`` (RFC 9110 13.1.5) is
-always honoured, since it proves what bytes the client already holds.
+Exceptions: a rebuild that reproduced the only bytes the URL holds is
+sliced like the artifact it replaces; a Range starting at byte 0 is honoured
+on a fresh build (#1585, GDAL vsicurl's first request); ranges are answered
+whole for one TTL after a URL's bytes change; and a matching ``If-Range``
+(RFC 9110 13.1.5) is always honoured, since it proves what bytes the client
+already holds.
 """
 
 import asyncio
@@ -71,7 +73,7 @@ def read_response(
 ) -> Response:
     """The GET: a 206 slice, a 416, or the whole artifact.
 
-    ``may_serve_range``: true only if the artifact existed before this
+    ``may_serve_range``: true only if these bytes were served before this
     request (gates the splice in the module docstring). ``leading_slice_ok``
     is the byte-0 exception, set only for a fresh build with no other live
     representation. ``background`` must run AFTER the response (fix(#435)).
@@ -138,26 +140,24 @@ def temp_file_response(
     if_range: str | None = None,
     background: BackgroundTask | None = None,
 ) -> Response:
-    """Serve a just-converted file, without letting starlette see the Range.
+    """Serve a just-converted file that wasn't published.
 
-    fix(#1532): replaces ``FileResponse`` when publication doesn't
-    happen — starlette's own Range handling repeats #1532's splice on this
-    degraded path, and its mtime ETag disagreed with the artifact path's.
+    Not ``FileResponse``: starlette's own Range handling would slice a
+    conversion no later request can find, and its mtime ETag disagrees with
+    the artifact path's.
 
-    ``etag`` is the SAME validator the artifact path sends; None when the
-    file couldn't be hashed (no validator beats a wrong one).
-
-    fix(#1532): a matching ``If-Range`` gets a 206 from the local
-    file (export is byte-deterministic); a bare or mismatched one gets the
-    whole file, since this request BUILT it.
+    These bytes are never recorded, so nothing could later tell a resume of
+    them from one of another version: the response says ``Accept-Ranges:
+    none`` and carries no ETag, leaving a client nothing to resume against.
+    ``etag`` (the digest, None when unhashable) only proves an ``If-Range``
+    the client took from an artifact of the same bytes, which gets a 206 from
+    the local file; a bare or mismatched one gets the whole file.
     """
     size = os.path.getsize(file_path)
     headers = {
-        "accept-ranges": "bytes",
+        "accept-ranges": "none",
         "content-disposition": file_response_content_disposition(filename),
     }
-    if etag is not None:
-        headers["etag"] = etag
 
     proven = (
         etag is not None
@@ -166,7 +166,7 @@ def temp_file_response(
     )
     byte_range = parse_byte_range(range_header, size) if proven else None
     if byte_range == RANGE_UNSATISFIABLE:
-        raise _unsatisfiable(size, etag)
+        raise _unsatisfiable(size, None, accept_ranges="none")
     if byte_range is not None:
         start, end = byte_range
         return StreamingResponse(
@@ -188,10 +188,12 @@ def temp_file_response(
     )
 
 
-def _unsatisfiable(size: int, etag: str | None) -> HTTPException:
+def _unsatisfiable(
+    size: int, etag: str | None, *, accept_ranges: str = "bytes"
+) -> HTTPException:
     """The 416, built once for both the stored and the local representation."""
     headers = {
-        "accept-ranges": "bytes",
+        "accept-ranges": accept_ranges,
         # Size is the point of a 416 (how a client learns the real length).
         # No Content-Disposition: this body is a JSON error, not the export.
         "content-range": f"bytes */{size}",
