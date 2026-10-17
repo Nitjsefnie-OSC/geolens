@@ -7,9 +7,7 @@ the min/max fold spans the globe the wrong way.
 
 The fix aggregates in two longitude domains (as stored, and ``+360``-shifted)
 and keeps whichever range is narrower, so ``rollup_bbox`` emits the RFC 7946
-§5.2 ``west > east`` pair when that is the honest answer and
-``rollup_span_bbox`` keeps the over-broad-but-monotonic form for consumers that
-cannot express a crossing box.
+§5.2 ``west > east`` pair when that is the honest answer.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from app.core.geo import (
     merge_bboxes,
     rollup_bbox,
     rollup_bbox_columns,
-    rollup_span_bbox,
     wrap_longitude,
 )
 from app.modules.catalog.authorization import apply_visibility_filter
@@ -162,13 +159,12 @@ class TestMergeBboxes:
 
 
 class TestRollupRowHelpers:
-    def test_spec_form_and_span_form_diverge_only_when_crossing(self):
+    def test_the_pair_is_inverted_only_when_crossing(self):
         crossing = [-180.0, -20.0, 180.0, -15.0, 178.5, 181.5]
         assert rollup_bbox(crossing) == [178.5, -20.0, -178.5, -15.0]
-        assert rollup_span_bbox(crossing) == [-180.0, -20.0, 180.0, -15.0]
 
         plain = [0.0, 0.0, 10.0, 5.0, 0.0, 10.0]
-        assert rollup_bbox(plain) == rollup_span_bbox(plain) == [0.0, 0.0, 10.0, 5.0]
+        assert rollup_bbox(plain) == [0.0, 0.0, 10.0, 5.0]
 
     def test_a_genuinely_global_rollup_stays_global(self):
         """A -180..180 footprint shifts to 180..540: same 360-degree span, so the
@@ -178,7 +174,6 @@ class TestRollupRowHelpers:
 
     def test_null_and_short_rows_return_none(self):
         assert rollup_bbox([None, None, None, None, None, None]) is None
-        assert rollup_span_bbox([1.0, 2.0, 3.0, 4.0, 5.0, None]) is None
         assert rollup_bbox([1.0, 2.0, 3.0]) is None
         assert rollup_bbox(None) is None
 
@@ -383,15 +378,6 @@ class TestSqlRollup:
             40.9,
         ]
 
-    async def test_span_form_never_inverts(self, test_db_session, clean_tables):
-        del clean_tables
-        ids = await _insert_records(test_db_session, [FIJI_WEST, FIJI_EAST])
-        stmt = select(*rollup_bbox_columns(Record.spatial_extent)).where(
-            Record.id.in_(ids)
-        )
-        row = (await test_db_session.execute(stmt)).one()
-        assert rollup_span_bbox(row[:6]) == [-180.0, -20.0, 180.0, -15.0]
-
     async def test_no_visible_records_yields_no_extent(
         self, test_db_session, clean_tables
     ):
@@ -516,17 +502,11 @@ async def test_collections_api_extent_bbox_uses_the_spec_form(
 ):
     """``CollectionResponse.extent_bbox`` is the RFC 7946 §5.2 pair.
 
-    fix(#1006): this pinned the monotonic span form under #886, when
-    CollectionCard's BBoxPreview had no crossing guard. #903 added one
-    (``crossesAntimeridian``, ``splitBbox``), and the span form then defeated
-    it: ``rollup_span_bbox`` collapses a crossing rollup to
-    ``[-180, s, 180, n]``, which is bit-identical to what a genuinely global
-    collection produces, so no client-side test could tell them apart and a
-    Fiji-shaped collection drew a band across the whole world.
-
-    Rewritten rather than deleted --- it is the contract pin for this field, and
-    it now pins the opposite half of the same contract. Mirrors the sibling
-    per-dataset ``extent_bbox``, flipped in #1004."""
+    A collection that crosses the antimeridian keeps west > east. The monotonic
+    ``[-180, s, 180, n]`` form is identical to a genuinely global collection's
+    bbox, so a client's crossing guard (``crossesAntimeridian``, ``splitBbox``)
+    could not tell them apart and drew a band across the whole world. Mirrors
+    the per-dataset ``extent_bbox``."""
     coll, _ = await _seed_crossing_collection(test_db_session)
 
     resp = await client.get(
