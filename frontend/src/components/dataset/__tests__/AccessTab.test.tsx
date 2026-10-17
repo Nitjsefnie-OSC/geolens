@@ -33,6 +33,19 @@ vi.mock('@/components/dataset/hooks/use-dataset', () => ({
   useUpdateDataset: vi.fn(),
 }));
 
+let canEditMetadata = true;
+vi.mock('@/hooks/use-permissions', () => ({
+  usePermissions: () => ({ permissions: null, isLoading: false, can: () => canEditMetadata }),
+}));
+
+vi.mock('@/components/dataset/DatasetWriteKeys', () => ({
+  DatasetWriteKeys: ({ datasetId, canCreate }: { datasetId: string; canCreate: boolean }) => (
+    <div data-testid="dataset-write-keys" data-can-create={String(canCreate)}>
+      {datasetId}
+    </div>
+  ),
+}));
+
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
@@ -264,6 +277,70 @@ describe('AccessTab', () => {
       render(<AccessTab dataset={makeDataset()} />);
 
       expect(screen.getByRole('heading', { name: 'Downloads and connections' })).toBeInTheDocument();
+    });
+  });
+
+  describe('write keys', () => {
+    beforeEach(() => {
+      canEditMetadata = true;
+    });
+
+    it('lets an editor of a feature dataset manage and create its write keys', () => {
+      render(<AccessTab dataset={makeDataset({ geometry_type: 'POINT' })} canEdit />);
+      const card = screen.getByTestId('dataset-write-keys');
+      expect(card).toHaveTextContent('ds-1');
+      expect(card).toHaveAttribute('data-can-create', 'true');
+    });
+
+    it('is hidden from someone the key list refuses, such as a non-owner viewer', () => {
+      render(<AccessTab dataset={makeDataset({ geometry_type: 'POINT' })} />);
+      expect(screen.queryByTestId('dataset-write-keys')).not.toBeInTheDocument();
+    });
+
+    it('lets an owner without the edit permission list and revoke, but not create', () => {
+      canEditMetadata = false;
+      render(
+        <AccessTab
+          dataset={makeDataset({ geometry_type: 'POINT' })}
+          canEdit={false}
+          canManageKeys
+        />,
+      );
+      expect(screen.getByTestId('dataset-write-keys')).toHaveAttribute('data-can-create', 'false');
+    });
+
+    it('follows the configured edit_metadata capability rather than the role name', () => {
+      canEditMetadata = false;
+      const { unmount } = render(
+        <AccessTab dataset={makeDataset({ geometry_type: 'POINT' })} canEdit canManageKeys />,
+      );
+      expect(screen.getByTestId('dataset-write-keys')).toHaveAttribute('data-can-create', 'false');
+      unmount();
+
+      canEditMetadata = true;
+      render(
+        <AccessTab
+          dataset={makeDataset({ geometry_type: 'POINT' })}
+          canEdit={false}
+          canManageKeys
+        />,
+      );
+      expect(screen.getByTestId('dataset-write-keys')).toHaveAttribute('data-can-create', 'true');
+    });
+
+    it('keeps the keys of a dataset without a geometry column, but offers no new one', () => {
+      render(<AccessTab dataset={makeDataset({ geometry_type: null })} canEdit />);
+      expect(screen.getByTestId('dataset-write-keys')).toHaveAttribute('data-can-create', 'false');
+    });
+
+    it('is hidden for a dataset without features', () => {
+      render(
+        <AccessTab
+          dataset={makeDataset({ record_type: 'raster_dataset', geometry_type: 'POINT' })}
+          canEdit
+        />,
+      );
+      expect(screen.queryByTestId('dataset-write-keys')).not.toBeInTheDocument();
     });
   });
 

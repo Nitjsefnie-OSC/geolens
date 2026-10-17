@@ -1970,6 +1970,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/datasets/{dataset_id}/api-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Dataset Api Keys
+         * @description List the active keys bound to this dataset, newest first.
+         *
+         *     Requires write access to the dataset. The dataset's owner and admins see
+         *     every key bound to it, anyone else only their own. Expired keys stay
+         *     listed until revoked.
+         */
+        get: operations["list_dataset_api_keys_datasets__dataset_id__api_keys_get"];
+        put?: never;
+        /**
+         * Create Dataset Api Key
+         * @description Create a key that reads and writes this dataset's features only.
+         *
+         *     The key has scope ``dataset_write`` and acts as the caller, so the
+         *     caller's own access to the dataset still applies to every request it
+         *     makes. It authenticates the dataset's feature routes and OGC API
+         *     Features items, and is treated as an invalid key everywhere else. Its
+         *     feature writes go through even when the instance has dataset editing
+         *     switched off. It must expire within 365 days. Requires write access to the
+         *     dataset, the ``edit_metadata`` permission the feature writes need, and a
+         *     signed-in session. A dataset that can't take feature edits (no feature
+         *     table or no geometry column) gets 422. A dataset holds at most 100 keys
+         *     that aren't revoked, expired ones included; minting past that gets 409
+         *     until one is revoked. The raw key is returned only in this response.
+         */
+        post: operations["create_dataset_api_key_datasets__dataset_id__api_keys_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/datasets/{dataset_id}/api-keys/{key_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Dataset Api Key
+         * @description Revoke a key bound to this dataset.
+         *
+         *     The key's creator may revoke it while they can see the dataset, even
+         *     after losing write access to it; anyone with write access may revoke any
+         *     key bound to it, checked again under the dataset's row lock. Answers 404
+         *     when no active key with this id is bound to the dataset.
+         */
+        delete: operations["revoke_dataset_api_key_datasets__dataset_id__api_keys__key_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/datasets/{dataset_id}/attributes/": {
         parameters: {
             query?: never;
@@ -5840,9 +5905,14 @@ export interface components {
             expires_at?: string | null;
             /**
              * Scope
-             * @description Privilege scope: 'full' or 'read_only'.
+             * @description Privilege scope: 'full', 'read_only', or 'dataset_write' (reads and writes the features of the dataset in dataset_id, and nothing else).
              */
             scope: string;
+            /**
+             * Dataset Id
+             * @description The dataset a 'dataset_write' key is bound to; null for other scopes.
+             */
+            dataset_id?: string | null;
             /**
              * Created At
              * Format: date-time
@@ -6328,9 +6398,14 @@ export interface components {
             expires_at?: string | null;
             /**
              * Scope
-             * @description Privilege scope: 'full' or 'read_only'
+             * @description Privilege scope: 'full', 'read_only', or 'dataset_write' (reads and writes the features of the dataset in dataset_id, and nothing else)
              */
             scope: string;
+            /**
+             * Dataset Id
+             * @description The dataset a 'dataset_write' key is bound to; null for other scopes
+             */
+            dataset_id?: string | null;
             /**
              * Created At
              * Format: date-time
@@ -6360,9 +6435,14 @@ export interface components {
             expires_at?: string | null;
             /**
              * Scope
-             * @description Privilege scope: 'full' or 'read_only'
+             * @description Privilege scope: 'full', 'read_only', or 'dataset_write' (reads and writes the features of the dataset in dataset_id, and nothing else)
              */
             scope: string;
+            /**
+             * Dataset Id
+             * @description The dataset a 'dataset_write' key is bound to; null for other scopes
+             */
+            dataset_id?: string | null;
             /**
              * Created At
              * Format: date-time
@@ -7972,6 +8052,77 @@ export interface components {
              * @description Creation timestamp
              */
             created_at: string;
+        };
+        /** DatasetApiKeyCreateRequest */
+        DatasetApiKeyCreateRequest: {
+            /**
+             * Name
+             * @description Human-readable label for the API key
+             */
+            name: string;
+            /**
+             * Expires At
+             * Format: date-time
+             * @description Expiry timestamp (RFC 3339, timezone-aware), in the future and at most 365 days away. Expired keys stop authenticating.
+             */
+            expires_at: string;
+        };
+        /** DatasetApiKeyListItem */
+        DatasetApiKeyListItem: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Fingerprint
+             * @description Non-secret key identifier; null for keys created before fingerprint support
+             */
+            fingerprint: string | null;
+            /** Is Active */
+            is_active: boolean;
+            /**
+             * Expires At
+             * @description Expiry timestamp; null means the key does not expire
+             */
+            expires_at?: string | null;
+            /**
+             * Scope
+             * @description Privilege scope: 'full', 'read_only', or 'dataset_write' (reads and writes the features of the dataset in dataset_id, and nothing else)
+             */
+            scope: string;
+            /**
+             * Dataset Id
+             * @description The dataset a 'dataset_write' key is bound to; null for other scopes
+             */
+            dataset_id?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Last Used At */
+            last_used_at: string | null;
+            /**
+             * User Id
+             * Format: uuid
+             * @description The user who minted the key; it acts as them
+             */
+            user_id: string;
+            /**
+             * Username
+             * @description That user's username
+             */
+            username: string;
+        };
+        /** DatasetApiKeyListResponse */
+        DatasetApiKeyListResponse: {
+            /** Items */
+            items: components["schemas"]["DatasetApiKeyListItem"][];
+            /** Total */
+            total: number;
         };
         /**
          * DatasetChatRequest
@@ -24421,6 +24572,327 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AnalysisPreviewResponse"];
                 };
+            };
+            /** @description Bad request — invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks write access */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_dataset_api_keys_datasets__dataset_id__api_keys_get: {
+        parameters: {
+            query?: {
+                skip?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                dataset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetApiKeyListResponse"];
+                };
+            };
+            /** @description Bad request — invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks write access */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    create_dataset_api_key_datasets__dataset_id__api_keys_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                dataset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DatasetApiKeyCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiKeyCreateResponse"];
+                };
+            };
+            /** @description Bad request — invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks write access */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    revoke_dataset_api_key_datasets__dataset_id__api_keys__key_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                dataset_id: string;
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Bad request — invalid payload */
             400: {

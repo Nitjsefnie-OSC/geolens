@@ -22,6 +22,7 @@ from app.core.identity import Identity
 from app.modules.auth.models import ApiKey, User
 from app.modules.auth.permissions import get_user_roles
 from app.platform.extensions import get_identity_extension, get_permission_extension
+from app.platform.request_credential import ApiKeyCredential, record_api_key
 
 oauth2_scheme_optional = OAuth2PasswordBearer(
     tokenUrl="/api/auth/login", auto_error=False
@@ -153,6 +154,40 @@ def _read_only_key_may_call(
     return value.strip().lower() in _FALSEY_QUERY_VALUES
 
 
+# The only routes a dataset_write key authenticates, as exact (METHOD, route
+# template) pairs: reading and writing features of the dataset each template
+# names in its ``dataset_id`` path parameter. Templates match as in the
+# read_only carve-out above, including the generated no-slash aliases.
+_DATASET_KEY_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/datasets/{dataset_id}/features/"),
+        ("GET", "/datasets/{dataset_id}/features"),
+        ("POST", "/datasets/{dataset_id}/features/"),
+        ("POST", "/datasets/{dataset_id}/features"),
+        ("GET", "/datasets/{dataset_id}/features/{gid}"),
+        ("PUT", "/datasets/{dataset_id}/features/{gid}"),
+        ("PATCH", "/datasets/{dataset_id}/features/{gid}"),
+        ("DELETE", "/datasets/{dataset_id}/features/{gid}"),
+        ("GET", "/datasets/{dataset_id}/features.geojson"),
+        ("GET", "/collections/{dataset_id}/items"),
+        ("GET", "/collections/{dataset_id}/items/"),
+        ("GET", "/collections/{dataset_id}/items/{feature_id}"),
+    }
+)
+
+
+def _dataset_key_may_call(request: Request, dataset_id: uuid.UUID | None) -> bool:
+    """Whether a dataset_write key bound to ``dataset_id`` may serve this request."""
+    if dataset_id is None:
+        return False
+    if (request.method, _route_template(request)) not in _DATASET_KEY_ROUTES:
+        return False
+    try:
+        return uuid.UUID(str(request.path_params.get("dataset_id"))) == dataset_id
+    except ValueError:
+        return False
+
+
 def _query_key_may_authenticate(
     method: str,
     route_template: str,
@@ -263,6 +298,11 @@ async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
     fix(#1845): that read-only justification is now enforced, not just
     documented — ``_supplied_api_key`` drops a query-string key on anything
     but a read.
+
+    A ``dataset_write`` key off its own dataset's feature routes resolves to
+    None, like an invalid key: a valid bearer token on the same request then
+    authenticates it as the token's user. A key that resolves is recorded on
+    ``db`` for the request's guards and audit events.
     """
     api_key = _supplied_api_key(request)
     if not api_key:
@@ -289,6 +329,19 @@ async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
     if user is None or api_key_obj.key_epoch != user.key_epoch:
         return None
     if not user.is_active or user.status != "active":
+        return None
+    # A dataset_write key off its own dataset's feature routes resolves as no
+    # key at all, before the usage bump, so the refusal matches an invalid key
+    # and tells the caller nothing about the route or the dataset.
+    if api_key_obj.scope == "dataset_write" and not _dataset_key_may_call(
+        request, api_key_obj.dataset_id
+    ):
+        log.warning(
+            "api_key_dataset_scope_denied",
+            user_id=str(user.id),
+            method=request.method,
+            path=_route_template(request),
+        )
         return None
     # Only bump last_used_at every 60s (reduce write amplification), via a
     # separate session: committing on `db` here would flush/release advisory
@@ -332,6 +385,14 @@ async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This API key is read-only",
         )
+    record_api_key(
+        db,
+        ApiKeyCredential(
+            id=api_key_obj.id,
+            scope=api_key_obj.scope,
+            dataset_id=api_key_obj.dataset_id,
+        ),
+    )
     return user
 
 

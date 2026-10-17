@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { useDatasetAccessEndpoints } from '@/components/dataset/hooks/use-dataset-access';
 import { useDistributions } from '@/components/dataset/hooks/use-records';
 import { useUpdateDataset } from '@/components/dataset/hooks/use-dataset';
+import { usePermissions } from '@/hooks/use-permissions';
 import { useCanSetPublicVisibility } from '@/hooks/use-settings';
 import { listKeywords } from '@/api/records';
 import type { DatasetResponse, DatasetVisibility } from '@/types/api';
@@ -37,6 +38,7 @@ import { DistributionsList } from '@/components/dataset/DistributionsList';
 import { ExportButton } from '@/components/dataset/ExportButton';
 import { TilesetAccess } from '@/components/dataset/TilesetAccess';
 import { PointCloudAccess } from '@/components/dataset/PointCloudAccess';
+import { DatasetWriteKeys } from '@/components/dataset/DatasetWriteKeys';
 import { recordTypeCapabilities } from '@/lib/record-types';
 import { cn } from '@/lib/utils';
 
@@ -56,6 +58,9 @@ interface AccessTabProps {
   /** Owner-or-admin editor: mirrors the backend `check_dataset_write_access`.
    * Everyone else keeps the read-only visibility badge. */
   canEdit?: boolean;
+  /** Owner or admin, whatever their role permits: who the dataset's key list
+   * and revoke endpoints serve. Defaults to `canEdit`. */
+  canManageKeys?: boolean;
 }
 
 /** fix(#927): the visibility values this control can move a dataset TO, in
@@ -257,7 +262,7 @@ function ApiSnippet({
   );
 }
 
-export function AccessTab({ dataset, canEdit = false }: AccessTabProps) {
+export function AccessTab({ dataset, canEdit = false, canManageKeys = canEdit }: AccessTabProps) {
   const { t } = useTranslation('dataset');
   const { endpoints, publicApiBaseUrl } = useDatasetAccessEndpoints(dataset);
   const updateDataset = useUpdateDataset();
@@ -265,6 +270,7 @@ export function AccessTab({ dataset, canEdit = false }: AccessTabProps) {
   // non-admins at non-public; the server enforces it with a 403, this only
   // disables the affordance.
   const canSetPublic = useCanSetPublicVisibility();
+  const canCreateKeys = usePermissions().can('edit_metadata');
   const isLegacyVisibility = !SELECTABLE_VISIBILITIES.includes(
     dataset.visibility as (typeof SELECTABLE_VISIBILITIES)[number],
   );
@@ -416,6 +422,16 @@ export function AccessTab({ dataset, canEdit = false }: AccessTabProps) {
           collectionId={dataset.id}
           ogcFeaturesUrl={endpoints.ogcFeaturesUrl}
           srid={dataset.srid ?? 4326}
+        />
+      )}
+
+      {/* Anyone who may list and revoke the keys sees them; creating one also
+          needs the edit_metadata capability and a geometry column, which every
+          feature write requires. */}
+      {canManageKeys && featureTable && (
+        <DatasetWriteKeys
+          datasetId={dataset.id}
+          canCreate={canCreateKeys && dataset.geometry_type !== null}
         />
       )}
 

@@ -29,6 +29,7 @@ from app.core.db.sqlstate import (
     sqlstate,
 )
 from app.core.identity import Identity
+from app.platform.request_credential import api_key_audit_details
 from app.platform.catalog_locks import (
     CatalogLockConflict,
     bump_tile_cache_version_on,
@@ -295,6 +296,7 @@ async def _create_features(
                 "property_fields": sorted(
                     {key for f in body.features for key in (f.properties or {})}
                 ),
+                **api_key_audit_details(db),
             },
         ),
     )
@@ -511,6 +513,7 @@ async def _finish_repeat(
                     "gid": repeat.row["gid"],
                     "geometry_updated": True,
                     "property_fields": sorted((body.properties or {}).keys()),
+                    **api_key_audit_details(db),
                 },
             ),
         )
@@ -1019,7 +1022,7 @@ async def create_feature(
         )
 
     await check_dataset_write_access(db, dataset, dataset_id, user)
-    await require_dataset_editing_enabled(db)
+    await require_dataset_editing_enabled(db, dataset_id)
     _require_feature_table(dataset)
 
     if isinstance(body, FeatureCollectionCreate):
@@ -1116,6 +1119,7 @@ async def create_feature(
             details={
                 "gid": row["gid"],
                 "property_fields": sorted((row.get("properties") or {}).keys()),
+                **api_key_audit_details(db),
             },
         ),
     )
@@ -1169,7 +1173,7 @@ async def replace_single_feature(
         )
 
     await check_dataset_write_access(db, dataset, dataset_id, user)
-    await require_dataset_editing_enabled(db)
+    await require_dataset_editing_enabled(db, dataset_id)
     _require_feature_table(dataset)
 
     try:
@@ -1229,6 +1233,7 @@ async def replace_single_feature(
             details={
                 "gid": row["gid"],
                 "property_fields": sorted((row.get("properties") or {}).keys()),
+                **api_key_audit_details(db),
             },
         ),
     )
@@ -1284,7 +1289,7 @@ async def patch_single_feature(
         )
 
     await check_dataset_write_access(db, dataset, dataset_id, user)
-    await require_dataset_editing_enabled(db)
+    await require_dataset_editing_enabled(db, dataset_id)
     _require_feature_table(dataset)
 
     try:
@@ -1349,6 +1354,7 @@ async def patch_single_feature(
                 "gid": row["gid"],
                 "geometry_updated": body.geometry is not None,
                 "property_fields": sorted((body.properties or {}).keys()),
+                **api_key_audit_details(db),
             },
         ),
     )
@@ -1411,7 +1417,7 @@ async def delete_single_feature(
         )
 
     await check_dataset_write_access(db, dataset, dataset_id, user)
-    await require_dataset_editing_enabled(db)
+    await require_dataset_editing_enabled(db, dataset_id)
     _require_feature_table(dataset)
 
     try:
@@ -1446,7 +1452,7 @@ async def delete_single_feature(
             action="feature.delete",
             resource_type="dataset",
             resource_id=dataset_id,
-            details={"gid": gid},
+            details={"gid": gid, **api_key_audit_details(db)},
         ),
     )
     tile_version = await record_live_data_write(db, dataset)

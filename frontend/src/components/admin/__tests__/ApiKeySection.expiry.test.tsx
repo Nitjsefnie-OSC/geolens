@@ -132,4 +132,18 @@ describe('ApiKeySection expiry', () => {
 
     expect(container.querySelector('span.rounded-full')).toHaveAttribute('title', 'apiKeys.expired');
   });
+
+  it('badges a key bound to one dataset', () => {
+    listing([makeKey({ scope: 'dataset_write', dataset_id: 'ds-1' })]);
+    render(<ApiKeySection userId="u1" />);
+    expect(screen.getByText('apiKeys.scopeDatasetWrite')).toBeInTheDocument();
+  });
+
+  it('lets a key row wrap so it never widens the edit dialog', () => {
+    listing([makeKey({ name: 'Webhook smoke', fingerprint: 'abcdefgh…wxyz', scope: 'dataset_write' })]);
+    render(<ApiKeySection userId="u1" />);
+    const name = screen.getByText('Webhook smoke');
+    expect(name).toHaveClass('min-w-0', 'max-w-full', 'truncate');
+    expect(name.parentElement).toHaveClass('flex-wrap');
+  });
 });
