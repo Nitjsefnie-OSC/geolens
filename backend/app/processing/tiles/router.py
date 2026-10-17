@@ -55,6 +55,7 @@ from app.platform.extensions import (
     RecordAudienceQuery,
     get_billing_extensions,
     get_data_serving_extension,
+    get_permission_extension,
     get_processing_port,
 )
 from app.platform.service_endpoints import MAX_QUERY_FIELDS
@@ -102,7 +103,11 @@ from app.processing.tiles.signing import (
     round_expiry,
     verify_tile_signature,
 )
-from app.standards.ogc.errors import ERROR_RESPONSES_PUBLIC, RATE_LIMIT_RESPONSE
+from app.standards.ogc.errors import (
+    ERROR_RESPONSES_PUBLIC,
+    FORBIDDEN_RESPONSE,
+    RATE_LIMIT_RESPONSE,
+)
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -874,6 +879,87 @@ def _tile_signature_authorizes(
     return verify_tile_signature(scope, exp, sig)
 
 
+def _raster_embed_token_refused() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or expired embed token"
+    )
+
+
+async def _check_raster_reader(
+    db: AsyncSession,
+    dataset_id: uuid.UUID,
+    user: Identity,
+    facts: Any,
+    dataset: Any = None,
+) -> None:
+    """Raise 404 "Dataset not found" unless ``user`` may read the dataset.
+
+    ``facts`` carries ``visibility``, ``record_status`` and ``created_by``, from
+    the raster metadata snapshot or a dataset's record. ``dataset`` saves a
+    lookup when the caller already holds the row.
+    """
+    port = get_processing_port()
+    if facts.visibility != "public":
+        # Routed through the permission extension rather than an inline policy
+        # mirror, so an overlay that denies the creator still wins here as it
+        # does on the token path.
+        if dataset is None:
+            dataset = await port.get_dataset(db, dataset_id)
+        if dataset is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found"
+            )
+        await port.check_dataset_access(db, dataset, dataset_id, user)
+    elif facts.record_status != "published":
+        user_roles = await port.get_user_roles(db, user)
+        if "admin" not in user_roles and facts.created_by != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found"
+            )
+
+
+async def _refuse_unseen_raster_lookup(
+    request: Request,
+    dataset_id: uuid.UUID,
+    db: AsyncSession,
+    user: Identity | None,
+    exc: HTTPException,
+) -> None:
+    """Refuse a failed raster lookup as ``_resolve_raster_access`` refuses access.
+
+    A caller who could not read the dataset gets the answer a missing id gets,
+    so "Not a raster dataset" and "No raster asset" reach only a capability
+    for the id or a caller with read access. The checks run in the success
+    path's order: an embed token or a signature valid for the live row gets
+    ``exc`` whatever other credential the request carries. Returns when
+    ``exc`` may stand for the caller's own identity.
+    """
+    embed_token = request.headers.get("X-Embed-Token")
+    if embed_token:
+        if not await validate_embed_token_access(embed_token, dataset_id, db, request):
+            capability_declined(request, user, _raster_embed_token_refused())
+        raise exc
+    port = get_processing_port()
+    dataset = await port.get_dataset(db, dataset_id)
+    if dataset is not None and _tile_signature_authorizes(
+        request, dataset_id, dataset.publication_version
+    ):
+        raise exc
+    if user is None:
+        if dataset is None or not await get_permission_extension().can_access_dataset(
+            db, dataset, dataset_id, None, user_roles=set()
+        ):
+            _refuse_unseen_tile(request)
+        return
+    if dataset is None:
+        return
+    # The permission extension is asked about a public dataset too: what the
+    # lookup found is for readers only, whatever the tile routes serve.
+    await port.check_dataset_access(db, dataset, dataset_id, user)
+    if dataset.record.visibility == "public":
+        await _check_raster_reader(db, dataset_id, user, dataset.record, dataset)
+
+
 async def _resolve_raster_access(
     db: AsyncSession,
     dataset_id: uuid.UUID,
@@ -894,11 +980,10 @@ async def _resolve_raster_access(
     try:
         meta = await _resolve_raster_meta(db, dataset_id, requested_version)
     except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            await _refuse_unseen_raster_lookup(request, dataset_id, db, user, exc)
         capability_declined(request, user, exc)
 
-    visibility = meta.visibility
-    record_status = meta.record_status
-    created_by = meta.created_by
     storage_backend = meta.storage_backend
 
     # Auth priority 1: embed token
@@ -908,14 +993,7 @@ async def _resolve_raster_access(
             embed_token_header, dataset_id, db, request
         )
         if not is_valid:
-            capability_declined(
-                request,
-                user,
-                HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Invalid or expired embed token",
-                ),
-            )
+            capability_declined(request, user, _raster_embed_token_refused())
     elif _tile_signature_authorizes(request, dataset_id, meta.publication_version):
         # fix(#688) auth priority 2: a signed template, mirroring the vector
         # path -- MapLibre attaches no header. Checked ahead of the visibility
@@ -927,41 +1005,13 @@ async def _resolve_raster_access(
         # is asking and an unresolvable credential earns the fail-closed 401.
         reject_unresolvable_credentials(request, user)
 
-        if visibility != "public":
-            # Auth priority 3: require authenticated user for non-public datasets
-            if user is None:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Authentication required",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-
-            # fix(#929): routed through the permission extension rather than an
-            # inline policy mirror, so an overlay that deliberately denies the
-            # creator still wins here as it does on the token path.
-            port = get_processing_port()
-            dataset = await port.get_dataset(db, dataset_id)
-            if dataset is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found"
-                )
-            await port.check_dataset_access(db, dataset, dataset_id, user)
+        # Auth priority 3: the caller's own access. Anonymous callers read only
+        # public, published rasters; authenticated non-owners no unpublished one.
+        if user is None:
+            if meta.visibility != "public" or meta.record_status != "published":
+                _refuse_unseen_tile(request)
         else:
-            # Public dataset: still block non-published for unauthenticated users
-            if record_status != "published":
-                if user is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Dataset not found",
-                    )
-                # Authenticated non-owners cannot see unpublished
-                port = get_processing_port()
-                user_roles = await port.get_user_roles(db, user)
-                if "admin" not in user_roles and created_by != user.id:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Dataset not found",
-                    )
+            await _check_raster_reader(db, dataset_id, user, meta)
 
     if meta.members_beyond_audience:
         raise HTTPException(
@@ -994,9 +1044,10 @@ async def raster_auth_check(
     ``X-GeoLens-*`` headers off the returned Response. Not part of the
     public API surface; kept mounted for the raster-RBAC tests.
 
-    Returns 200 with the open-path/cache-status headers, 401 if auth is
-    missing, 403 if the embed token is invalid, 404 if not found/not
-    raster/no asset, 409 for a mosaic naming a remote member or reaching
+    Returns 200 with the open-path/cache-status headers, 401 if a supplied
+    credential did not resolve, 403 if the embed token or the signature
+    parameters did not authorize, 404 if not found/not raster/no asset or not
+    visible to the caller, 409 for a mosaic naming a remote member or reaching
     anyone who cannot read one of its members.
     """
     # fix(#1372): nginx keys on the FIRST occurrence of `v` and matches the
@@ -1082,7 +1133,15 @@ async def raster_auth_check(
             "image/jpeg",
             "image/webp",
             "image/tiff",
-        )
+        ),
+        403: {
+            **FORBIDDEN_RESPONSE,
+            "description": (
+                "Forbidden: the embed token or the signature parameters did not "
+                "authorize the request, or a multi-tenant request has no tenant "
+                "context"
+            ),
+        },
     },
 )
 @limiter.exempt
@@ -1155,20 +1214,21 @@ async def raster_tile_proxy(
     default is used in place of the value sent.
 
     Responds 204 when the tile falls outside the raster, 400 for an
-    unsupported format, 401 when authentication is required, or when a request
-    that no capability authorized carried a credential which did not resolve,
-    403 when the embed token is invalid or expired
-    or a multi-tenant request arrives with no tenant context, 422 for an
-    out-of-range stretch parameter, and 503 when the renderer cannot be
-    reached. A different failure from the renderer is passed through with its
-    own status.
+    unsupported format, 401 when a request that no capability authorized
+    carried a credential which did not resolve, 403 when the embed token is
+    invalid or expired or a multi-tenant request arrives with no tenant
+    context, 422 for an out-of-range stretch parameter, and 503 when the
+    renderer cannot be reached. A different failure from the renderer is
+    passed through with its own status.
 
     404 covers more than a missing dataset. A dataset that is unknown, is not a
     raster or has no image answers 404. Where no capability authorized the
-    request, so does a dataset the caller may not read: an authorization denial
-    on a non-public raster, and an unpublished raster asked for by a caller who
-    is neither its owner nor an admin. That is deliberate, so a refusal keeps a
-    dataset's existence undisclosed.
+    request, so does a dataset the caller may not read: a non-public raster
+    asked for anonymously or by a caller without access, and an unpublished
+    raster asked for by a caller who is neither its owner nor an admin. An
+    anonymous request whose signature parameters did not authorize gets 403
+    instead, for a missing dataset as for one it cannot see. Either way a
+    refusal never discloses that the dataset exists.
     """
     # fix(#315): sanitize `{fmt}` before it reaches the Titiler URL. A proxy
     # rewrite can URL-encode the query string into the PATH, so `{fmt}` arrives
@@ -1516,8 +1576,8 @@ async def _enforce_tile_token_access(
     """Status-aware access gate for the tile-token endpoints.
 
     Mirrors ``_resolve_raster_access`` so vector and raster token minting
-    deny identically:
-    - non-public + anonymous -> 401
+    deny identically, and every denial reads as a missing dataset:
+    - non-public + anonymous -> 404
     - non-public + authenticated -> full RBAC (404 if denied)
     - public + unpublished + non-owner -> 404 (closes the anon egress leak)
     - public + published -> allowed
@@ -1528,9 +1588,7 @@ async def _enforce_tile_token_access(
     if record.visibility != "public":
         if user is None:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required",
-                headers={"WWW-Authenticate": "Bearer"},
+                status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found"
             )
         await port.check_dataset_access(db, dataset, dataset_id, user)
         return
@@ -1562,8 +1620,9 @@ async def get_tile_token(
 
     Both responses include a discriminated ``kind`` field.
 
-    Public datasets can be accessed without authentication.
-    Private/restricted datasets require authentication and RBAC checks.
+    A public, published dataset needs no authentication. Any other dataset
+    needs a caller with access to it, and answers 404 to everyone else,
+    anonymous callers included, exactly as an unknown dataset does.
     """
     from app.modules.catalog.datasets.domain.models import Dataset as DatasetORM
 
@@ -1981,13 +2040,14 @@ def _embed_token_refused() -> HTTPException:
     )
 
 
-def _refuse_unseen_vector_tile(request: Request) -> NoReturn:
-    """Refuse an anonymous caller a dataset it cannot see, as for an unknown table.
+def _refuse_unseen_tile(request: Request) -> NoReturn:
+    """Refuse an anonymous caller a dataset it cannot see, as for a missing one.
 
-    A non-public dataset, an unpublished one and a missing table all answer
-    alike, so a refusal never confirms that a table name exists. Signature
-    parameters that did not authorize get 403, the status map clients re-mint
-    a template on once it ages out; a request without them gets 404.
+    A non-public dataset, an unpublished one and a missing table or dataset id
+    all answer alike, so a refusal never confirms that the dataset exists.
+    Signature parameters that did not authorize get 403, the status map
+    clients re-mint a template on once it ages out; a request without them
+    gets 404.
     """
     if all(request.query_params.get(k) for k in ("sig", "exp", "scope")):
         code, detail = status.HTTP_403_FORBIDDEN, "Invalid or expired signature"
@@ -2025,7 +2085,7 @@ async def _resolve_dataset_meta_for_serving(
         if request.headers.get("X-Embed-Token"):
             capability_declined(request, user, _embed_token_refused())
         if user is None:
-            _refuse_unseen_vector_tile(request)
+            _refuse_unseen_tile(request)
         capability_declined(request, user, exc)
 
 
@@ -2184,7 +2244,7 @@ async def _authorize_vector_tile_request(
                 )
             await port.check_dataset_access(db, dataset, meta.dataset_id, user)
             return "private"
-        _refuse_unseen_vector_tile(request)
+        _refuse_unseen_tile(request)
 
     # fix(#1518): CAPABILITY obligation. Both capability arms above have
     # declined, so everything from here is decided by WHO is asking and a
@@ -2194,7 +2254,7 @@ async def _authorize_vector_tile_request(
     # Public dataset: still block non-published for unauthenticated users
     if meta.record_status != "published":
         if user is None:
-            _refuse_unseen_vector_tile(request)
+            _refuse_unseen_tile(request)
         # Authenticated non-owners cannot see unpublished
         port = get_processing_port()
         user_roles = await port.get_user_roles(db, user)
