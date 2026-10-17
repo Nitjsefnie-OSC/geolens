@@ -31,7 +31,12 @@ from app.modules.catalog.sources.provenance import (
     derive_last_edited,
     resolve_actor,
 )
-from app.core.geo import extent_to_bbox, raster_crs_facts
+from app.core.geo import (
+    extent_to_bbox,
+    raster_crs_facts,
+    shown_extent,
+    shows_mosaic_size,
+)
 from app.platform.dataset_origin import classify_origin, project_unknown
 from app.platform.storage.titiler_url import resolve_current_storage_key
 
@@ -54,7 +59,10 @@ def _build_raster_metadata(
     is_admin: bool = False,
     source_count: int | None = None,
     base_url: str | None = None,
+    show_size: bool = True,
 ) -> RasterMetadata | None:
+    """``show_size=False`` leaves out width, height and file size, which span
+    every member of a VRT."""
     if raster_asset is None:
         return None
 
@@ -126,9 +134,9 @@ def _build_raster_metadata(
         is_dem=raster_asset.is_dem,
         nodata=raster_asset.nodata,
         compression=raster_asset.compression,
-        width=raster_asset.width,
-        height=raster_asset.height,
-        size_bytes=raster_asset.size_bytes,
+        width=raster_asset.width if show_size else None,
+        height=raster_asset.height if show_size else None,
+        size_bytes=raster_asset.size_bytes if show_size else None,
         tile_url=tile_url_meta,
         bands=bands,
         connect=connect,
@@ -149,6 +157,7 @@ def dataset_to_response(
     pointcloud_asset=None,
     is_admin: bool = False,
     source_count: int | None = None,
+    vrt_extents: Mapping[uuid.UUID, object | None] | None = None,
     base_url: str | None = None,
     stac_assets=None,
     derived_from: dict | None = None,
@@ -161,6 +170,9 @@ def dataset_to_response(
     owner/admin see the raw pointer, everyone else gets it nulled. Callers
     resolve it via ``can_view_dataset_provenance`` in ``authorization.py``;
     it defaults to False so a forgetful call site redacts rather than leaks.
+
+    ``vrt_extents`` is the requester's ``visible_vrt_extents``; a VRT it
+    leaves out shows no extent (``shown_extent``).
     """
     record = dataset.record
     actor_map = actors_by_id or {}
@@ -189,6 +201,7 @@ def dataset_to_response(
             is_admin=is_admin,
             source_count=source_count,
             base_url=base_url,
+            show_size=shows_mosaic_size(record, dataset.id, vrt_extents),
         )
 
     tileset = (
@@ -241,7 +254,7 @@ def dataset_to_response(
         # not the flattened span form. fix(#1112): mirrored by
         # dataset_extent_bbox in maps/_router_helpers.py for the same reason;
         # pinned by tests/test_antimeridian_extent.py.
-        extent_bbox=extent_to_bbox(record.spatial_extent),
+        extent_bbox=extent_to_bbox(shown_extent(record, dataset.id, vrt_extents)),
         column_info=dataset.column_info,
         quality_detail=dataset.quality_detail,
         license=record.license,

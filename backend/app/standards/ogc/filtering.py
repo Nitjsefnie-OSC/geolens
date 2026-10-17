@@ -9,12 +9,14 @@ query execution.
 Only CQL2 is supported; the legacy CQL1/WFS 2.0 syntax is rejected.
 """
 
+import functools
 import json
 import math
 import re
 import uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -189,8 +191,115 @@ def _pin_timestamptz_literals(root: Any) -> None:
         )
 
 
+# ``extent_match(match, missing_as_empty=True)``: rows whose extent satisfies
+# ``match``. A missing extent is tested as an empty geometry unless
+# ``missing_as_empty`` is False.
+ExtentMatch = Callable[..., Any]
+
+# The pygeofilter nodes that may name the ``geometry`` queryable. Comparing,
+# ordering or listing a geometry has no meaning in CQL2, and evaluated on the
+# stored column it would read a VRT's hidden extent.
+_GEOMETRY_PARENTS = (
+    "SpatialComparisonPredicate",
+    "SpatialDistancePredicate",
+    "Relate",
+    "BBox",
+    "IsNull",
+)
+
+
+def _refuse_scalar_geometry(node: Any, parent: Any = None) -> None:
+    """Raise ValueError where ``geometry`` is used outside a spatial or null test."""
+    from pygeofilter import ast as pgf_ast
+
+    if isinstance(node, pgf_ast.Attribute) and node.name == "geometry":
+        allowed = tuple(getattr(pgf_ast, name) for name in _GEOMETRY_PARENTS)
+        if not isinstance(parent, allowed):
+            raise ValueError("geometry can only be used in a spatial predicate")
+    subnodes = node.get_sub_nodes() if hasattr(node, "get_sub_nodes") else None
+    for sub in subnodes if isinstance(subnodes, list) else [subnodes]:
+        if sub is not None:
+            _refuse_scalar_geometry(sub, node)
+
+
+@functools.cache
+def _extent_evaluator() -> type:
+    from pygeofilter import ast as pgf_ast
+    from pygeofilter.backends.evaluator import handle
+    from pygeofilter.backends.sqlalchemy import filters
+    from pygeofilter.backends.sqlalchemy.evaluate import SQLAlchemyFilterEvaluator
+
+    class ExtentEvaluator(SQLAlchemyFilterEvaluator):
+        """Tests each spatial predicate on the extent ``extent_match`` resolves."""
+
+        def __init__(self, extent_match: ExtentMatch):
+            super().__init__(FIELD_MAPPING, None)
+            self.extent_match = extent_match
+
+        def _leaf(self, lhs, rhs, test):
+            extent = FIELD_MAPPING["geometry"]
+            if lhs is extent and rhs is extent:
+                return self.extent_match(lambda geom: test(geom, geom))
+            if lhs is extent:
+                return self.extent_match(lambda geom: test(geom, rhs))
+            if rhs is extent:
+                return self.extent_match(lambda geom: test(lhs, geom))
+            return test(lhs, rhs)
+
+        @handle(pgf_ast.IsNull)
+        def null(self, node, lhs):
+            if lhs is not FIELD_MAPPING["geometry"]:
+                return super().null(node, lhs)
+            op = "is_not_null" if node.not_ else "is_null"
+            return self.extent_match(
+                lambda geom: filters.runop(geom, None, op), missing_as_empty=False
+            )
+
+        @handle(pgf_ast.SpatialComparisonPredicate, subclasses=True)
+        def spatial_operation(self, node, lhs, rhs):
+            op = node.op.name
+            return self._leaf(
+                lhs,
+                rhs,
+                lambda a, b: filters.spatial(a, b, op),
+            )
+
+        @handle(pgf_ast.Relate)
+        def spatial_pattern(self, node, lhs, rhs):
+            return self._leaf(
+                lhs,
+                rhs,
+                lambda a, b: filters.spatial(a, b, "RELATE", pattern=node.pattern),
+            )
+
+        @handle(pgf_ast.SpatialDistancePredicate, subclasses=True)
+        def spatial_distance(self, node, lhs, rhs):
+            return self._leaf(
+                lhs,
+                rhs,
+                lambda a, b: filters.spatial(
+                    a, b, node.op.value, distance=node.distance, units=node.units
+                ),
+            )
+
+        @handle(pgf_ast.BBox)
+        def bbox(self, node, lhs):
+            box = filters.parse_bbox(
+                [node.minx, node.miny, node.maxx, node.maxy], node.crs
+            )
+            return self._leaf(
+                lhs, box, lambda a, b: filters.spatial(a, b, "INTERSECTS")
+            )
+
+    return ExtentEvaluator
+
+
 def apply_cql2_filter(
-    stmt: Any, filter_expr: str, filter_lang: str = "cql2-text"
+    stmt: Any,
+    filter_expr: str,
+    filter_lang: str = "cql2-text",
+    *,
+    extent_match: ExtentMatch,
 ) -> Any:
     """Parse a CQL2 expression and apply it as a WHERE clause to a SQLAlchemy statement.
 
@@ -198,6 +307,8 @@ def apply_cql2_filter(
         stmt: SQLAlchemy select statement to add the filter to.
         filter_expr: The CQL2 filter expression string.
         filter_lang: Either "cql2-text" or "cql2-json".
+        extent_match: Builds each spatial predicate on the ``geometry``
+            queryable, so a caller can test the extent its requester sees.
 
     Returns:
         The statement with the CQL2 filter applied.
@@ -205,12 +316,11 @@ def apply_cql2_filter(
     Raises:
         HTTPException(400): On invalid CQL2 expression or filter translation error.
     """
-    from pygeofilter.backends.sqlalchemy import to_filter
-
     ast = parse_cql2_filter(filter_expr, filter_lang)
     _pin_timestamptz_literals(ast)
     try:
-        sa_filter = to_filter(ast, FIELD_MAPPING)
+        _refuse_scalar_geometry(ast)
+        sa_filter = _extent_evaluator()(extent_match).evaluate(ast)
     except Exception as e:  # broad: to_filter errors vary by unsupported CQL2 shape
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

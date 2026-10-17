@@ -27,7 +27,9 @@ from app.modules.catalog.authorization import (
     check_dataset_access_or_anonymous,
     get_user_roles,
     visible_lineage_summaries,
+    visible_extent_column,
     visible_lineage_summary,
+    visible_vrt_extents,
     visible_vrt_source_counts,
 )
 from app.modules.catalog.datasets.domain.models import (
@@ -48,7 +50,7 @@ from app.standards.ogc.utils import (
     parse_accept_languages,
 )
 from app.standards.ogc.errors import BAD_REQUEST_RESPONSE, ERROR_RESPONSES_PUBLIC
-from app.core.geo import extent_to_bbox, rollup_bbox, rollup_bbox_columns
+from app.core.geo import extent_to_bbox, rollup_bbox, rollup_bbox_columns, shown_extent
 from app.core.public_urls import get_public_api_url, get_public_app_url
 from app.core.tile_scope import tile_template_query
 from app.modules.catalog.search.schemas import (
@@ -244,6 +246,12 @@ async def _handle_search(
     lineage = await visible_lineage_summaries(
         db, [d.record for d in datasets], user, user_roles
     )
+    vrt_extents = await visible_vrt_extents(
+        db,
+        [d.id for d in datasets if d.record.record_type == "vrt_dataset"],
+        user,
+        user_roles,
+    )
 
     features = [
         dataset_to_ogc_record(
@@ -255,6 +263,7 @@ async def _handle_search(
             public_app_url=public_app_url,
             preferred_languages=preferred_languages,
             lineage_summary=lineage[d.record_id],
+            vrt_extents=vrt_extents,
         )
         for d in datasets
     ]
@@ -642,7 +651,7 @@ async def _build_collection_metadata(
     # range instead of folding to a global bbox.
     extent_stmt = (
         select(
-            *rollup_bbox_columns(Record.spatial_extent),
+            *rollup_bbox_columns(visible_extent_column(user, user_roles)),
             func.min(Record.temporal_start).label("temporal_start"),
             func.max(Record.temporal_end).label("temporal_end"),
         )
@@ -848,14 +857,21 @@ async def list_collections(
     ds_result = await db.execute(ds_stmt)
     datasets = ds_result.scalars().unique().all()
 
+    vrt_extents = await visible_vrt_extents(
+        db,
+        [d.id for d in datasets if d.record.record_type == "vrt_dataset"],
+        user,
+        user_roles,
+    )
     dataset_collections = []
     for ds in datasets:
         extent = {}
-        if ds.record.spatial_extent is not None:
+        spatial_extent = shown_extent(ds.record, ds.id, vrt_extents)
+        if spatial_extent is not None:
             # fix(#892): OGC bbox convention needs west > east across a seam;
             # extent_to_bbox returns None on a parse failure, which degrades
             # to no spatial extent.
-            bbox = extent_to_bbox(ds.record.spatial_extent)
+            bbox = extent_to_bbox(spatial_extent)
             if bbox is None:
                 logger.warning("Failed to serialize OGC bbox extent")
             else:
@@ -1302,6 +1318,9 @@ async def get_collection_item(
         # their own, separately from the requester's check above.
         lineage_summary=await visible_lineage_summary(
             db, dataset.record, user, user_roles
+        ),
+        vrt_extents=await visible_vrt_extents(
+            db, [record_id] if rec_type == "vrt_dataset" else [], user, user_roles
         ),
     )
     return JSONResponse(

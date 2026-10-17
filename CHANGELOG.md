@@ -124,6 +124,31 @@ and releases use semantic versioning.
   refused like any other invalid signature on the vector, cluster and raster
   routes, where it failed with 500 for a dataset that exists. The raster tile
   route now documents its 403 response, so generated clients parse it.
+- A VRT's extent covers only the member rasters the requester can read.
+  Every surface that showed or matched a VRT by its stored extent spanned all
+  of its members, which showed where a member hidden from the requester lies,
+  although the VRT's member list already left that member out. Dataset detail
+  and lists, search, OGC API Records items and collection metadata, STAC
+  items and collections, DCAT, DCAT-US and GeoDCAT-AP records and feeds,
+  collection extents and map layers' `dataset_extent_bbox` now report the
+  extent of the readable members, or none when no member is readable. For
+  such a VRT, the raster block's `width`, `height` and `size_bytes` are null
+  and OGC API Records and STAC items leave out `proj:shape`, since the
+  full-mosaic size spans every member; resolution stays.
+  Spatial filters (`bbox` and `geometry` in search, `bbox` and `intersects` in
+  STAC, and CQL2 spatial predicates in OGC API Records) match a VRT by that
+  same extent, so a box drawn only around a hidden member no longer finds it.
+  A VRT with no readable member matches as an empty geometry, under `NOT` as
+  well, and `geometry IS NULL` holds for it. Admins, and anyone who can read
+  every member, see the full extent and size. A tile token for a VRT whose
+  tiles are refused, because a member is no longer visible to everyone who
+  can see the VRT, carries no `bounds`, with or without a stored raster
+  asset. The AI assistant's dataset search, generated map
+  viewports and metadata prompts leave VRT extents out.
+- A CQL2 filter on OGC API Records that uses the `geometry` queryable outside
+  a spatial predicate or `IS NULL` (for example `geometry = POINT(1 2)`,
+  `IN`, `BETWEEN` or `LIKE`) answers 400 "Invalid CQL2 expression" instead of
+  comparing stored coordinates.
 
 ### Upgrade notes
 
@@ -131,6 +156,9 @@ and releases use semantic versioning.
   instead of 401. A client that read that 401 as a cue to sign in needs
   another signal, such as the dataset's own 404. Requests carrying an expired
   or invalid credential still answer 401.
+- Overlay authors: `EXTENSION_API_VERSION` is now 18. `ProcessingPort` gained
+  the required `vrts_beyond_member_audience`, which the tile-token endpoints
+  call once for all the mosaics they mint.
 
 ## [1.25.1] - 2026-10-16
 

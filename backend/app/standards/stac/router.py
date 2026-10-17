@@ -39,7 +39,10 @@ from app.modules.catalog.authorization import (
     can_export,
     get_user_roles,
     visible_lineage_summaries,
+    visible_extent_column,
+    visible_extent_match,
     visible_lineage_summary,
+    visible_vrt_extents,
 )
 from app.modules.catalog.datasets.domain.models import (
     Dataset,
@@ -279,6 +282,7 @@ async def _dataset_to_stac_item(
     user_roles: set[str] | None = None,
     lineage_summary: Any = _LINEAGE_UNRESOLVED,
     may_export: bool | None = None,
+    vrt_extents: dict[uuid.UUID, Any] | None = None,
 ) -> dict:
     """Convert a Dataset ORM object to a STAC Item dict with presigned URLs.
 
@@ -289,8 +293,14 @@ async def _dataset_to_stac_item(
     asset is served at the public APP origin (/raster-tiles/...), not the /api
     origin, so it is threaded to both ``dataset_to_ogc_record`` and the
     presigned-URL ``build_assets`` re-build below.
+
+    Page loops pass the page's ``visible_vrt_extents``; None resolves it here.
     """
     record = dataset.record
+    if vrt_extents is None and record.record_type == "vrt_dataset":
+        vrt_extents = await visible_vrt_extents(
+            db, [dataset.id], user, user_roles or set()
+        )
 
     ogc_record = dataset_to_ogc_record(
         dataset,
@@ -300,6 +310,7 @@ async def _dataset_to_stac_item(
         spatial_extent_geojson=spatial_extent_geojson,
         public_app_url=public_app_url,
         preferred_languages=preferred_languages,
+        vrt_extents=vrt_extents,
         # The prose names the same datasets the derived_from link
         # below points at, and is gated the same way — per requester, on each
         # referenced dataset rather than on the output they can already see.
@@ -752,7 +763,7 @@ async def _build_collection_list(
         extent_stmt = (
             select(
                 CollectionDataset.collection_id,
-                *rollup_bbox_columns(Record.spatial_extent),
+                *rollup_bbox_columns(visible_extent_column(user, user_roles)),
                 func.min(Record.temporal_start),
                 func.max(Record.temporal_end),
                 func.array_agg(func.distinct(Record.license)),
@@ -958,7 +969,7 @@ async def get_collection(
     async def _fetch_extent() -> tuple | None:
         extent_stmt = (
             select(
-                *rollup_bbox_columns(Record.spatial_extent),
+                *rollup_bbox_columns(visible_extent_column(user, user_roles)),
                 func.min(Record.temporal_start),
                 func.max(Record.temporal_end),
                 func.array_agg(func.distinct(Record.license)),
@@ -1100,7 +1111,7 @@ async def get_collection_items(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid bbox: {e}",
             )
-        stmt = stmt.where(make_bbox_filter(Record.spatial_extent, bbox_vals))
+        stmt = stmt.where(_visible_bbox_filter(user, user_roles, bbox_vals))
 
     # Filter by datetime
     if datetime_param:
@@ -1147,6 +1158,12 @@ async def get_collection_items(
     lineage_map = await visible_lineage_summaries(
         db, [d.record for d in datasets], user, user_roles or set()
     )
+    vrt_extents = await visible_vrt_extents(
+        db,
+        [d.id for d in datasets if d.record.record_type == "vrt_dataset"],
+        user,
+        user_roles or set(),
+    )
     may_export = any(
         d.record.record_type == "raster_dataset" for d in datasets
     ) and await can_export(db, user, user_roles)
@@ -1169,6 +1186,7 @@ async def get_collection_items(
             user_roles=user_roles,
             lineage_summary=lineage_map[dataset.record.id],
             may_export=may_export,
+            vrt_extents=vrt_extents,
         )
         features.append(item)
 
@@ -1347,7 +1365,20 @@ async def get_item(
     )
 
 
+def _visible_bbox_filter(
+    user: Identity | None, user_roles: set[str], bbox_vals: list[float]
+):
+    """Rows whose extent, as ``user`` sees it, intersects ``bbox_vals``."""
+    return visible_extent_match(
+        user,
+        user_roles,
+        lambda extent: make_bbox_filter(extent, bbox_vals),
+    )
+
+
 def _build_search_filters(
+    user: Identity | None,
+    user_roles: set[str],
     *,
     bbox: str | list[float] | None = None,
     intersects: str | dict | None = None,
@@ -1433,7 +1464,15 @@ def _build_search_filters(
         _geom = wrap_geometry_longitudes(
             func.ST_SetSRID(func.ST_GeomFromGeoJSON(intersects_str), 4326)
         )
-        filters.append(wrapped_spatial_filter(Record, _geom))
+        filters.append(
+            wrapped_spatial_filter(
+                Record,
+                _geom,
+                extent_match=lambda candidate, test: visible_extent_match(
+                    user, user_roles, test, record=candidate
+                ),
+            )
+        )
     elif bbox:
         # Filter by bbox (only if intersects not provided). parse_bbox takes the
         # GET string and the POST list, so both spellings validate identically.
@@ -1444,7 +1483,7 @@ def _build_search_filters(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid bbox: {e}",
             )
-        filters.append(make_bbox_filter(Record.spatial_extent, bbox_vals))
+        filters.append(_visible_bbox_filter(user, user_roles, bbox_vals))
 
     return filters, False
 
@@ -1534,6 +1573,8 @@ async def _execute_search(
     (from POST JSON body) to avoid unnecessary serialization round-trips.
     """
     filters, ids_empty = _build_search_filters(
+        user,
+        user_roles,
         bbox=bbox,
         intersects=intersects,
         ids=ids,
@@ -1627,6 +1668,12 @@ async def _execute_search(
     lineage_map = await visible_lineage_summaries(
         db, [d.record for d in datasets], user, user_roles or set()
     )
+    vrt_extents = await visible_vrt_extents(
+        db,
+        [d.id for d in datasets if d.record.record_type == "vrt_dataset"],
+        user,
+        user_roles or set(),
+    )
     may_export = any(
         d.record.record_type == "raster_dataset" for d in datasets
     ) and await can_export(db, user, user_roles)
@@ -1649,6 +1696,7 @@ async def _execute_search(
             user_roles=user_roles,
             lineage_summary=lineage_map[dataset.record.id],
             may_export=may_export,
+            vrt_extents=vrt_extents,
         )
         features.append(item)
 

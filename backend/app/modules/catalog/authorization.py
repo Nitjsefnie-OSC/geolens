@@ -9,26 +9,33 @@ module (Phase 213).
 import enum
 import uuid
 from dataclasses import replace
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import (
+    ColumnElement,
     Select,
     Uuid,
+    and_,
     any_,
     bindparam,
+    case,
+    cast,
     column,
+    exists,
     func,
     literal,
+    or_,
     select,
     table,
     union_all,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import aliased, joinedload
 
+from app.core.geo import VrtExtents, rollup_envelope
 from app.core.identity import Identity
 from app.core.permissions import EXPORT
 from app.modules.auth.permissions import get_effective_permissions
@@ -469,6 +476,148 @@ async def visible_vrt_source_counts(
     return counts
 
 
+async def visible_vrt_extents(
+    db: AsyncSession,
+    vrt_dataset_ids: Iterable[uuid.UUID],
+    user: Identity | None,
+    user_roles: set[str],
+) -> VrtExtents:
+    """Each VRT's extent as this requester sees it; see :func:`visible_extent_column`.
+
+    Every existing VRT among ``vrt_dataset_ids`` gets an entry, None when the
+    requester can read no member's extent. ``narrowed`` names the VRTs with a
+    member the requester cannot read, whose full-mosaic size is withheld too.
+    """
+    wanted = set(vrt_dataset_ids)
+    if not wanted:
+        return VrtExtents({}, ())
+
+    from app.modules.catalog.datasets.domain.models import Dataset, Record
+
+    hides_member, shown = _vrt_view(user, user_roles)
+    rows = await db.execute(
+        select(Dataset.id, shown, hides_member)
+        .join(Record, Record.id == Dataset.record_id)
+        .where(
+            Dataset.id == any_(bindparam("vrt_ids", list(wanted), type_=ARRAY(Uuid))),
+            Record.record_type == "vrt_dataset",
+        )
+    )
+    rows = rows.tuples().all()
+    return VrtExtents(
+        {dataset_id: extent for dataset_id, extent, _ in rows},
+        (dataset_id for dataset_id, _, narrowed in rows if narrowed),
+    )
+
+
+def visible_extent_column(
+    user: Identity | None, user_roles: set[str], record: Any = None
+) -> ColumnElement:
+    """``record.spatial_extent`` as this requester sees it.
+
+    ``record`` defaults to ``Record`` in a statement that joins ``Dataset``; an
+    aliased ``Record`` finds its dataset itself. A VRT's stored extent covers
+    every member, so one with a member the requester cannot read shows the
+    envelope of the members they can read (:func:`rollup_envelope`), or NULL
+    when none has an extent. Every other row shows its own. Members are
+    checked one by one, so the cost stays with VRT rows.
+    """
+    return _vrt_view(user, user_roles, record)[1]
+
+
+def _vrt_view(
+    user: Identity | None, user_roles: set[str], record: Any = None
+) -> tuple[ColumnElement, ColumnElement]:
+    """``(narrowed, shown extent)`` for ``record``; see :func:`visible_extent_column`."""
+    from app.modules.catalog.datasets.domain.models import (
+        Dataset,
+        DatasetGrant,
+        Record,
+    )
+
+    if record is None:
+        record, dataset_id = Record, Dataset.id
+    else:
+        dataset_id = (
+            select(Dataset.id)
+            .where(Dataset.record_id == record.id)
+            .correlate(record)
+            .scalar_subquery()
+        )
+    links = _VRT_SOURCE_LINKS
+    member = aliased(Dataset)
+    member_record = aliased(Record)
+
+    def readable(stmt: Select[Any]) -> Select[Any]:
+        return apply_visibility_filter(
+            stmt.join(member_record, member_record.id == member.record_id),
+            user,
+            user_roles,
+            member_record,
+            DatasetGrant,
+        )
+
+    of_row = links.c.vrt_dataset_id == dataset_id
+    readable_envelope = readable(
+        select(rollup_envelope(member_record.spatial_extent))
+        .select_from(links.join(member, member.id == links.c.source_dataset_id))
+        .where(of_row)
+    ).scalar_subquery()
+    member_is_readable = readable(
+        select(member.id).where(member.id == links.c.source_dataset_id)
+    ).exists()
+    narrowed = and_(
+        record.record_type == "vrt_dataset",
+        exists().where(of_row, ~member_is_readable),
+    )
+    return narrowed, case((narrowed, readable_envelope), else_=record.spatial_extent)
+
+
+def visible_extent_match(
+    user: Identity | None,
+    user_roles: set[str],
+    match: Callable[[ColumnElement], ColumnElement],
+    *,
+    record: Any = None,
+    missing_as_empty: bool = True,
+) -> ColumnElement:
+    """Rows whose extent, as this requester sees it, satisfies ``match``.
+
+    Each arm tests one row's own extent, so the result composes under NOT and
+    OR like ``match`` itself. The VRT arm never reads a stored VRT extent; the
+    VRTs' record ids, not their extents, give it an index path. A VRT that
+    shows no extent is tested as an empty geometry, so a predicate and its
+    negation both answer for it; ``missing_as_empty=False`` keeps the NULL for
+    an IS NULL test.
+    """
+    from app.modules.catalog.datasets.domain.models import Dataset, Record
+
+    shown = visible_extent_column(user, user_roles, record)
+    if missing_as_empty:
+        shown = func.coalesce(
+            shown, func.ST_GeomFromText("GEOMETRYCOLLECTION EMPTY", 4326)
+        )
+    record = Record if record is None else record
+    vrt = aliased(Dataset)
+    vrt_record_ids = (
+        select(
+            func.coalesce(
+                func.array_agg(vrt.record_id), cast(literal("{}"), ARRAY(Uuid))
+            )
+        )
+        .where(vrt.id.in_(select(_VRT_SOURCE_LINKS.c.vrt_dataset_id)))
+        .correlate(None)
+        .scalar_subquery()
+    )
+    own_view = and_(
+        record.record_type == "vrt_dataset",
+        record.id == any_(cast(vrt_record_ids, ARRAY(Uuid))),
+    )
+    return or_(
+        and_(~own_view, match(record.spatial_extent)), and_(own_view, match(shown))
+    )
+
+
 def can_view_dataset_provenance(
     record: Any, user: Identity | None, user_roles: set[str]
 ) -> bool:
@@ -715,6 +864,11 @@ VRT_AUDIENCE_EXCEEDS_SOURCES = (
 )
 
 
+# Each pair binds its own audience arms; this keeps one statement well under
+# the 32767 parameters Postgres accepts.
+_AUDIENCE_PAIRS_PER_STATEMENT = 500
+
+
 async def _audiences_exceeded(
     db: AsyncSession, pairs: Sequence[tuple[Any, Any]]
 ) -> list[bool]:
@@ -727,6 +881,14 @@ async def _audiences_exceeded(
     as in the shared-map guard. An authority that can't answer
     (:func:`answers_audience_questions`) gets every pair counted.
     """
+    if len(pairs) > _AUDIENCE_PAIRS_PER_STATEMENT:
+        step = _AUDIENCE_PAIRS_PER_STATEMENT
+        return [
+            flag
+            for start in range(0, len(pairs), step)
+            for flag in await _audiences_exceeded(db, pairs[start : start + step])
+        ]
+
     from app.modules.auth.models import User
     from app.modules.catalog.datasets.domain.models import DatasetGrant
 
@@ -797,7 +959,7 @@ async def _record_audience_queries(
             Record.title,
         )
         .join(Record, Record.id == Dataset.record_id)
-        .where(Dataset.id.in_(wanted))
+        .where(Dataset.id == any_(bindparam("wanted", list(wanted), type_=ARRAY(Uuid))))
     )
     return {
         row.id: (
@@ -871,6 +1033,30 @@ async def vrt_members_beyond_audience(
     ids = list(members)
     flags = await _audiences_exceeded(db, [(vrt, members[i][0]) for i in ids])
     return [dataset_id for dataset_id, flag in zip(ids, flags, strict=True) if flag]
+
+
+async def vrts_beyond_member_audience(
+    db: AsyncSession,
+    vrts: Sequence[tuple[RecordAudienceQuery, Iterable[uuid.UUID]]],
+) -> list[bool]:
+    """For each ``(vrt, member_ids)``: does a member lie beyond the VRT's
+    audience? :func:`vrt_members_beyond_audience` for many VRTs in two
+    statements."""
+    listed = [(vrt, list(member_ids)) for vrt, member_ids in vrts]
+    members = await _record_audience_queries(
+        db, {member for _, ids in listed for member in ids}
+    )
+    pairs = [
+        (index, vrt, members[member][0])
+        for index, (vrt, ids) in enumerate(listed)
+        for member in ids
+        if member in members
+    ]
+    flags = await _audiences_exceeded(db, [(vrt, member) for _, vrt, member in pairs])
+    beyond = [False] * len(listed)
+    for (index, _, _), flag in zip(pairs, flags, strict=True):
+        beyond[index] = beyond[index] or flag
+    return beyond
 
 
 async def check_vrt_within_member_audience(

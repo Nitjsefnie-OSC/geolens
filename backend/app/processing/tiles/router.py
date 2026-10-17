@@ -1468,22 +1468,61 @@ async def raster_tile_proxy(
     )
 
 
+async def _refused_mosaics(db: AsyncSession, datasets: list["Any"]) -> set[uuid.UUID]:
+    """The VRTs among ``datasets`` whose tiles answer 409 because a member is
+    beyond their audience, decided for all of them in one port call."""
+    vrts = {ds.id: ds for ds in datasets if ds.record.record_type == "vrt_dataset"}
+    if not vrts:
+        return set()
+    rows = await db.execute(
+        text(
+            "SELECT vrt_dataset_id, array_agg(source_dataset_id) "
+            "FROM catalog.vrt_source_links "
+            "WHERE vrt_dataset_id = ANY(:ids) GROUP BY vrt_dataset_id"
+        ),
+        {"ids": list(vrts)},
+    )
+    members = dict(rows.tuples().all())
+    ids = [vrt_id for vrt_id in vrts if members.get(vrt_id)]
+    flags = await get_processing_port().vrts_beyond_member_audience(
+        db,
+        [
+            (
+                RecordAudienceQuery(
+                    dataset_id=vrt_id,
+                    record_id=vrts[vrt_id].record.id,
+                    owner_id=vrts[vrt_id].record.created_by,
+                    visibility=vrts[vrt_id].record.visibility,
+                    record_status=vrts[vrt_id].record.record_status,
+                ),
+                members[vrt_id],
+            )
+            for vrt_id in ids
+        ],
+    )
+    return {vrt_id for vrt_id, flag in zip(ids, flags, strict=True) if flag}
+
+
 def _build_tile_token_for_dataset(
     dataset: "Any",
     raster_asset: RasterAsset | None = None,
+    *,
+    withhold_bounds: bool = False,
 ) -> VectorTileToken | RasterTileToken | None:
     """Build a tile token response for a single already-authorized dataset.
 
     Extracted so both the single-dataset and batch endpoints share the same
     token-generation logic. Does NOT perform auth — caller must
     ensure the dataset is visible to the current user. Returns None for a
-    record type that has no tiles.
+    record type that has no tiles. ``withhold_bounds`` leaves out the
+    bounds of a mosaic whose tiles are refused, which would locate a member
+    some readers of the mosaic cannot read.
     """
     tile_token = capabilities(dataset.record.record_type).tile_token
     if tile_token == "raster":
         bounds = None
         lon_span = None
-        if dataset.record.spatial_extent is not None:
+        if dataset.record.spatial_extent is not None and not withhold_bounds:
             # fix(#892): the SPAN, not the RFC 7946 spec bbox. These bounds feed
             # the tile source's own bounds; a west > east pair would bound the
             # source to nothing. -180..180 is over-broad but never inverted.
@@ -1643,7 +1682,11 @@ async def get_tile_token(
         )
         raster_asset = raster_asset_result.scalar_one_or_none()
 
-    token = _build_tile_token_for_dataset(dataset, raster_asset)
+    token = _build_tile_token_for_dataset(
+        dataset,
+        raster_asset,
+        withhold_bounds=dataset.id in await _refused_mosaics(db, [dataset]),
+    )
     if token is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_NO_TILES_DETAIL
@@ -1712,6 +1755,7 @@ async def get_tile_tokens_batch(
     capability_authorized = False
 
     tokens: dict[str, VectorTileToken | RasterTileToken | dict] = {}
+    authorized = []
     for dataset_id in unique_ids:
         dataset = datasets_by_id.get(dataset_id)
         key = str(dataset_id)
@@ -1730,12 +1774,19 @@ async def get_tile_tokens_batch(
                 tokens[key] = {"error": exc.detail}
                 continue
             capability_authorized = True
+        tokens[key] = {}
+        authorized.append(dataset)
 
+    refused_mosaics = await _refused_mosaics(db, authorized)
+    for dataset in authorized:
         token = _build_tile_token_for_dataset(
             dataset,
             raster_assets_by_dataset_id.get(dataset.id),
+            withhold_bounds=dataset.id in refused_mosaics,
         )
-        tokens[key] = token if token is not None else {"error": _NO_TILES_DETAIL}
+        tokens[str(dataset.id)] = (
+            token if token is not None else {"error": _NO_TILES_DETAIL}
+        )
 
     # fix(#1518): the flag above is only set on the FALLBACK arm, which a
     # batch of public datasets never reaches, so the question is asked again

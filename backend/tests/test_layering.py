@@ -1172,7 +1172,7 @@ def test_analysis_sql_facade_guard_sees_every_bypass_shape() -> None:
 def test_decomposed_service_modules_stay_within_size_budgets() -> None:
     """Keep split service modules and their stable facades bounded."""
     facade_line_budgets = {
-        "backend/app/modules/catalog/maps/service.py": 106,
+        "backend/app/modules/catalog/maps/service.py": 108,
         "backend/app/modules/catalog/search/service.py": 80,
         "backend/app/modules/catalog/datasets/domain/service.py": 112,
         "backend/app/processing/ai/chat_service.py": 519,
@@ -1190,15 +1190,16 @@ def test_decomposed_service_modules_stay_within_size_budgets() -> None:
         # Shared-map audience decisions stay behind the permission extension seam.
         "backend/app/modules/catalog/maps/service_public.py": 987,
         # Record assembly keeps one format and asset branch per record type.
-        "backend/app/modules/catalog/search/service_records.py": 624,
+        "backend/app/modules/catalog/search/service_records.py": 636,
         # Embedding resolution, the vector arm and the RRF merge share one semantic-mode decision.
         "backend/app/modules/catalog/search/service_semantic.py": 516,
         "backend/app/modules/catalog/maps/service_diff.py": 400,
-        "backend/app/modules/catalog/maps/service_shared.py": 400,
+        # Layer rows are shaped for the reader: visible datasets and VRT extents.
+        "backend/app/modules/catalog/maps/service_shared.py": 416,
         "backend/app/modules/catalog/datasets/domain/service_relationships.py": 665,
         "backend/app/modules/catalog/datasets/domain/service_metadata.py": 557,
         # Internal pointer reads sit beside the detail query that shares them.
-        "backend/app/modules/catalog/datasets/domain/service_query.py": 439,
+        "backend/app/modules/catalog/datasets/domain/service_query.py": 445,
         "backend/app/modules/catalog/datasets/domain/service_lifecycle.py": 513,
         # Chat splits retain tool execution and result-serialization workflows.
         "backend/app/processing/ai/chat_actions.py": 587,
@@ -1208,9 +1209,9 @@ def test_decomposed_service_modules_stay_within_size_budgets() -> None:
         "backend/app/platform/extensions/defaults_ai_anthropic.py": 372,
         "backend/app/platform/extensions/defaults_catalog_port.py": 579,
         # ProcessingPort signatures remain explicit across the catalog boundary.
-        "backend/app/platform/extensions/defaults_processing_port.py": 581,
+        "backend/app/platform/extensions/defaults_processing_port.py": 586,
         "backend/app/platform/extensions/defaults_extensions.py": 433,
-        "backend/app/modules/catalog/search/service_filters.py": 366,
+        "backend/app/modules/catalog/search/service_filters.py": 376,
     }
 
     files_to_check = list(facade_line_budgets)
@@ -1299,9 +1300,9 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/core/db/tenant_adoption_sql.py": 2093,
     # Adoption coordinates resumable tenant transactions with ownership and ACL repair.
     "backend/app/core/db/tenant_adoption.py": 1258,
-    # CQL2 parsing, feature-filter validation and record-filter literal handling share
-    # one pygeofilter walk.
-    "backend/app/standards/ogc/filtering.py": 1012,
+    # CQL2 parsing, feature-filter validation, record-filter literal handling and
+    # the requester's spatial extent share one pygeofilter walk.
+    "backend/app/standards/ogc/filtering.py": 1122,
     # Application composition debt; preserve lifespan and middleware ordering when
     # splitting.
     "backend/app/api/main.py": 1706,
@@ -1388,24 +1389,24 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # lifecycle.
     "backend/app/processing/analysis/tasks.py": 1454,
     # Map endpoints share response assembly, visibility and ownership checks.
-    "backend/app/modules/catalog/maps/router.py": 1538,
+    "backend/app/modules/catalog/maps/router.py": 1543,
     # Native search and OGC Records share visibility, query parsing and pagination.
-    "backend/app/modules/catalog/search/router.py": 1404,
+    "backend/app/modules/catalog/search/router.py": 1423,
     # STAC endpoints share visibility, extent, lineage and pagination conformance rules.
-    "backend/app/standards/stac/router.py": 1891,
+    "backend/app/standards/stac/router.py": 1939,
     # Authorization, acquisition order and cache rehydration share this route boundary;
     # the Enterprise overlay pins _check_cold_rehydrate here.
-    "backend/app/processing/tiles/router.py": 2811,
+    "backend/app/processing/tiles/router.py": 2862,
     # SQL allowlisting and cost validation must share canonical AST resolution.
     "backend/app/platform/sandbox/validator.py": 1706,
     # AI orchestration coordinates tool execution, usage accounting, pool-connection
     # release and truncated-reply refusal around provider calls and SSE failures.
-    "backend/app/processing/ai/service.py": 1010,
+    "backend/app/processing/ai/service.py": 1015,
     # Record children share ownership, ordering and publication-version invariants.
     "backend/app/modules/catalog/records/service.py": 877,
     # Export formats and catalog feeds share visibility, lineage, raster-asset
     # presence and private-artifact authorization.
-    "backend/app/modules/catalog/datasets/api/router_export.py": 1556,
+    "backend/app/modules/catalog/datasets/api/router_export.py": 1584,
     # Artifact selection, atomic publication, range reads and eviction share one cache
     # protocol.
     "backend/app/processing/export/artifact_cache.py": 620,
@@ -1415,6 +1416,9 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # invariants; temporal writes reuse the validated filter parsers, and batch
     # inserts reuse the single-insert validation.
     "backend/app/modules/catalog/features/service.py": 1501,
+    # Dataset visibility, and the VRT member counts and extents each requester
+    # may see, share the permission extension's one filter.
+    "backend/app/modules/catalog/authorization.py": 1176,
 }
 
 

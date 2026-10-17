@@ -13,14 +13,18 @@ from app.core.record_types import capabilities
 from app.core.db.tenant_session import current_tenant_var
 from app.core.db.sqlstate import is_caller_type_fault
 from app.core.dependencies import get_db
-from app.core.geo import extent_to_bbox
+from app.core.geo import extent_to_bbox, shown_extent
 from app.core.identity import Identity
 from app.core.persistent_config import OGC_ITEMS_MAX_PAGE_SIZE
 from app.core.public_urls import get_public_api_url, get_public_app_url
 from app.core.tenancy import is_multi_tenant
 from app.core.tile_scope import tile_template_query
 from app.modules.auth.dependencies import get_optional_user
-from app.modules.catalog.authorization import apply_visibility_filter, get_user_roles
+from app.modules.catalog.authorization import (
+    apply_visibility_filter,
+    get_user_roles,
+    visible_vrt_extents,
+)
 from app.modules.catalog.datasets.domain.models import Dataset, DatasetGrant, Record
 from app.modules.catalog.features.schemas import inline_json_schema
 from app.modules.catalog.features.service import (
@@ -344,8 +348,13 @@ async def get_dataset_collection(
             detail=f"Collection '{dataset_id}' is not an OGC API Features collection.",
         )
 
+    vrt_extents = None
+    if dataset.record.record_type == "vrt_dataset":
+        user_roles = await get_user_roles(db, user) if user is not None else set()
+        vrt_extents = await visible_vrt_extents(db, [dataset.id], user, user_roles)
+    spatial_extent = shown_extent(dataset.record, dataset.id, vrt_extents)
     extent = {}
-    bbox = extent_to_bbox(dataset.record.spatial_extent)
+    bbox = extent_to_bbox(spatial_extent)
     if bbox:
         extent["spatial"] = {
             "bbox": [bbox],
