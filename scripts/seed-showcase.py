@@ -15,8 +15,16 @@ The USGS earthquake feed is a refreshed snapshot, not a streaming layer.
 Check its source status before claiming it is current. Fixed Sentinel-2
 acquisitions are referenced remotely and are not a refresh cadence.
 
-Preparation commands, artifact checksums, staging checks, and rollback steps
-are in ``scripts/showcase-121/README.md``. This script needs httpx.
+``prepare-showcase-canopy.sh`` and ``prepare-showcase-tiles3d.py`` build the
+external artifacts that ``--showcase-121`` takes. The COPC file is a plain
+download that the first seed needs as ``--copc-file`` and checks against
+``COPC_SHA256``::
+
+    curl -fL --retry 3 -o autzen-classified.copc.laz 'https://media.githubusercontent.com/media/PDAL/data/refs/heads/main/autzen/autzen-classified.copc.laz'
+
+Pass ``--no-thumbnails`` with ``--expected-state``: the thumbnail backfill is
+not captured by the snapshot, so ``showcase-121-state.py restore`` cannot undo
+it. This script needs httpx.
 """
 
 import argparse

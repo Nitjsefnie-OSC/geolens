@@ -12,7 +12,7 @@ carries.
 The license texts referenced below sit next to this file, and the whole
 directory lands at `/app/licenses/` in the image.
 
-## psycopg 3.3.4, psycopg-pool 3.3.0 — LGPL-3.0-only
+## psycopg 3.3.6, psycopg-pool 3.3.0 — LGPL-3.0-only
 
 PostgreSQL driver and connection pool. Copyright © The Psycopg Team.
 `psycopg-pool` arrives both directly and through `procrastinate[pool]`.
@@ -105,18 +105,6 @@ Obligations discharged here: the license text is included, the files are
 unmodified, and the corresponding source is `certifi==2026.2.25` from PyPI,
 identifiable from `/app/uv.lock` and installable with
 `uv pip download certifi==2026.2.25 --no-binary :all:`.
-
-## tqdm 4.67.3 — MPL-2.0 AND MIT
-
-Progress-bar library. Reaches the image through `openai`.
-
-License text: `tqdm-LICENCE.txt`, reproduced verbatim because it is what carries
-the file-level split — most of the work is MIT, with `MPL-2.0 2015-2026 (c)
-Casper da Costa-Luis` covering `*` and specific files listed individually.
-`MPL-2.0.txt` holds the referenced MPL text.
-
-Ships unmodified; same MPL-2.0 analysis and same source-availability answer as
-certifi above.
 
 ## Scope
 
