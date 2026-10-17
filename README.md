@@ -1,462 +1,359 @@
-# GeoLens
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-emblem-dark.svg">
+    <img src=".github/assets/geolens-emblem.svg" alt="GeoLens logo: a magnifying glass over a globe with crosshair ticks" width="96">
+  </picture>
+</p>
 
-[English](README.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [简体中文](README.zh.md)
-
-**Turn scattered GIS files into a searchable catalog and shareable maps—on your own infrastructure.**
-
-GeoLens brings files, database tables, service snapshots, and remote assets into one spatial catalog you control. Search metadata, preview data, and keep every dataset’s origin visible. Build maps in the browser, publish links or embeds, and keep using QGIS and open standards alongside your team’s existing tools.
+<h1 align="center">GeoLens</h1>
 
 <p align="center">
-  <a href="https://demo.getgeolens.com"><img src="https://img.shields.io/badge/%E2%96%B6%20Try%20the%20live%20demo-demo.getgeolens.com-2563eb?style=for-the-badge" alt="Try the live demo" /></a>
-  <br />
-  <sub>No install required. Browse the sample catalog and maps without an account, or sign in with Google, GitHub, or Microsoft to try the map builder. Demo data may be wiped at any time.</sub>
+  <b>A self-hosted spatial data catalog and map builder that keeps track of where every dataset came from.</b>
 </p>
 
 <p align="center">
-  <a href="https://demo.getgeolens.com/maps"><img src=".github/assets/geolens-manhattan-3d-hero.jpg" alt="GeoLens map builder with Manhattan building footprints extruded into a 3D skyline, colored by construction era, with the subway and the drag-orderable layer stack beside the map" width="900" /></a>
-  <br />
-  <em>The map builder: every Manhattan building extruded to its true roof height and colored by the era it was built, the subway threading beneath, built from open data with <code>scripts/seed-showcase.py</code></em>
+  <a href="https://demo.getgeolens.com"><b>Live demo</b></a> ·
+  <a href="#install">Install</a> ·
+  <a href="https://docs.getgeolens.com">Documentation</a> ·
+  <a href="#use-the-data-from-anywhere">Connect QGIS or code</a> ·
+  <a href="https://github.com/geolens-io/geolens/discussions">Discussions</a>
 </p>
 
-## What you can do
+<div align="center">
 
-- **Find datasets:** search one catalog across file uploads, database tables, and imported service snapshots.
-- **Build and share maps:** compose multi-layer maps in the browser, then publish a link or embed them where people work.
-- **Use your existing tools:** connect QGIS, ArcGIS, MapLibre, and scripts through OGC/STAC APIs and direct tile URLs.
+[English](README.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [简体中文](README.zh.md)
 
-[![CI](https://github.com/geolens-io/geolens/actions/workflows/ci.yml/badge.svg)](https://github.com/geolens-io/geolens/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python: backend 3.13+ / SDK 3.10+](https://img.shields.io/badge/python-3.13%2B_backend_%7C_3.10%2B_SDK-blue.svg)](https://www.python.org/)
-[![PostgreSQL 18 + PostGIS 3.6](https://img.shields.io/badge/PostGIS_3.6-PostgreSQL_18-336791.svg)](https://postgis.net/)
-[![OGC API](https://img.shields.io/badge/OGC_API-Features_%7C_Records-green.svg)](https://ogcapi.ogc.org/)
+[![Latest release](https://img.shields.io/github/v/release/geolens-io/geolens?style=flat-square&label=release)](https://github.com/geolens-io/geolens/releases/latest)
+[![CI status](https://img.shields.io/github/actions/workflow/status/geolens-io/geolens/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/geolens-io/geolens/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2563eb?style=flat-square)](LICENSE)
 
-```bash
-git clone https://github.com/geolens-io/geolens.git && cd geolens
-bash scripts/install.sh   # read it first: it writes .env, generates secrets, runs docker compose up -d
-# Open http://localhost:8080, then log in with the credentials you chose
-```
-
-Or the one-line form, which runs the same script and pulls the prebuilt images:
-
-```bash
-curl -fsSL https://getgeolens.com/install.sh | sh
-```
-
-Images are published for linux/amd64 and linux/arm64. A fresh install runs six containers at about 1.3 GB resident.
-
-## Privacy, outbound connections, and data sources
-
-GeoLens has no telemetry and phones home to nothing, except default basemap tiles from tiles.openfreemap.org until an administrator configures another provider. Features you opt into can make outbound calls: AI assist to your chosen OpenAI-compatible endpoint or Anthropic key, OAuth/OIDC sign-in, SMTP, remote or S3 data sources, and off-site backups.
-
-Upload files, create datasets in the browser, or register tables already in GeoLens’s own PostGIS database without copying them. WFS, ArcGIS FeatureServer, and OGC API Features imports create one-shot copies; remote STAC assets remain live references. GeoLens records each dataset’s origin, indexes catalog metadata with pg_trgm for fuzzy search, and can add pgvector semantic ranking after you configure an embedding provider and enable semantic search.
-
-> [!NOTE]
-> **API stability.** The standards surfaces (OGC API Features/Records, STAC,
-> and the tile endpoints) track their specifications and are safe to build
-> against. GeoLens's own REST API can still change between minor releases:
-> contract changes are listed in the [CHANGELOG](CHANGELOG.md), and breaking
-> ones keep the old form working for at least one more minor release. Hit a
-> rough edge? [Open an issue](https://github.com/geolens-io/geolens/issues).
-
-## Documentation
-
-Full user, admin, and API documentation lives at **[docs.getgeolens.com](https://docs.getgeolens.com)**. The [Reference](#reference) table below links each guide.
-
-## Published artifacts
-
-GeoLens is published through the standard package registries:
-
-```bash
-pip install geolens          # Python SDK
-pip install geolens-cli      # CLI; installs the `geolens` command
-pip install geolens-mcp      # MCP server for coding agents (read-only)
-npm install @geolens/sdk     # TypeScript/JavaScript SDK
-```
-
-Prebuilt public API and frontend images are published to GitHub Container Registry:
-
-```bash
-docker pull ghcr.io/geolens-io/geolens-api:latest
-docker pull ghcr.io/geolens-io/geolens-frontend:latest
-```
-
-The `latest` tag tracks the newest published stable release.
-
-## Why GeoLens?
-
-Spatial data ends up scattered: shapefiles on shared drives, tables in database schemas, rasters in cloud buckets, metadata in spreadsheets. Finding the right dataset means asking Slack or grepping file servers. Sharing it means exporting, emailing, and hoping the CRS matches.
-
-GeoLens replaces that workflow:
-
-- **One data hub:** upload files, create datasets, register tables already in GeoLens's database, import feature-service snapshots, or reference remote STAC assets — then search and preview them together
-- **Source state, not guesswork:** see how each dataset entered the catalog, when it was last refreshed or checked, how its last refresh compares with its declared cadence (fresh, due, overdue, or unknown), and whether a remote Service or STAC origin is still reachable
-- **Works with your tools:** OGC API Features/Records with server-side CQL2 filtering, STAC API 1.0, direct tile URLs for QGIS, ArcGIS, and MapLibre
-- **No lock-in:** your catalog and the copies GeoLens manages stay on infrastructure you control and leave through open formats. Vector datasets export to GeoPackage, GeoJSON, Shapefile, CSV, GeoParquet, FlatGeobuf, or PMTiles; rasters download as Cloud-Optimized GeoTIFF; and any OGC API client reads the catalog directly
-- **Semantic and spatial search:** pg_trgm fuzzy matching out of the box; add an embedding provider and enable semantic search to rank datasets by meaning (pgvector)
-- **Built-in map builder:** compose multi-layer maps, style them, and share via public link or embeddable iframe
-- **AI-assisted (optional):** chat with your maps, auto-generate descriptions, search by natural language. Bring an OpenAI-compatible endpoint or Anthropic key, or skip it entirely
-
-## See it in action
-
-The examples below use a JWT bearer token. Mint one against the local stack (the login endpoint accepts an OAuth2 password form, so use `-d` with form fields, not JSON). Substitute your admin username and the password from `.env` (`grep '^GEOLENS_ADMIN_PASSWORD=' .env`):
-
-```bash
-TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login/ \
-  -d 'username=admin&password=<your-admin-password>' | jq -r '.access_token')
-```
-
-Semantic search takes a one-time admin setup: an embedding provider and the AI + Semantic Search toggles in the admin AI settings, plus an embedding backfill for data ingested before setup (the [search guide](https://docs.getgeolens.com/guides/user/search/) walks through it). Once that's on, search datasets by meaning instead of exact keyword matches:
-
-```bash
-# Semantic search ranks by meaning: "hydrology" surfaces the lake and river
-# network datasets whose titles never mention the word
-curl "http://localhost:8080/api/search/datasets/?q=hydrology&limit=3" \
-  -H "Authorization: Bearer $TOKEN" | jq '.features[].properties.title'
-```
-
-One search-endpoint behavior to know when consuming it programmatically: the
-first page augments the dataset results with up to five matching collections,
-so `numberReturned` can exceed `limit` on page 0 only. That is deliberate, not
-a bug — `limit` still bounds the number of *datasets* per page.
-
-Every dataset is also a standard OGC API Features endpoint:
-
-```bash
-# Grab a public collection id from the catalog. Search anonymously (no token) so
-# the id is one anyone can read, matching the unauthenticated items request below.
-CID=$(curl -s "http://localhost:8080/api/search/datasets/?q=countries&limit=1" \
-  | jq -r '.features[0].id')
-
-# GeoJSON features with a bbox filter, works in QGIS, ArcGIS, any OGC client
-curl "http://localhost:8080/api/collections/$CID/items?bbox=-10,35,30,60&limit=5"
-```
-
-PostGIS and pgvector share one database, so with semantic search enabled you can rank datasets by meaning *inside* a spatial window in a single query. See the [search guide](https://docs.getgeolens.com/guides/user/search/) for how semantic and spatial search work together.
-
-Connect directly from QGIS: **Layer > Add WFS / OGC API Features** and point at `http://localhost:8080/api/`.
-
-The same endpoints from the tools you already use: [geolens-examples](https://github.com/geolens-io/geolens-examples) holds single-file MapLibre, Leaflet, OpenLayers and ArcGIS JS pages, QGIS and DuckDB walkthroughs, both GeoLens SDKs, a semantic catalog search, a STAC browser, a saved-map embed, a Python/GeoPandas analysis, a catalog-as-code manifest for the CLI, and an MCP setup. The read-only ones run against the live demo, and CI replays them there on every push and once a week, so what you copy is code that worked this week. [Browse the gallery](https://geolens-io.github.io/geolens-examples/).
-
-## Features
-
-Each example above has a full guide in the [docs](https://docs.getgeolens.com/guides/). What GeoLens reads, writes, and exposes:
-
-### Data ingestion and export
-
-- **Five source modes:** Uploaded and Created data are managed locally; Register Table serves an existing table in GeoLens's own PostGIS database in place; Service imports are one-shot local copies; STAC datasets keep a live reference to the remote asset
-- **Vector:** Shapefile, GeoPackage, GeoJSON, GeoParquet, FlatGeobuf, KML/KMZ, zipped File Geodatabase, CSV, XLSX
-- **Raster:** GeoTIFF and Cloud-Optimized GeoTIFF (COG) with automatic conversion
-- **Mosaics:** VRT-based raster mosaics from multiple source files
-- **Export:** GeoJSON, Shapefile, GeoPackage, CSV, and FlatGeobuf with CRS reprojection; GeoParquet (always EPSG:4326); PMTiles as a self-contained tile archive for static hosts that support range requests
-- **Source state:** origin and last-refreshed/last-checked timestamps, cadence-based source freshness, and on-demand health checks for Service and STAC origins
-- Provenance tracking and metadata editing
-
-### Analysis
-
-- **Buffer** (metres, kilometres, feet, or miles), **centroid**, **clip** by a drawn area or by another polygon layer, and **dissolve** with an optional group-by column; **spatial join** and **select by location** match features on intersection, **measure** adds `area_sqm` and `length_m` columns, and **intersect** writes the pairwise overlay with attributes from both sides
-- All operations preview on the map except dissolve, which is materialize-only; previews are capped at 500 features. **Create dataset** then runs any of the eight over every feature as a background job, within per-operation source limits (250k features for dissolve, 500k for buffer)
-- The output is an ordinary vector dataset — styleable, exportable, and served through the OGC API endpoints like any other
-- The chat assistant can run buffer, centroid, and layer-based clip previews on request
-
-### Standards and interop
-
-- OGC API - Features (with server-side CQL2 filtering and per-collection `/queryables`) and OGC API - Records; STAC API 1.0 catalog endpoint; JSON-LD catalogs for DCAT 3, DCAT-US 3.0, and GeoDCAT-AP
-- Direct tile URLs and per-user API keys for QGIS, ArcGIS, MapLibre, and any OGC client
-- Vector tiles omit attribute columns below zoom 10 to keep low-zoom tiles small; add the `cols=<column>,<column>` query parameter to a tile URL to opt specific columns in at every zoom (names are validated against the dataset's columns, unknown names are dropped)
-- JWT + OAuth 2.0/OIDC, RBAC with per-dataset permissions
-- Interface in English, Spanish, French, German, and Simplified Chinese
-
-<details>
-<summary>Security</summary>
-
-- JWT authentication with refresh tokens
-- API key management per user
-- OAuth 2.0 / OIDC support (Google, Microsoft, generic providers)
-- Role-based access control (RBAC) with per-dataset permissions
-- Self-serve registration is off by default; when enabled with SMTP verification,
-  registration email delivery is uniform for new and colliding submissions
-- Audit logging for all administrative actions
-
-</details>
-
-## Screenshots
+</div>
 
 <p align="center">
-  <img src=".github/assets/geolens-search.png" alt="GeoLens catalog search for 'tallest peaks in Europe' semantically returning the swissALTI3D Matterhorn terrain dataset, with type, location, and temporal filters" width="900" />
-  <br />
-  <em><strong>Find:</strong> search by meaning. "Tallest peaks in Europe" finds the Matterhorn terrain model even though no result contains any of those words, alongside type, location, and temporal filters</em>
+  <a href="https://demo.getgeolens.com/maps">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-manhattan-3d-hero-dark.jpg">
+      <img src=".github/assets/geolens-manhattan-3d-hero.jpg" alt="The GeoLens map builder showing Manhattan's buildings extruded to their surveyed roof heights and colored by construction era, with the subway network, the layer list and a legend" width="100%">
+    </picture>
+  </a>
+  <br>
+  <sub>Manhattan's buildings at their surveyed roof heights, colored by construction era, with the subway network. <a href="https://demo.getgeolens.com/maps">Browse the demo's maps</a>.</sub>
 </p>
 
-<p align="center">
-  <img src=".github/assets/geolens-dataset.png" alt="GeoLens dataset detail for Significant Volcanic Eruptions: a global map preview of 900 eruption sites along plate boundaries above schema stats and typed metadata" width="900" />
-  <br />
-  <em><strong>Inspect:</strong> every dataset gets a map preview, schema stats, and typed metadata. Here, 6,000 years of significant volcanic eruptions from NOAA NCEI</em>
-</p>
+GeoLens is for teams whose spatial data is spread across file shares, PostGIS databases, web
+services and STAC catalogs. It puts that data in one searchable catalog, records where each
+dataset came from and checks whether the source is still current. Teams build and share maps in
+the browser, and QGIS, scripts and AI agents read the same data through OGC API and STAC. It runs
+on your own servers with Docker Compose, sends no telemetry and is licensed under Apache 2.0.
+
+The [demo](https://demo.getgeolens.com) needs no install or account; sign in with Google, GitHub
+or Microsoft to use the map builder. Demo data may be wiped at any time.
+
+## A closer look
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-catalog-search-dark.png">
+<img src=".github/assets/geolens-catalog-search.png" alt="GeoLens catalog search for 'where storms hit the coast', signed out, listing hurricane and coastal datasets with type, source and freshness badges beside the dataset filters" width="100%">
+</picture>
+<br><sub>Search by meaning: "where storms hit the coast" finds hurricane tracks and coastal exposure layers.</sub>
+</td>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-dataset-page-dark.png">
+<img src=".github/assets/geolens-dataset-page.png" alt="The dataset page for Atlantic Hurricane Tracks: storm tracks on a map preview, badges for vector, uploaded, source fresh, published and public, and the feature count, geometry, CRS, version and column count" width="100%">
+</picture>
+<br><sub>Each dataset has a page with its metadata and source, plus a map preview when it has an extent.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-import-preview-dark.png">
+<img src=".github/assets/geolens-import-preview.png" alt="The Import Data page's Service URL tab previewing the USGS Significant Earthquakes ArcGIS layer: CRS, geometry type, feature count, layer name and sample rows" width="100%">
+</picture>
+<br><sub>Before you import a service layer, GeoLens previews its columns and first rows.</sub>
+</td>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-version-history-dark.png">
+<img src=".github/assets/geolens-version-history.png" alt="Version history of the Significant Volcanic Eruptions dataset: three GeoJSON versions with dates, file names and feature counts, the current one marked, and a Restore button on the previous version" width="100%">
+</picture>
+<br><sub>Each replacement is recorded in the history, and you can restore the previous version.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-builder-style-dark.png">
+<img src=".github/assets/geolens-builder-style.png" alt="The map builder with the Restless Earth map on a globe: an earthquake heatmap along the Pacific plate boundaries, the grouped layer list and the heatmap style panel with its color ramps" width="100%">
+</picture>
+<br><sub>Layers render as points, symbols, heatmaps or clusters, and the ramp list can be limited to colorblind-safe ones.</sub>
+</td>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-matterhorn-terrain-dark.jpg">
+<img src=".github/assets/geolens-matterhorn-terrain.jpg" alt="The GeoLens map builder rendering the Matterhorn as 3D terrain from swissALTI3D lidar, with labeled peaks, climbing routes, the layer list and a legend" width="100%">
+</picture>
+<br><sub>3D terrain from your own elevation data, here the Matterhorn from swissALTI3D lidar.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-stac-imagery-dark.jpg">
+<img src=".github/assets/geolens-stac-imagery.jpg" alt="The map builder showing four dated Sentinel-2 true-color scenes over New York City and northern New Jersey, referenced from the Earth Search STAC catalog, with the layer list and legend" width="100%">
+</picture>
+<br><sub>Sentinel-2 scenes referenced from a STAC catalog. The imagery stays where it is and is tiled on request.</sub>
+</td>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-share-embed-dark.png">
+<img src=".github/assets/geolens-share-embed.png" alt="The Share dialog for a map: visibility set to Public, with Only you and All team members as the other options, a share link and an iframe embed code" width="100%">
+</picture>
+<br><sub>Keep a map to yourself, open it to your team, or make it public with a link and embed code.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-admin-overview-dark.png">
+<img src=".github/assets/geolens-admin-overview.png" alt="The admin Overview page: All Systems Operational, with database, storage, cache and tile cache status, total datasets, recent additions and storage used, beside the admin menu" width="100%">
+</picture>
+<br><sub>The admin overview shows service health next to dataset and storage totals.</sub>
+</td>
+<td width="50%" valign="top">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-admin-permissions-dark.png">
+<img src=".github/assets/geolens-admin-permissions.png" alt="The admin Permissions page: capabilities such as Upload Datasets, Export Data, Edit Metadata and Manage Users, with a checkbox for each of the viewer, editor and admin roles" width="100%">
+</picture>
+<br><sub>Viewer, editor and admin roles, with each capability switched on or off per role.</sub>
+</td>
+</tr>
+</table>
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph IN ["Bring data in"]
+      F["Files<br/>GeoPackage · Shapefile · GeoParquet<br/>GeoTIFF · COPC · 3D Tiles"]
+      DB["Existing PostGIS tables"]
+      SVC["Services<br/>ArcGIS · WFS · OGC API Features"]
+      ST["Remote STAC assets"]
+    end
+    subgraph GL ["GeoLens"]
+      CAT["Catalog<br/>search · metadata · provenance"]
+      MB["Map builder<br/>styles · 3D · analysis · sharing"]
+      STD["Open APIs<br/>OGC API · STAC · DCAT · tiles"]
+    end
+    subgraph OUT ["Use it anywhere"]
+      WEB["Browsers and embeds"]
+      GIS["QGIS · ArcGIS · CesiumJS"]
+      CODE["curl · Python · TypeScript · DuckDB"]
+      AG["AI agents via MCP"]
+    end
+    F & DB & SVC & ST --> CAT
+    CAT --> MB --> WEB
+    CAT --> STD --> GIS & CODE & AG
+```
+
+## One catalog for scattered data
+
+- Upload Shapefile, GeoPackage, GeoJSON, GeoParquet, FlatGeobuf, KML/KMZ, zipped File
+  Geodatabase, CSV, Excel or GeoTIFF (converted to Cloud-Optimized GeoTIFF). 3D Tiles and COPC
+  point clouds are hosted for CesiumJS, QGIS and Potree.
+- Serve tables already in GeoLens's PostGIS database in place, import WFS, ArcGIS and OGC API
+  Features layers and refresh them on demand, or reference remote STAC assets without copying
+  them.
+- Draw new datasets in the browser.
+- Find data with fuzzy search, or by meaning once an embedding provider is configured. Filter by
+  type, place and time, group datasets into collections, edit metadata and restore a dataset's
+  previous version after a replacement.
+
+## Know where every dataset came from
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-dataset-chat-dark.png" />
-    <img src=".github/assets/geolens-dataset-chat.png" alt="GeoLens Ask AI panel on the Meteorite Landings dataset answering 'How many meteorites were seen falling versus found later?' with a prose summary, a Fell/Found count table, and a button to open the result in the map builder" width="900" />
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-provenance-dark.png">
+    <img src=".github/assets/geolens-provenance.png" alt="The Source tab of the USGS Earthquakes dataset: imported from the USGS ArcGIS service into an owned copy, with last refreshed and last checked times, the feature count, and Healthy, Fresh and No drift badges" width="100%">
   </picture>
-  <br />
-  <em><strong>Ask your data:</strong> question a dataset in natural language. "How many meteorites were seen falling versus found later?" comes back with the answer, the counts (1,096 vs 31,090), and a one-click jump into the builder</em>
+  <br>
+  <sub>A dataset imported from the USGS earthquake service.</sub>
 </p>
 
-<p align="center">
-  <img src=".github/assets/geolens-matterhorn-terrain.jpg" alt="GeoLens map builder rendering the Matterhorn as a 3D terrain mesh from swissALTI3D lidar, with labeled peaks, climbing routes, the drag-orderable layer stack, and a legend" width="900" />
-  <br />
-  <em><strong>Build:</strong> compose multi-layer maps in the browser with a drag-orderable layer stack and per-layer editors (here: the Matterhorn as a 3D terrain mesh from swissALTI3D lidar)</em>
-</p>
+Each dataset records where it came from: an uploaded file, a database table, a service, a STAC
+item or a drawing in the browser. Imported datasets also record when they were last refreshed, and
+with an update cadence GeoLens marks them fresh, due or overdue. For services and
+STAC sources, GeoLens also checks that the source still answers, and for services it flags upstream
+schema changes before they reach your maps. If a service disappears, the imported copy keeps working.
+
+## Build and share maps
+
+- Point, symbol, heatmap, cluster, line, arrow, fill, 3D extrusion, raster and hillshade layers,
+  with data-driven styles, labels, icons, patterns, filters and popups. Terrain comes from your own
+  elevation models.
+- Buffer, centroid, clip, dissolve, spatial join, select by location, measure and intersect. Most
+  operations preview on the map, and each result is saved as a new dataset, from the builder or
+  the CLI.
+- Public links show the map's title and image when pasted into Slack, Teams or social posts, and
+  maps embed in other sites with private tokens.
+- The interface is in English, Spanish, French, German and Simplified Chinese.
+
+## Use the data from anywhere
+
+Vector datasets are OGC API Features collections, the catalog is OGC API Records and STAC, and
+every layer has a tile URL. You can try this against the demo without an account (the second
+command needs `jq`):
+
+```sh
+# Search the catalog (OGC API Records)
+curl "https://demo.getgeolens.com/api/collections/datasets/items?q=volcanic%20eruptions"
+
+# Read the top match with a CQL2 filter (OGC API Features): eruptions of VEI 6 or larger
+ID=$(curl -s "https://demo.getgeolens.com/api/collections/datasets/items?q=volcanic%20eruptions&limit=1" | jq -r '.features[0].id')
+curl -G "https://demo.getgeolens.com/api/collections/$ID/items" \
+  --data-urlencode "filter=vei >= 6" -d limit=3
+```
+
+QGIS adds the same API as an OGC API Features connection, as the
+[QGIS guide](https://docs.getgeolens.com/guides/api/qgis/) shows. The
+[GeoLens plugin for QGIS](https://github.com/geolens-io/qgis-geolens-plugin) adds catalog search,
+private datasets and edits that sync back to GeoLens.
 
 <p align="center">
-  <img src=".github/assets/geolens-ai-labels.png" alt="GeoLens Ask AI panel adding volcano-name labels to the Restless Earth map from the natural-language request 'Label the volcanoes with their names'" width="900" />
-  <br />
-  <em><strong>Ask AI:</strong> edit maps in natural language. "Label the volcanoes with their names" adds readable labels to the Restless Earth map (optional: bring an OpenAI-compatible endpoint or Anthropic key)</em>
+  <img src=".github/assets/geolens-qgis.png" alt="QGIS 4 with the GeoLens demo added as an OGC API Features connection: the Browser panel lists the demo's collections, and recent earthquakes, significant volcanic eruptions, plate boundaries and countries from the demo are loaded as layers on a world map" width="100%">
+  <br>
+  <sub>QGIS reading the demo over OGC API Features, without a plugin.</sub>
 </p>
+
+| Standard | Where | Use it with |
+|---|---|---|
+| OGC API Features, with CQL2 filtering and queryables | `/api/collections/{id}/items` | QGIS, ArcGIS, GDAL/OGR and other OGC API clients |
+| OGC API Records | `/api/collections/datasets/items` | Catalog search from other portals and tools |
+| STAC API 1.0 | `/api/stac/` | STAC clients such as pystac-client and STAC Browser |
+| DCAT 3, DCAT-US 3.0 and GeoDCAT-AP as JSON-LD | `/api/datasets/dcat/`, `/api/datasets/dcat-us/3.0/`, `/api/datasets/geodcat-ap/` | Harvesting into national and EU open-data portals |
+| Vector tiles and COG raster tiles | a tile URL on every layer | MapLibre, OpenLayers, Leaflet |
+| 3D Tiles and COPC | each 3D dataset's page | CesiumJS, QGIS, Potree |
+
+Data exports as GeoJSON, Shapefile, GeoPackage, CSV, FlatGeobuf, GeoParquet, PMTiles or
+Cloud-Optimized GeoTIFF.
+
+The `geolens` CLI publishes files and applies catalog manifests, Python and TypeScript SDKs cover
+the API, and a read-only MCP server lets AI agents search the catalog. The
+[API reference](https://docs.getgeolens.com/guides/api/) and
+[SDK guides](https://docs.getgeolens.com/guides/sdk/) document them, and the
+[examples gallery](https://geolens-io.github.io/geolens-examples/) has runnable code for
+MapLibre, Leaflet, OpenLayers, the ArcGIS Maps SDK, QGIS and DuckDB.
+
+## Optional AI
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-admin-overview-dark.png" />
-    <img src=".github/assets/geolens-admin-overview.png" alt="GeoLens admin overview with an all-systems-operational health panel showing database, storage, cache, and tile-cache latencies, dataset and storage totals, and AI provider status" width="900" />
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/geolens-ask-ai-dark.png">
+    <img src=".github/assets/geolens-ask-ai.png" alt="The Ask AI panel on the Major Hurricane Tracks dataset answering 'How many of these hurricanes made landfall?' with 119 of 202, a two-row count table, a note on how it read the landfall column, and an Open in builder button" width="100%">
   </picture>
-  <br />
-  <em><strong>Operate:</strong> the built-in admin plane covers live health, usage, users, jobs, audit log, and AI status — nothing extra to stand up</em>
+  <br>
+  <sub>"How many of these hurricanes made landfall?" returns the count, a table and the assumption the answer rests on.</sub>
 </p>
 
-## Quick start
+GeoLens can answer questions about a dataset, edit maps from plain-language requests, draft
+metadata and search in natural language. It works with any OpenAI-compatible endpoint, including
+a local server such as Ollama, and with Claude through Anthropic, Microsoft Foundry, Amazon Bedrock
+or Google Vertex AI. AI stays off until an administrator configures a provider, and every workflow
+works without it.
 
-**Prerequisites:** Docker Engine 24+ and Docker Compose v2. The bundled stack
-ships PostgreSQL 18. If you point GeoLens at an externally managed database, it
-must be **PostgreSQL 15+** (for `NULLS NOT DISTINCT` unique indexes) with
-**pgvector 0.5+** (for HNSW semantic-search indexes), plus PostGIS, pg_trgm, and
-unaccent. The API and worker run in containers (Python 3.14 bundled, no host Python needed). The
-optional CLI runs on your host and requires Python 3.11+; the Python SDK and
-seed scripts require Python 3.10+.
+## Install
 
-Clone the repo and run the installer from the checkout. You can read the script before running it; from a clone it builds the images locally:
+You need Git, curl and Docker with the Compose plugin. The
+[Install Guide](https://docs.getgeolens.com/guides/quickstart/install/) lists the versions, memory
+and ports it expects.
 
-```bash
-git clone https://github.com/geolens-io/geolens.git
+```sh
+curl -fsSL https://getgeolens.com/install.sh | sh    # clone, generate secrets, start the stack
 cd geolens
-bash scripts/install.sh
+grep '^GEOLENS_ADMIN_PASSWORD=' .env                  # the generated admin password
 ```
 
-The one-line form runs the same script and pulls the prebuilt, version-pinned images instead of building them:
+Open http://localhost:8080 and sign in as `admin` with that password. Each
+[release](https://github.com/geolens-io/geolens/releases) includes a `SHA256SUMS` file for checking
+`install.sh` before you run it. To build from source instead, clone the repository and run
+`bash scripts/install.sh`; the first build takes 5-10 minutes.
 
-```bash
-curl -fsSL https://getgeolens.com/install.sh | sh
-```
+For production, read the
+[cloud deployment guide](https://docs.getgeolens.com/guides/quickstart/cloud-deployment/), which
+also lists what an external database needs. Docker Compose is the supported path, and
+[geolens-deployments](https://github.com/geolens-io/geolens-deployments) has a community-maintained
+Helm chart and Terraform recipes for AWS ECS Fargate and Azure Container Apps.
 
-Either way, `scripts/install.sh` copies `.env.example` to `.env`, generates a JWT signing
-secret, sets up admin credentials, and runs `docker compose up -d`. The admin **username**
-defaults to `admin`; the admin **password** is auto-generated as a strong random value
-(written to `.env`, never printed to your terminal) unless you supply your own.
-For unattended installs, set `GEOLENS_ADMIN_USERNAME` and `GEOLENS_ADMIN_PASSWORD` in the
-environment before running and the prompts are skipped. Re-running the script is idempotent:
-existing values in `.env` are preserved.
+The bundled database is backed up daily, and the
+[backup guide](https://docs.getgeolens.com/guides/admin/backups/) covers off-site copies and
+restores. [UPGRADING.md](UPGRADING.md) covers upgrades and rollback, [RUNBOOK.md](RUNBOOK.md)
+covers operations, and the
+[Configuration Reference](https://docs.getgeolens.com/guides/quickstart/configuration/) lists every
+setting.
 
-Wait about 60 seconds for services to start, then open [http://localhost:8080](http://localhost:8080).
-Log in with your admin username and the generated password (retrieve it with
-`grep '^GEOLENS_ADMIN_PASSWORD=' geolens/.env` — the one-line installer clones
-into `geolens/` under the directory you ran it from; inside a source checkout
-it's just `.env`).
+## Your first dataset
 
-Verify all services are healthy:
+With the [CLI](https://docs.getgeolens.com/guides/cli/) installed, publish the sample file from the
+install directory:
 
-```bash
-docker compose ps
-```
-
-First-run notes: the one-line install **pulls** prebuilt images and is up in about
-a minute (only the small PostGIS + pgvector database layer builds locally). Cloning
-and running `bash scripts/install.sh` instead **builds** every image from source:
-5-10 minutes on the first run (GDAL + Postgres extensions + the frontend bundle);
-subsequent starts settle in ~60 seconds either way. If ports 5434/8001/8080 are
-already taken, change `DB_PORT`, `API_PORT`,
-or `FRONTEND_PORT` in `.env`. For port conflicts, stuck startups, out-of-memory,
-and migration warnings, see the [Troubleshooting guide](https://docs.getgeolens.com/guides/quickstart/install/#troubleshooting).
-
-For production deployment, see the [Install Guide](https://docs.getgeolens.com/guides/quickstart/install/). A Kubernetes Helm chart lives in the separate [`geolens-deployments`](https://github.com/geolens-io/geolens-deployments) repo.
-
-### Verify the installer
-
-Each [GitHub Release](https://github.com/geolens-io/geolens/releases) attaches a `SHA256SUMS`
-file generated by CI alongside `install.sh`. To confirm a downloaded installer was not tampered
-with before running it, download both assets from the same release and place them in the same
-directory, then run:
-
-```bash
-# Linux / Windows WSL
-sha256sum -c SHA256SUMS
-
-# macOS
-shasum -a 256 -c SHA256SUMS
-```
-
-A passing check prints `install.sh: OK`.
-
-### Upgrading
-
-To upgrade a prebuilt install, run `./scripts/upgrade.sh` from your install
-directory. It backs up the database, pulls the new images, runs migrations
-behind a health gate, and prints a rollback recipe if anything fails. See
-[`UPGRADING.md`](UPGRADING.md) for the prebuilt and source-build flows plus
-rollback, or the online [Upgrade Guide](https://docs.getgeolens.com/guides/quickstart/upgrade/).
-
-### Add your first dataset
-
-The repo ships a small `city-parks.geojson`. Upload and publish it in one command with the **GeoLens CLI**:
-
-```bash
-pip install geolens-cli                              # installs the `geolens` command
-geolens login http://localhost:8080/api              # use your admin username + password
+```sh
+geolens login http://localhost:8080/api               # your admin username and password
 geolens publish examples/manifests/first-catalog/city-parks.geojson --name "City Parks"
 ```
 
-`geolens publish` runs the upload → preview → commit ingest flow and prints the new dataset's URL. One command takes a local file to a published, mappable dataset.
+`geolens publish` prints the new dataset's URL. To manage a whole catalog, describe the sources in
+a `geolens.yaml` manifest and run `geolens apply`; [`examples/manifests/`](examples/manifests/) has
+templates.
 
-For repeatable, multi-dataset catalogs, describe your sources in a **manifest** (`geolens.yaml`) and apply it with `geolens apply`. Manifest sources are referenced by HTTP(S) URL, S3 URI, or a path already staged on the server; the examples in [`examples/manifests/`](examples/manifests/) are templates to adapt. Scaffold a fresh one with `geolens init` and edit it for your sources:
+To load the demo's maps and datasets, export `GEOLENS_ADMIN_PASSWORD` from `.env` and run
+`python scripts/seed-showcase.py --username admin`. The script needs Python 3.10+ and `httpx` and
+downloads public data from about a dozen sources; [scripts/README.md](scripts/README.md) has the
+sizes and options.
 
-```bash
-geolens init                       # writes geolens.yaml in the current directory
-geolens validate geolens.yaml      # local schema check, no API call
-geolens apply geolens.yaml         # validates + applies via /ingest/manifest/apply
-```
+## Privacy and access
 
-See the [CLI guide](https://docs.getgeolens.com/guides/cli/) for the full manifest schema, source kinds, and CI integration patterns.
-
-### Seed data
-
-`scripts/seed-showcase.py` builds seven showcase maps from public open data: a global
-tectonics story over real ocean-floor relief, the Manhattan 3D skyline colored by
-construction era (the hero above), Atlantic hurricane tracks since 1950, clustered
-meteorite falls, the Matterhorn in 2 m lidar 3D terrain, by-reference Sentinel-2
-imagery of New York, and a hurricane-exposure map computed in place from the storm
-tracks with buffer, intersect and dissolve:
-
-```bash
-pip install httpx
-python scripts/seed-showcase.py --username admin --password "$(grep '^GEOLENS_ADMIN_PASSWORD=' .env | cut -d= -f2-)"
-```
-
-Requires internet access to the upstream open-data sources. See
-[`scripts/README.md`](scripts/README.md) for flags (`--no-terrain`, `--prune`, …).
-
-## Architecture
-
-GeoLens is a small set of services around a single PostgreSQL/PostGIS database: the
-API serves the catalog, search, and OGC/STAC endpoints; a worker handles ingestion;
-and Titiler serves raster tiles from object storage.
-
-```mermaid
-flowchart TB
-    B["Browser: React + MapLibre app"]
-    OGC["QGIS · ArcGIS · OGC/STAC clients"]
-
-    NG["Nginx reverse proxy<br/>serves the React build, routes /api and tiles"]
-
-    subgraph Application
-      API["FastAPI<br/>catalog · semantic search · OGC/STAC · vector tiles"]
-      W["Worker<br/>GDAL/ogr2ogr ingestion"]
-      TT["Titiler<br/>COG raster tiles"]
-    end
-
-    subgraph store [Data and storage]
-      PG[("PostgreSQL 18<br/>PostGIS · pgvector · pg_trgm<br/>+ Procrastinate queue")]
-      OBJ[("Object storage<br/>local files or S3/MinIO")]
-      CACHE[("Valkey cache")]
-    end
-
-    B --> NG
-    OGC --> NG
-    NG --> API
-    NG --> TT
-    API <--> PG
-    API --> OBJ
-    API -. tile/query cache .-> CACHE
-    PG == job ==> W
-    W --> PG
-    W --> OBJ
-    TT --> OBJ
-```
-
-| Component | Technology |
-|-----------|-----------|
-| Frontend | React 19, Vite, MapLibre GL v6, TanStack Query, Tailwind CSS |
-| Backend API | FastAPI (Python), GDAL/ogr2ogr, Procrastinate (task queue) |
-| Raster Tiles | Titiler (COG tile server) |
-| Object Storage | MinIO (S3-compatible, local dev) or any S3 provider |
-| Cache | Valkey (tile and query cache) |
-| Database | PostgreSQL 18 + PostGIS 3.6 + pgvector + pg_trgm (minimum: PostgreSQL 15, pgvector 0.5) |
-| Reverse Proxy | Nginx (production) / Vite dev proxy (development) |
-
-## Configuration
-
-All configuration is managed through environment variables in `.env`. See the [Configuration Reference](https://docs.getgeolens.com/guides/quickstart/configuration/) for the full list of options with defaults and descriptions.
-
-### Connection pool budget
-
-GeoLens ships tuned for a **single PostgreSQL** instance: the API, worker, and admin
-pools fit within **70 of 80 max_connections** out of the box (Postgres
-`max_connections` is set to 80), sized by `DB_POOL_SIZE` (`pool_size`) and
-`DB_MAX_OVERFLOW` (`max_overflow`, default 3). See
-[Connection Pool Tuning](https://docs.getgeolens.com/guides/quickstart/configuration/#connection-pool-tuning)
-for the per-process budget and how to raise the ceiling.
-
-### Backups
-
-Automated, scheduled backups run **by default**. You do not need a `--profile backup` flag.
-The backup service starts alongside `api`, `worker`, and `db` on every
-`docker compose up` and runs `pg_dump` on a daily/weekly schedule alongside an
-archive of the object-storage staging volume, so a restore reproduces a working
-instance (DB + uploaded files).
-
-**Off-site (S3) upload** is additionally gated on `BACKUP_S3_ENABLED=true`. The
-built-in uploader signs requests with **AWS Signature V4** (awscli), compatible
-with Cloudflare R2, modern AWS S3, and MinIO. A failed upload surfaces a visible
-`ERROR` in container logs (not a swallowed warning), so silent offsite backup
-loss is detectable immediately.
-
-For day-2 operations, restore procedures, and incident response, see
-[RUNBOOK.md](RUNBOOK.md). For provider-specific configuration options, see
-[Backups & Restore](https://docs.getgeolens.com/guides/admin/backups/#backup-destinations).
-
-### Monitoring
-
-The API and worker export Prometheus metrics out of the box (HTTP rate/latency/
-errors, job-queue depth, DB pool, tile-cache). Reference scrape config, alert
-rules, and a Grafana dashboard ship in [`infra/monitoring/`](infra/monitoring/);
-see [RUNBOOK.md §4](RUNBOOK.md#4-monitoring) for the setup steps.
-
-## Reference
-
-| Guide | Description |
-|-------|-------------|
-| [Install Guide](https://docs.getgeolens.com/guides/quickstart/install/) | Step-by-step deployment with Docker Compose |
-| [Upgrade Guide](https://docs.getgeolens.com/guides/quickstart/upgrade/) | Upgrading between versions with rollback procedures |
-| [Configuration Reference](https://docs.getgeolens.com/guides/quickstart/configuration/) | All environment variables and their defaults |
-| [Admin Guide](https://docs.getgeolens.com/guides/admin/) | User management, datasets, system health |
-| [Self-host on managed cloud services](https://docs.getgeolens.com/guides/quickstart/cloud-deployment/) | Managed database, object storage, and cache deployment guides |
-| [CLI & Manifests](https://docs.getgeolens.com/guides/cli/) | Publish files and manage catalogs with the `geolens` CLI |
-| [API Reference](https://docs.getgeolens.com/guides/api/) | Auto-generated reference at docs.getgeolens.com; development-mode stacks also serve Swagger UI at `/api/docs` (disabled in production) |
-| [Manifest examples](examples/manifests/) | Template `geolens.yaml` manifests to adapt: public-cog (remote COG), url-source, s3-source, publication-states |
-| [Client examples](https://github.com/geolens-io/geolens-examples) | Runnable browser, QGIS, DuckDB, SDK, CLI, embed, Python, and MCP examples; the read-only ones are verified against the live demo in CI ([gallery](https://geolens-io.github.io/geolens-examples/)) |
-
-## Community
-
-- [GitHub Discussions](https://github.com/geolens-io/geolens/discussions): questions, ideas, show and tell
-- [Support](SUPPORT.md): where to ask for help and how problems get routed
-- [Contributing Guide](.github/CONTRIBUTING.md): development setup, code style, and PR guidelines
+- GeoLens sends no telemetry. Apart from the default basemap tiles and the remote services or
+  STAC sources your users register, it makes outbound calls only for features an administrator
+  turns on. [EGRESS.md](EGRESS.md) lists them and explains how to run air-gapped.
+- Your data stays readable without GeoLens. Vector datasets are ordinary PostGIS tables in a
+  `data` schema, rasters are Cloud-Optimized GeoTIFFs in your own storage (local disk, S3/MinIO or
+  Azure Blob), and the catalog exports through OGC API, STAC and DCAT.
+- Sign-in uses local accounts or OAuth 2.0/OIDC (Google, Microsoft, GitHub or a generic provider),
+  with roles, per-dataset permissions, per-user API keys and an audit log. Self-registration is
+  off by default.
+- Features released in this repository stay free.
+  [EDITIONS.md](EDITIONS.md) describes the optional paid support and add-ons.
 
 ## Known limitations
 
-- Single PostgreSQL instance, with no built-in high availability or clustering.
-- GeoLens is designed for one organization per self-hosted deployment.
-- Terrain rendering assumes DEM units are in meters; datasets in other vertical units may render exaggerated.
-- GeoLens's own REST API may still change between minor releases (see the API stability note above).
+- One PostgreSQL instance, with no built-in high availability or clustering.
+- One organization per deployment.
+- Terrain rendering assumes elevation in meters; other vertical units render exaggerated.
+- GeoLens's own REST API can change between minor releases (the standards endpoints follow their
+  specifications). The [CHANGELOG](CHANGELOG.md) lists contract changes, and a breaking change
+  keeps the old form working for one more minor release.
+
+## Contributing
+
+Bug reports, fixes, translations and docs are welcome. [CONTRIBUTING](.github/CONTRIBUTING.md)
+covers setup, tests and DCO sign-off, and [ARCHITECTURE](.github/ARCHITECTURE.md) maps the code.
+The [QGIS plugin](https://github.com/geolens-io/qgis-geolens-plugin),
+[examples](https://github.com/geolens-io/geolens-examples) and
+[deployments](https://github.com/geolens-io/geolens-deployments) repositories take issues and pull
+requests too. Ask questions in
+[GitHub Discussions](https://github.com/geolens-io/geolens/discussions), report bugs in
+[Issues](https://github.com/geolens-io/geolens/issues), and report security problems privately as
+described in [SECURITY.md](.github/SECURITY.md). The [roadmap](https://docs.getgeolens.com/roadmap/)
+shows what's planned.
 
 ## License
 
-GeoLens is licensed under the [Apache License 2.0](LICENSE). The GeoLens name, logo, and brand assets are not covered by this license. See [TRADEMARKS.md](TRADEMARKS.md). Third-party sample-data attribution is in [THIRD_PARTY_DATA.md](THIRD_PARTY_DATA.md).
+GeoLens is licensed under the [Apache License 2.0](LICENSE). The GeoLens name, logo and brand
+assets are not covered by this license; see [TRADEMARKS.md](TRADEMARKS.md). Sample-data
+attribution is in [THIRD_PARTY_DATA.md](THIRD_PARTY_DATA.md).
 
-Project policies: [governance](GOVERNANCE.md) · [maintainers](MAINTAINERS.md) · [contributing](.github/CONTRIBUTING.md) · [security](.github/SECURITY.md) · [release process](RELEASE.md) · [egress &amp; air-gap](EGRESS.md).
+Project policies: [editions](EDITIONS.md) · [support](SUPPORT.md) · [governance](GOVERNANCE.md) · [maintainers](MAINTAINERS.md) · [security](.github/SECURITY.md) · [release process](RELEASE.md) · [egress &amp; air-gap](EGRESS.md)
