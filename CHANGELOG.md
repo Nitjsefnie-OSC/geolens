@@ -7,6 +7,15 @@ and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- API keys can be created with an expiry from the web app. Both the key
+  settings page and the admin user page now offer Never, 30 days, 90 days and
+  1 year (the default stays Never), and each key in the list shows when it
+  expires. A key past its expiry is marked Expired, because it no longer
+  authenticates. The API already accepted `expires_at`, so nothing changes for
+  API callers.
+
 ### Fixed
 
 - The dataset page header shows catalog status and visibility in one badge,
