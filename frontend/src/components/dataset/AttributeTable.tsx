@@ -1,23 +1,17 @@
-import { useState, useMemo, useRef, useEffect, useCallback, useId } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback, useId, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   useTable,
   tableFeatures,
   rowSortingFeature,
   columnVisibilityFeature,
-  createSortedRowModel,
-  sortFn_alphanumeric,
-  sortFn_alphanumericCaseSensitive,
-  sortFn_basic,
-  sortFn_datetime,
-  sortFn_text,
-  sortFn_textCaseSensitive,
   type ColumnDef,
   type SortingState,
   type ColumnVisibilityState,
 } from '@tanstack/react-table';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { toast } from 'sonner';
+import { ApiError } from '@/api/client';
 import { useDatasetRows } from '@/components/dataset/hooks/use-dataset';
 import { useUpdateFeature } from '@/hooks/use-features';
 import { useDebouncedValue } from '@/hooks/use-debounce';
@@ -25,7 +19,7 @@ import { DEFAULT_ROWS_PAGE_SIZE, PAGE_SIZE_OPTIONS } from '@/lib/constants';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -36,36 +30,41 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { formatNumber } from '@/lib/format';
 import { formatMutationError } from '@/lib/error-map';
 import { coerceAttributeValue } from '@/lib/attribute-values';
-import { Loader2, ArrowUpDown, Settings2, Pencil } from 'lucide-react';
+import { Loader2, ArrowDown, ArrowUp, ArrowUpDown, Settings2, Pencil } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 
-// react-table v9 requires row models and sort functions to be registered
-// explicitly (v8 wired getSortedRowModel() as a table option and auto-detected
-// sortingFns). Columns here are built dynamically from the dataset's Postgres
-// column list with no per-column sortFn set, so all six built-ins must be
-// registered by name — the auto-detected sortFn (alphanumeric/text/datetime/
-// basic) still resolves by sampling each column's data, but only if its name
-// is present in this map. Registered individually rather than via the
-// library's bundled `sortFns` export, which is deprecated in favor of
-// importing only the functions actually used.
-export const features = tableFeatures({
+// Sorting is server-side (manualSorting), so no sorted row model is registered:
+// a page holds only `limit` rows, and sorting those alone would misrepresent
+// the column's order.
+const features = tableFeatures({
   rowSortingFeature,
   columnVisibilityFeature,
-  sortedRowModel: createSortedRowModel(),
-  sortFns: {
-    alphanumeric: sortFn_alphanumeric,
-    alphanumericCaseSensitive: sortFn_alphanumericCaseSensitive,
-    basic: sortFn_basic,
-    datetime: sortFn_datetime,
-    text: sortFn_text,
-    textCaseSensitive: sortFn_textCaseSensitive,
-  },
 });
 
 /** Columns that are not user-editable */
 const NON_EDITABLE_COLUMNS = new Set(['gid', 'geom']);
 /** Columns that are not filterable */
 const NON_FILTERABLE_COLUMNS = new Set(['geom', 'geom_4326']);
+
+/** PostgreSQL's own short names for the verbose information_schema types. */
+const SHORT_TYPES: Record<string, string> = {
+  'character varying': 'varchar',
+  character: 'char',
+  'double precision': 'float8',
+  real: 'float4',
+  smallint: 'int2',
+  integer: 'int4',
+  bigint: 'int8',
+  boolean: 'bool',
+  'timestamp with time zone': 'timestamptz',
+  'timestamp without time zone': 'timestamp',
+  'time with time zone': 'timetz',
+  'time without time zone': 'time',
+};
+
+function shortType(type: string): string {
+  return SHORT_TYPES[type] ?? type.toLowerCase();
+}
 
 interface EditingCell {
   rowGid: number;
@@ -76,6 +75,10 @@ interface AttributeTableProps {
   datasetId: string;
   canEdit?: boolean;
   compact?: boolean;
+  /** Leading toolbar content, shown on the row that holds the Columns menu. */
+  heading?: ReactNode;
+  /** Trailing toolbar controls, after the Columns menu. */
+  actions?: ReactNode;
 }
 
 /** Postgres numeric types get a decimal input mode on touch keyboards. */
@@ -167,10 +170,16 @@ function InlineCellEditor({
   );
 }
 
-export function AttributeTable({ datasetId, canEdit = false, compact = false }: AttributeTableProps) {
+export function AttributeTable({
+  datasetId,
+  canEdit = false,
+  compact = false,
+  heading,
+  actions,
+}: AttributeTableProps) {
   const { t } = useTranslation('dataset');
-  const [cursor, setCursor] = useState(0);
   const [cursorHistory, setCursorHistory] = useState<number[]>([0]);
+  const cursor = cursorHistory[cursorHistory.length - 1];
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   // Scroll container ref used by the row virtualizer.
@@ -203,26 +212,45 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
     return Object.keys(f).length > 0 ? f : undefined;
   }, [debouncedFilters]);
 
-  // Reset cursor and history when filters change
-  useEffect(() => {
-    setCursor(0);
-    setCursorHistory([0]);
-  }, [debouncedFilters]);
+  const sort = useMemo(
+    () => (sorting[0] ? { column: sorting[0].id, desc: sorting[0].desc } : undefined),
+    [sorting],
+  );
 
-  // An open cell editor survives a page/filter/page-size
-  // change; if the edited row leaves the result set the in-progress edit
-  // silently vanishes. Close it (and clear any error) when the row set moves.
+  // A cursor is a position within one filter + sort order. Reset paging during
+  // render, not in an effect, so no request goes out with the new order and
+  // the old cursor.
+  const pagingScope = JSON.stringify([activeFilters ?? null, sort ?? null]);
+  const [pagedScope, setPagedScope] = useState(pagingScope);
+  if (pagedScope !== pagingScope) {
+    setPagedScope(pagingScope);
+    setCursorHistory([0]);
+  }
+
+  // When the row set moves (page, filter, sort, page size), an open cell
+  // editor would silently lose its in-progress edit as the row leaves, so
+  // close it and clear any error. The new rows start at the top; keep the
+  // horizontal position.
   useEffect(() => {
     setEditingCell(null);
     setEditError(null);
-  }, [datasetId, cursor, activeFilters, pageSize]);
+    if (parentRef.current) parentRef.current.scrollTop = 0;
+  }, [datasetId, cursor, activeFilters, sort, pageSize]);
 
-  const { data, isLoading, isFetching, isError } = useDatasetRows(
+  const { data, error, isLoading, isFetching, isError, isPlaceholderData } = useDatasetRows(
     datasetId,
     pageSize,
     cursor,
     activeFilters,
+    sort,
   );
+  // A schema edit, in GeoLens or on a live table, can drop or retype the sorted
+  // column, and the server reports that as a 400 whose text depends on where it
+  // failed. Fall back to unsorted rows; a 400 that persists without the sort is
+  // shown as usual.
+  if (sort && error instanceof ApiError && error.status === 400) {
+    setSorting([]);
+  }
 
   const handleFilterChange = useCallback((colName: string, value: string) => {
     setColumnFilters((prev) => ({ ...prev, [colName]: value }));
@@ -307,24 +335,28 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
   const handleNextPage = useCallback(() => {
     if (data?.next_cursor != null) {
       setCursorHistory((prev) => [...prev, data.next_cursor!]);
-      setCursor(data.next_cursor!);
     }
   }, [data?.next_cursor]);
 
   const handlePreviousPage = useCallback(() => {
-    setCursorHistory((prev) => {
-      if (prev.length <= 1) return prev;
-      const newHistory = prev.slice(0, -1);
-      setCursor(newHistory[newHistory.length - 1]);
-      return newHistory;
-    });
+    setCursorHistory((prev) => (prev.length <= 1 ? prev : prev.slice(0, -1)));
   }, []);
 
   const columns = useMemo<ColumnDef<typeof features, Record<string, unknown>>[]>(() => {
     if (!data?.columns) return [];
+    // An API without the field offers no sorting rather than a failing one.
+    const sortable = new Set(data.sortable_columns ?? []);
     return data.columns.map((col) => ({
       accessorKey: col.name,
-      header: `${col.name} (${col.type})`,
+      header: () => (
+        <>
+          {col.name}
+          <span className="font-normal text-muted-foreground" title={col.type}>
+            {shortType(col.type)}
+          </span>
+        </>
+      ),
+      enableSorting: sortable.has(col.name),
       cell: (info) => {
         const {
           editingCell: currentEdit,
@@ -392,13 +424,13 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
         return cellValue;
       },
     }));
-    // The column list and `t` ONLY. Every other input the renderer
-    // needs comes from cellRenderRef, because adding any of them back here
-    // remounts every cell — and with it any open editor — whenever they change.
+    // The column lists and `t` ONLY. Every other input the renderer needs
+    // comes from cellRenderRef, because adding any of them back here remounts
+    // every cell — and with it any open editor — whenever they change.
     // `t` is safe to keep: react-i18next caches its useSyncExternalStore
     // snapshot and only hands back a new `t` on a language change, which is a
     // legitimate reason to rebuild the columns.
-  }, [data?.columns, t]);
+  }, [data?.columns, data?.sortable_columns, t]);
 
   const table = useTable(
     {
@@ -408,15 +440,16 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
       state: { sorting, columnVisibility },
       onSortingChange: setSorting,
       onColumnVisibilityChange: setColumnVisibility,
+      manualSorting: true,
+      enableMultiSort: false,
+      sortDescFirst: false,
     },
     (state) => state,
   );
 
   // Virtualize the body so that 100-row pages render only the visible
   // window (~10-20 rows + overscan), keeping DOM-node count flat regardless of
-  // page size or column count. The virtualizer iterates over the post-sort,
-  // post-filter row model from TanStack Table — sort/filter state changes flow
-  // through naturally on each render via `count: rows.length`.
+  // page size or column count. Rows arrive filtered and sorted from the server.
   const rows = table.getRowModel().rows;
   // Fixed-height rows only — never reintroduce dynamic row
   // measurement here. With a Chrome AX tree attached (screen reader, CDP
@@ -463,21 +496,64 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
   const rangeStart = rowCount > 0 ? (cursorHistory.length - 1) * pageSize + 1 : 0;
   const rangeEnd = rangeStart > 0 ? rangeStart + rowCount - 1 : 0;
 
+  const columnsMenu = columns.length > 0 ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+          <Settings2 className="h-3.5 w-3.5" />
+          {t('attributes.columns')}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-64 overflow-y-auto">
+        {table.getAllColumns()
+          .filter((col) => col.getCanHide())
+          .map((col) => (
+            <DropdownMenuCheckboxItem
+              key={col.id}
+              className="text-xs"
+              checked={col.getIsVisible()}
+              onCheckedChange={(value) => col.toggleVisibility(!!value)}
+            >
+              {col.id}
+            </DropdownMenuCheckboxItem>
+          ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  ) : null;
+
+  // The root is a shrinkable flex column: inside a height-bounded parent
+  // (DataTab) the scroll region absorbs the overflow, so the toolbar and the
+  // pagination bar stay on screen.
+  const shell = (body: ReactNode) => (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {heading || actions || columnsMenu ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {heading}
+          <div className="ms-auto flex items-center gap-1">
+            {columnsMenu}
+            {actions}
+          </div>
+        </div>
+      ) : null}
+      {body}
+    </div>
+  );
+
   if (isLoading) {
-    return (
+    return shell(
       <div className="flex items-center justify-center py-12">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
+      </div>,
     );
   }
 
-  if (isError) return <div className="p-4 text-sm text-destructive">{t('attributes.loadFailed', { defaultValue: 'Failed to load data. Please try again.' })}</div>;
+  if (isError) return shell(<div className="p-4 text-sm text-destructive">{t('attributes.loadFailed', { defaultValue: 'Failed to load data. Please try again.' })}</div>);
 
   if (effectiveTotal === 0 && !activeFilters && (!data?.rows || data.rows.length === 0)) {
-    return (
+    return shell(
       <div className="text-center py-12 text-muted-foreground">
         {t('attributes.noData')}
-      </div>
+      </div>,
     );
   }
 
@@ -485,139 +561,115 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
   // so real row pitch always equals `rowHeight` and the virtualizer's offset
   // math stays correct without dynamic measurement.
   const cellClass = compact ? 'h-7 py-0 text-xs' : 'h-11 py-0';
+  const lastItem = virtualItems[virtualItems.length - 1];
+  const paddingTop = virtualItems[0]?.start ?? 0;
+  const paddingBottom = lastItem
+    ? virtualizer.getTotalSize() - (lastItem.start + lastItem.size)
+    : 0;
+  const visibleColumnCount = table.getVisibleLeafColumns().length;
 
-  return (
-    <div className="space-y-3">
-      {/* Toolbar: column visibility */}
-      <div className="flex items-center justify-end">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-              <Settings2 className="h-3.5 w-3.5" />
-              {t('attributes.columns')}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="max-h-64 overflow-y-auto">
-            {table.getAllColumns()
-              .filter((col) => col.getCanHide())
-              .map((col) => (
-                <DropdownMenuCheckboxItem
-                  key={col.id}
-                  className="capitalize text-xs"
-                  checked={col.getIsVisible()}
-                  onCheckedChange={(value) => col.toggleVisibility(!!value)}
-                >
-                  {col.id}
-                </DropdownMenuCheckboxItem>
-              ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
+  return shell(
+    <>
       {/*
-        The scroll container is `parentRef`. Virtualization is applied to
-        the <tbody> only — the native <table>/<thead>/<tr>/<td> structure is
-        preserved so column auto-sizing and sticky headers keep working. The
-        table is `w-max` (content-sized): wide tables overflow and scroll via
-        the inner shadcn Table container's `overflow-x-auto`; few-column tables
-        size to their content instead of stretching to fill (no empty columns).
-        Vertical scroll is captured here (max-h + overflow-auto).
+        `parentRef` is the only scroll container, for both axes, so the
+        sticky header and the horizontal scrollbar belong to the visible box.
+        The shared Table renders `bare` because its own overflow wrapper would
+        nest a second scroll container that grows to the rendered rows and
+        clips them. The table is `w-max` (content-sized): wide tables scroll
+        sideways and few-column tables don't stretch into empty columns.
 
-        The recommended TanStack pattern for native-table virtualization
-        (https://tanstack.com/virtual/latest/docs/framework/react/examples/table)
-        keeps rendered <tr>s in document flow and shifts each one back to its
-        virtualized offset via `translateY(virtualRow.start - index * size)`.
-        Total scrollable height is enforced by an inner spacer div wrapping
-        the <table>. The spacer sets only a min-height (the rows' total): the
-        sticky header rows are not counted in it, so a fixed height would clip
-        the rows of a short table below the scroll box's edge.
+        Only the <tbody> is virtualized, and spacer rows above and below the
+        rendered window give the table its full height. A sticky <thead> stays
+        pinned only while its table is that tall; rows shifted with transforms
+        would leave the table short and let the header scroll away.
       */}
       <div
         ref={parentRef}
-        className="rounded-md border relative max-h-[60vh] overflow-auto"
+        role="region"
+        aria-label={t('attributes.tableLabel')}
+        tabIndex={0} // eslint-disable-line jsx-a11y/no-noninteractive-tabindex -- scrollable region must be keyboard-focusable
+        className="relative min-h-0 overflow-auto rounded-md border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
-        <div
-          style={
-            rows.length === 0
-              ? undefined
-              : { minHeight: `${virtualizer.getTotalSize()}px`, width: '100%' }
-          }
-        >
-          <Table aria-label={t('attributes.tableLabel')} className="w-max">
-            <TableHeader className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm">
-              {table.getHeaderGroups().map((headerGroup) => (
-                <TableRow key={headerGroup.id}>
-                  {headerGroup.headers.map((header) => {
-                    // Announce sort state on the column header.
-                    const sorted = header.column.getIsSorted();
-                    const ariaSort = sorted === 'asc'
-                      ? 'ascending'
-                      : sorted === 'desc'
-                        ? 'descending'
-                        : header.column.getCanSort()
-                          ? 'none'
-                          : undefined;
-                    return (
-                    <TableHead key={header.id} aria-sort={ariaSort}>
-                      {header.isPlaceholder ? null : (
-                        <button
-                          type="button"
-                          className="flex items-center gap-1 hover:text-foreground"
-                          onClick={header.column.getToggleSortingHandler()}
-                        >
-                          <table.FlexRender header={header} />
-                          {header.column.getIsSorted() === 'asc' ? (
-                            <span> ↑</span>
-                          ) : header.column.getIsSorted() === 'desc' ? (
-                            <span> ↓</span>
-                          ) : (
-                            <ArrowUpDown className="h-3 w-3 text-muted-foreground/50" />
-                          )}
-                        </button>
-                      )}
-                    </TableHead>
-                    );
-                  })}
-                </TableRow>
-              ))}
-              {/* Filter row */}
-              <TableRow>
-                {table.getHeaderGroups()[0]?.headers.map((header) => (
-                  <TableHead key={`filter-${header.id}`} className="py-1">
-                    {!NON_FILTERABLE_COLUMNS.has(header.column.id) ? (
-                      <Input
-                        aria-label={t('attributes.filterColumn', { column: header.column.id })}
-                        value={columnFilters[header.column.id] ?? ''}
-                        onChange={(e) => handleFilterChange(header.column.id, e.target.value)}
-                        placeholder={t('attributes.filter')}
-                        className="bg-transparent border-0 border-b rounded-none text-xs h-7 focus-visible:ring-0 focus-visible:border-primary"
-                      />
-                    ) : null}
+        <table data-slot="table" className="w-max caption-bottom text-sm">
+          <TableHeader className="sticky top-0 z-10 bg-muted">
+            {table.getHeaderGroups().map((headerGroup) => (
+              <TableRow key={headerGroup.id}>
+                {headerGroup.headers.map((header) => {
+                  // Announce sort state on the column header.
+                  const sorted = header.column.getIsSorted();
+                  const canSort = header.column.getCanSort();
+                  const ariaSort = sorted === 'asc'
+                    ? 'ascending'
+                    : sorted === 'desc'
+                      ? 'descending'
+                      : canSort
+                        ? 'none'
+                        : undefined;
+                  return (
+                  <TableHead key={header.id} aria-sort={ariaSort} className="normal-case">
+                    {header.isPlaceholder ? null : canSort ? (
+                      <button
+                        type="button"
+                        className="flex items-center gap-1.5 hover:text-foreground"
+                        onClick={header.column.getToggleSortingHandler()}
+                      >
+                        <table.FlexRender header={header} />
+                        {sorted === 'asc' ? (
+                          <ArrowUp className="h-3 w-3" />
+                        ) : sorted === 'desc' ? (
+                          <ArrowDown className="h-3 w-3" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 text-muted-foreground/50" />
+                        )}
+                      </button>
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <table.FlexRender header={header} />
+                      </span>
+                    )}
                   </TableHead>
-                ))}
+                  );
+                })}
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={columns.length} className="text-center text-muted-foreground py-8">
-                    {t('attributes.noResults')}
-                  </TableCell>
-                </TableRow>
-              ) : (
-                virtualItems.map((virtualRow, index) => {
+            ))}
+            {/* Filter row */}
+            <TableRow>
+              {table.getHeaderGroups()[0]?.headers.map((header) => (
+                <TableHead key={`filter-${header.id}`} className="py-1">
+                  {!NON_FILTERABLE_COLUMNS.has(header.column.id) ? (
+                    <Input
+                      aria-label={t('attributes.filterColumn', { column: header.column.id })}
+                      value={columnFilters[header.column.id] ?? ''}
+                      onChange={(e) => handleFilterChange(header.column.id, e.target.value)}
+                      placeholder={t('attributes.filter')}
+                      className="bg-transparent border-0 border-b rounded-none text-xs h-7 focus-visible:ring-0 focus-visible:border-primary"
+                    />
+                  ) : null}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={columns.length} className="text-center text-muted-foreground py-8">
+                  {t('attributes.noResults')}
+                </TableCell>
+              </TableRow>
+            ) : (
+              <>
+                {paddingTop > 0 ? (
+                  <tr aria-hidden="true">
+                    <td colSpan={visibleColumnCount} style={{ height: paddingTop, padding: 0 }} />
+                  </tr>
+                ) : null}
+                {virtualItems.map((virtualRow) => {
                   const row = rows[virtualRow.index];
                   return (
                     <TableRow
                       key={row.id}
+                      data-index={virtualRow.index}
                       className={virtualRow.index % 2 === 1 ? 'bg-muted/30' : ''}
-                      style={{
-                        // Shift each rendered <tr> from its document-flow position
-                        // to its virtualized offset. All rendered rows form a
-                        // contiguous block of equal-height items, so subtracting
-                        // index * size collapses them onto virtualRow.start.
-                        transform: `translateY(${virtualRow.start - index * virtualRow.size}px)`,
-                      }}
                     >
                       {row.getVisibleCells().map((cell) => (
                         <TableCell key={cell.id} className={`max-w-xs truncate ${cellClass}`}>
@@ -626,11 +678,16 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
                       ))}
                     </TableRow>
                   );
-                })
-              )}
-            </TableBody>
-          </Table>
-        </div>
+                })}
+                {paddingBottom > 0 ? (
+                  <tr aria-hidden="true">
+                    <td colSpan={visibleColumnCount} style={{ height: paddingBottom, padding: 0 }} />
+                  </tr>
+                ) : null}
+              </>
+            )}
+          </TableBody>
+        </table>
       </div>
 
       {/* Pagination */}
@@ -650,7 +707,6 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
               value={String(pageSize)}
               onValueChange={(val) => {
                 setPageSize(Number(val));
-                setCursor(0);
                 setCursorHistory([0]);
               }}
             >
@@ -675,7 +731,7 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
             variant="outline"
             size="sm"
             onClick={handlePreviousPage}
-            disabled={cursorHistory.length <= 1}
+            disabled={cursorHistory.length <= 1 || isPlaceholderData}
           >
             {t('attributes.previous')}
           </Button>
@@ -683,12 +739,14 @@ export function AttributeTable({ datasetId, canEdit = false, compact = false }: 
             variant="outline"
             size="sm"
             onClick={handleNextPage}
-            disabled={data?.next_cursor == null}
+            // Placeholder rows belong to the previous page or order, so their
+            // cursor would pair the old position with the new query.
+            disabled={data?.next_cursor == null || isPlaceholderData}
           >
             {t('common:next')}
           </Button>
         </div>
       </div>
-    </div>
+    </>,
   );
 }

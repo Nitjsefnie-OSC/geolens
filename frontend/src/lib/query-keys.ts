@@ -15,6 +15,7 @@
  *   during deployment.
  */
 
+import type { DatasetRowsSort } from '@/api/datasets';
 import type { MapBrowseParams } from '@/types/api';
 
 export const queryKeys = {
@@ -37,8 +38,13 @@ export const queryKeys = {
   datasets: {
     all: ['datasets'] as const,
     detail: (id: string) => ['dataset', id] as const,
-    rows: (id: string, limit: number, cursor: number, filters?: Record<string, string>) =>
-      ['dataset-rows', id, limit, cursor, filters] as const,
+    rows: (
+      id: string,
+      limit: number,
+      cursor: number,
+      filters?: Record<string, string>,
+      sort?: DatasetRowsSort,
+    ) => ['dataset-rows', id, limit, cursor, filters, sort] as const,
     rowsPrefix: (id: string) => ['dataset-rows', id] as const,
     history: (id: string, skip: number, limit: number) =>
       ['dataset-history', id, skip, limit] as const,

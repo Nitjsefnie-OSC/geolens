@@ -46,6 +46,7 @@ from app.modules.catalog.datasets.domain.service_previous_version import (
     drop_previous_version,
 )
 from app.modules.catalog.datasets.domain.service_query import (
+    InvalidSortColumn,
     get_dataset,
     get_dataset_detail,
     get_dataset_rows,
@@ -53,6 +54,7 @@ from app.modules.catalog.datasets.domain.service_query import (
     get_pointcloud_pointer,
     get_tileset_href,
     list_datasets,
+    sortable_columns,
 )
 from app.modules.catalog.datasets.domain.service_relationships import (
     auto_detect_relationships,
@@ -71,6 +73,7 @@ __all__ = [
     "reap_managed_storage",
     "DatasetTitleMismatchError",
     "DependentVrtError",
+    "InvalidSortColumn",
     "PREVIEW_FEATURE_CAP",
     "PreviousVersionRefused",
     "admit_restore",
@@ -98,6 +101,7 @@ __all__ = [
     "get_relationship_datasets",
     "list_attributes",
     "list_datasets",
+    "sortable_columns",
     "list_relationships",
     "list_relationships_with_total",
     "validate_relationship_columns",

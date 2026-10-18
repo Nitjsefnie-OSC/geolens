@@ -4116,6 +4116,12 @@ export type DatasetRowsResponse = {
      * Cursor value for the next page, null if last
      */
     next_cursor?: number | null;
+    /**
+     * Sortable Columns
+     *
+     * Columns the rows endpoint accepts as `sort`.
+     */
+    sortable_columns?: Array<string>;
 };
 
 /**
@@ -21908,6 +21914,18 @@ export type GetDatasetRowsEndpointDatasetsDatasetIdRowsGetData = {
          * After
          */
         after?: number;
+        /**
+         * Sort
+         *
+         * Column to order rows by, then by gid. NULLs sort last in both directions. An unknown or unsortable column returns 400.
+         */
+        sort?: string | null;
+        /**
+         * Order
+         *
+         * Sort direction; applies only with `sort`.
+         */
+        order?: 'asc' | 'desc';
     };
     url: '/datasets/{dataset_id}/rows/';
 };
