@@ -280,14 +280,17 @@ def test_no_full_ssrf_marker_sits_above_a_non_sink_line() -> None:
 # A pure move carries a marker and its call into a new file
 # together, so the placement test above keeps passing even when the two come
 # apart, and CodeQL's PR run cannot dismiss what it re-reports at a new location.
-PATH_SINK_METHODS = frozenset({"open", "stat", "unlink"})
+PATH_SINK_METHODS = frozenset({"exists", "glob", "open", "stat", "unlink"})
 
 
 def _builds_a_path(value: ast.expr, known: set[str]) -> bool:
-    """A ``Path(...)`` call, a name already proven to hold one, or a ``/`` join
-    with one such operand. A bare division proves nothing: ``done / total`` is
-    arithmetic, and accepting it would type its target as a path module-wide.
+    """A ``Path(...)`` call, a name already proven to hold one, its ``.parent``,
+    or a ``/`` join with one such operand. A bare division proves nothing:
+    ``done / total`` is arithmetic, and accepting it would type its target as a
+    path module-wide.
     """
+    if isinstance(value, ast.Attribute) and value.attr == "parent":
+        return isinstance(value.value, ast.Name) and value.value.id in known
     if isinstance(value, ast.Call):
         func = value.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
@@ -380,10 +383,11 @@ def _bound_names(nodes: list[ast.AST]) -> set[str]:
 def _path_sink_lines(source: str) -> set[int]:
     """1-based start line of every call that acts on a filesystem path.
 
-    Accepts the builtin ``open``, and a ``PATH_SINK_METHODS`` call whose
-    receiver the enclosing scope types as a path. Both halves are needed: the
-    method names alone match any object that happens to expose one, and CodeQL
-    does not report ``py/path-injection`` at those.
+    Accepts the builtin ``open``, a ``PATH_SINK_METHODS`` call whose receiver
+    the enclosing scope types as a path, the ``/`` join a ``.resolve()`` is
+    called on, and the argument of ``os.scandir``. The receiver check is
+    needed: the method names alone match any object that happens to expose
+    one, and CodeQL does not report ``py/path-injection`` at those.
 
     The set is exactly the shapes the markers sit above today. A sink written
     another way (``shutil.copy``, ``os.remove``) fails this test instead of
@@ -404,13 +408,27 @@ def _path_sink_lines(source: str) -> set[int]:
                 if isinstance(func, ast.Name):
                     if func.id == "open" and not shadowed:
                         lines.add(node.lineno)
+                elif not isinstance(func, ast.Attribute):
+                    continue
                 elif (
-                    isinstance(func, ast.Attribute)
-                    and func.attr in PATH_SINK_METHODS
+                    func.attr in PATH_SINK_METHODS
                     and isinstance(func.value, ast.Name)
                     and func.value.id in names
                 ):
                     lines.add(node.lineno)
+                elif (
+                    func.attr == "resolve"
+                    and isinstance(func.value, ast.BinOp)
+                    and isinstance(func.value.op, ast.Div)
+                ):
+                    lines.add(func.value.lineno)
+                elif (
+                    func.attr == "scandir"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "os"
+                    and node.args
+                ):
+                    lines.add(node.args[0].lineno)
 
     visit(ast.parse(source), set(), False)
     return lines
@@ -432,6 +450,19 @@ def _print_call_lines(source: str) -> set[int]:
     }
 
 
+def _hashlib_argument_lines(source: str) -> set[int]:
+    """1-based start line of the data passed to a ``hashlib.<algorithm>(...)`` call."""
+    return {
+        node.args[0].lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and node.args
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "hashlib"
+    }
+
+
 # The construct each rule reports at. `py/full-ssrf` is absent because the two
 # tests above already pin its markers in both directions, against one shared
 # definition of an SSRF sink.
@@ -439,6 +470,7 @@ MARKER_CONSTRUCTS = {
     "py/sql-injection": _dynamic_sql_lines,
     "py/path-injection": _path_sink_lines,
     "py/clear-text-logging-sensitive-data": _print_call_lines,
+    "py/weak-sensitive-data-hashing": _hashlib_argument_lines,
 }
 RULES_CHECKED_ELSEWHERE = frozenset({"py/full-ssrf"})
 
@@ -503,6 +535,165 @@ def test_every_marker_sits_above_a_construct_its_own_rule_reports_at() -> None:
         f"no marker under backend/app names {sorted(unexercised)}, so the "
         "entr(y/ies) check nothing. Either the markers were removed and the "
         "entries should go too, or ANY_MARKER_RE has stopped matching them."
+    )
+
+
+_SQL = "py/sql-injection"
+_PATH = "py/path-injection"
+_HASH = "py/weak-sensitive-data-hashing"
+_URL = "py/incomplete-url-substring-sanitization"
+
+# (path, rule, enclosing function or None, fragment of the reported line). The
+# function narrows the search where the same line repeats in one module.
+DISMISSED_SITES = (
+    (
+        "backend/app/modules/catalog/datasets/domain/column_stats.py",
+        _SQL,
+        None,
+        'f"SELECT DISTINCT {expr} AS val "',
+    ),
+    (
+        "backend/app/modules/catalog/datasets/domain/column_stats.py",
+        _SQL,
+        None,
+        'f"SELECT COUNT({col_q}), COUNT(DISTINCT {col_q}) "',
+    ),
+    (
+        "backend/app/modules/catalog/datasets/domain/column_stats.py",
+        _SQL,
+        None,
+        'f"SELECT MIN({col_q}::numeric), MAX({col_q}::numeric), "',
+    ),
+    (
+        "backend/app/platform/sandbox/executor.py",
+        _SQL,
+        None,
+        "statement = text(sql).bindparams(*binds)",
+    ),
+    (
+        "backend/app/platform/sandbox/executor.py",
+        _SQL,
+        None,
+        "_limited_sql(sql, fetch_limit, max_result_bytes, token, weights)",
+    ),
+    *(
+        ("backend/app/modules/catalog/layers/service.py", _SQL, fn, "text(ddl)")
+        for fn in (
+            "create_layer",
+            "add_column",
+            "rename_column",
+            "alter_column_type",
+            "drop_column",
+        )
+    ),
+    (
+        "backend/app/modules/catalog/features/service.py",
+        _SQL,
+        "update_feature",
+        "text(sql).bindparams(**params)",
+    ),
+    (
+        "backend/app/modules/catalog/features/retention.py",
+        _SQL,
+        None,
+        'session.scalar(text(sql), {"cutoff": cutoff})',
+    ),
+    (
+        "backend/app/platform/storage/local.py",
+        _PATH,
+        None,
+        "(self.base_dir / key).resolve()",
+    ),
+    ("backend/app/platform/storage/local.py", _PATH, None, "os.scandir(root)"),
+    (
+        "backend/app/platform/storage/local.py",
+        _PATH,
+        "_keys_in_order",
+        "parent.exists()",
+    ),
+    (
+        "backend/app/platform/storage/local.py",
+        _PATH,
+        None,
+        'parent.glob(resolved_prefix.name + "*")',
+    ),
+    (
+        "backend/app/modules/auth/dependencies.py",
+        _HASH,
+        None,
+        "hashlib.sha256(api_key.encode())",
+    ),
+    ("cli/geolens_cli/auth.py", _HASH, None, "hashlib.sha256(bearer_token.encode())"),
+    (
+        "backend/tests/test_csp_sec020.py",
+        "py/bad-tag-filter",
+        None,
+        r're.search(r"<script>\s*\S", html)',
+    ),
+    (
+        "backend/tests/test_embed_framing_csp.py",
+        _URL,
+        None,
+        '"https://partner.example" in csp, (',
+    ),
+    (
+        "backend/tests/test_embed_framing_csp.py",
+        _URL,
+        None,
+        '"https://other.example" in csp, (',
+    ),
+    (
+        "backend/tests/test_embed_framing_csp.py",
+        _URL,
+        None,
+        '"https://embed.example.com" in csp, (',
+    ),
+    (
+        "backend/tests/test_oauth_github_provider.py",
+        _URL,
+        None,
+        'any("api.github.com" in u for u in called_urls)',
+    ),
+)
+
+
+def _search_span(source: str, function: str | None) -> tuple[int, int]:
+    """1-based inclusive line span to search: the named function, or the module."""
+    if function is None:
+        return 1, len(source.splitlines())
+    spans = [
+        (node.lineno, node.end_lineno or node.lineno)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == function
+    ]
+    assert len(spans) == 1, (
+        f"expected one function named {function}, found {len(spans)}"
+    )
+    return spans[0]
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "rule", "function", "anchor"),
+    DISMISSED_SITES,
+    ids=[
+        f"{path.rsplit('/', 1)[-1]}:{anchor[:40]}"
+        for path, _, _, anchor in DISMISSED_SITES
+    ],
+)
+def test_every_dismissed_site_keeps_its_marker(
+    rel_path: str, rule: str, function: str | None, anchor: str
+) -> None:
+    """CodeQL reports these sites and they were dismissed by hand, so each needs its marker in source."""
+    source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    first, last = _search_span(source, function)
+    hits = [n for n in range(first, last + 1) if anchor in lines[n - 1]]
+    assert len(hits) == 1, f"{rel_path}: {anchor!r} found on lines {hits}, expected one"
+    above = lines[hits[0] - 2].strip()
+    match = ANY_MARKER_RE.search(above)
+    assert above.startswith("#") and match and match.group(1).lower() == rule, (
+        f"{rel_path}:{hits[0]} needs `# codeql[{rule}]` directly above, found {above!r}"
     )
 
 
