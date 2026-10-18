@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from shapely import to_geojson
 from shapely.errors import GEOSException
@@ -776,6 +776,115 @@ async def _geom_column_is_measured(session: AsyncSession, table_name: str) -> bo
     )
     typmod_type = result.scalar_one_or_none()
     return typmod_type is not None and typmod_type.strip().upper().endswith("M")
+
+
+DryRunBlocker = Literal[
+    "missing_table", "not_a_table", "insert_side_effects", "user_code"
+]
+
+
+def _trusted(oid: str, catalog: str) -> str:
+    """SQL true when the object is built in or belongs to an installed extension."""
+    return (
+        f"{oid} < 16384 OR EXISTS (SELECT 1 FROM pg_depend e "
+        f"WHERE e.classid = '{catalog}'::regclass AND e.objid = {oid} "
+        "AND e.deptype = 'e')"
+    )
+
+
+# Each user column's type and, for an array, its element type.
+_COLUMN_TYPES = (
+    "SELECT ty.oid FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid "
+    "WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+    "UNION SELECT ty.typelem FROM pg_attribute a "
+    "JOIN pg_type ty ON ty.oid = a.atttypid "
+    "WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+    "AND ty.typcategory = 'A'"
+)
+
+_UNTRUSTED_VOLATILE = f"p.provolatile = 'v' AND NOT ({_trusted('p.oid', 'pg_proc')})"
+
+# Shapes whose insert or readback could run user code. Extension objects are
+# trusted because PostGIS declares its GiST support functions VOLATILE, and
+# element types are checked for JSON casts because the readback's to_jsonb
+# recurses into arrays.
+_USER_CODE = (
+    "EXISTS (SELECT 1 FROM pg_constraint con "
+    "WHERE con.contype IN ('c', 'f') AND con.conrelid = c.oid) "
+    "OR c.relrowsecurity OR c.relispartition "
+    "OR EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid "
+    "AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL)) "
+    "OR NOT EXISTS (SELECT 1 FROM pg_am am "
+    "WHERE am.oid = c.relam AND am.amname = 'heap' AND am.oid < 16384) "
+    "OR EXISTS (SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
+    f"WHERE i.indrelid = c.oid AND NOT ({_trusted('ic.relam', 'pg_am')})) "
+    "OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid "
+    "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> '') "
+    f"OR EXISTS (SELECT 1 FROM ({_COLUMN_TYPES}) col WHERE NOT ("
+    f"{_trusted('col.oid', 'pg_type')})) "
+    f"OR EXISTS (SELECT 1 FROM ({_COLUMN_TYPES}) col JOIN pg_cast ca "
+    "ON ca.castsource = col.oid AND ca.casttarget IN "
+    "('json'::regtype, 'jsonb'::regtype) AND ca.castfunc <> 0 "
+    f"WHERE NOT ({_trusted('ca.castfunc', 'pg_proc')})) "
+    "OR EXISTS (SELECT 1 FROM pg_index i, unnest(i.indclass::oid[]) oc(oid) "
+    "JOIN pg_opclass opc ON opc.oid = oc.oid WHERE i.indrelid = c.oid AND ("
+    "EXISTS (SELECT 1 FROM pg_amproc ap JOIN pg_proc p ON p.oid = ap.amproc "
+    f"WHERE ap.amprocfamily = opc.opcfamily AND {_UNTRUSTED_VOLATILE}) "
+    "OR EXISTS (SELECT 1 FROM pg_amop ao "
+    "JOIN pg_operator o ON o.oid = ao.amopopr "
+    "JOIN pg_proc p ON p.oid = o.oprcode::oid "
+    f"WHERE ao.amopfamily = opc.opcfamily AND {_UNTRUSTED_VOLATILE})))"
+)
+
+_RELKIND = text(
+    "SELECT c.relkind::text FROM pg_class c WHERE c.oid = to_regclass("
+    "format('%I.%I', CAST(:schema AS text), CAST(:t AS text)))"
+)
+
+_DRY_RUN_PROBE = text(
+    "SELECT c.relkind::text AS relkind, EXISTS (SELECT 1 FROM pg_trigger tg "
+    "WHERE tg.tgrelid = c.oid AND NOT tg.tgisinternal "
+    "AND tg.tgenabled IN ('O', 'A') AND (tg.tgtype::int & 4) <> 0) "
+    "OR EXISTS (SELECT 1 FROM pg_rewrite rw "
+    "WHERE rw.ev_class = c.oid AND rw.ev_type = '3' "
+    "AND rw.ev_enabled IN ('O', 'A')) AS side_effects, "
+    f"{_USER_CODE} AS user_code "
+    "FROM pg_class c WHERE c.oid = to_regclass(format('%I.%I', "
+    "CAST(:schema AS text), CAST(:t AS text)))"
+)
+
+
+async def dry_run_blocker(
+    session: AsyncSession, table_name: str
+) -> DryRunBlocker | None:
+    """Why a dry-run insert into the table could leave effects behind, or None.
+
+    Only an ordinary table qualifies, and only while it has no enabled user
+    INSERT trigger or rule and none of the shapes in ``_USER_CODE``: each may
+    run code that reaches past the transaction, where the rolled-back insert
+    cannot undo it. The table is locked in ROW EXCLUSIVE mode, the insert's
+    own lock, before the second look, so none of these can be added before
+    the insert; the lock lasts until the transaction ends. A table that is
+    missing at the first look is reported, never inserted into.
+    """
+    from app.core.db.tenant_schema import tenant_data_schema
+    from app.core.db.tenant_session import current_tenant_var
+
+    params = {"schema": tenant_data_schema(current_tenant_var.get()), "t": table_name}
+    relkind = await session.scalar(_RELKIND, params)
+    if relkind is None:
+        return "missing_table"
+    if relkind != "r":
+        return "not_a_table"
+    quoted = get_catalog_port().quote_table(table_name)
+    # codeql[py/sql-injection] table identifier from quote_table, which validates it
+    await session.execute(text(f"LOCK TABLE {quoted} IN ROW EXCLUSIVE MODE"))
+    row = (await session.execute(_DRY_RUN_PROBE, params)).one()
+    if row.relkind != "r":
+        return "not_a_table"
+    if row.side_effects:
+        return "insert_side_effects"
+    return "user_code" if row.user_code else None
 
 
 async def effective_geometry_type(session: AsyncSession, dataset) -> str:
