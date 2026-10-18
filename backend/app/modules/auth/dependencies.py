@@ -22,7 +22,11 @@ from app.core.identity import Identity
 from app.modules.auth.models import ApiKey, User
 from app.modules.auth.permissions import get_user_roles
 from app.platform.extensions import get_identity_extension, get_permission_extension
-from app.platform.request_credential import ApiKeyCredential, record_api_key
+from app.platform.request_credential import (
+    DATASET_KEY_SCOPE_ROUTES,
+    ApiKeyCredential,
+    record_api_key,
+)
 
 oauth2_scheme_optional = OAuth2PasswordBearer(
     tokenUrl="/api/auth/login", auto_error=False
@@ -154,35 +158,13 @@ def _read_only_key_may_call(
     return value.strip().lower() in _FALSEY_QUERY_VALUES
 
 
-# The only routes a dataset_write key authenticates, as exact (METHOD, route
-# template) pairs: reading and writing features of the dataset each template
-# names in its ``dataset_id`` path parameter. Templates match as in the
-# read_only carve-out above, including the generated no-slash aliases.
-_DATASET_KEY_ROUTES: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("GET", "/datasets/{dataset_id}/features/"),
-        ("GET", "/datasets/{dataset_id}/features"),
-        ("POST", "/datasets/{dataset_id}/features/"),
-        ("POST", "/datasets/{dataset_id}/features"),
-        ("POST", "/datasets/{dataset_id}/features/dry-run/"),
-        ("POST", "/datasets/{dataset_id}/features/dry-run"),
-        ("GET", "/datasets/{dataset_id}/features/{gid}"),
-        ("PUT", "/datasets/{dataset_id}/features/{gid}"),
-        ("PATCH", "/datasets/{dataset_id}/features/{gid}"),
-        ("DELETE", "/datasets/{dataset_id}/features/{gid}"),
-        ("GET", "/datasets/{dataset_id}/features.geojson"),
-        ("GET", "/collections/{dataset_id}/items"),
-        ("GET", "/collections/{dataset_id}/items/"),
-        ("GET", "/collections/{dataset_id}/items/{feature_id}"),
-    }
-)
-
-
-def _dataset_key_may_call(request: Request, dataset_id: uuid.UUID | None) -> bool:
-    """Whether a dataset_write key bound to ``dataset_id`` may serve this request."""
+def _dataset_key_may_call(
+    request: Request, routes: frozenset[tuple[str, str]], dataset_id: uuid.UUID | None
+) -> bool:
+    """Whether a key bound to ``dataset_id`` and limited to ``routes`` may serve this."""
     if dataset_id is None:
         return False
-    if (request.method, _route_template(request)) not in _DATASET_KEY_ROUTES:
+    if (request.method, _route_template(request)) not in routes:
         return False
     try:
         return uuid.UUID(str(request.path_params.get("dataset_id"))) == dataset_id
@@ -293,16 +275,13 @@ def log_permission_denial(
 async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
     """Try to resolve a user from X-Api-Key header or api_key query parameter.
 
-    fix(#821): the ``?api_key=`` query lane is DEPRECATED (leaks into access
-    logs); kept for clients that cannot set headers, e.g. desktop GIS XYZ tile
-    URLs. Precedence: header > query param.
+    The ``?api_key=`` query lane is DEPRECATED (leaks into access logs); kept
+    for clients that cannot set headers, e.g. desktop GIS XYZ tile URLs.
+    Precedence: header > query param. ``_supplied_api_key`` drops a
+    query-string key on anything but a read.
 
-    fix(#1845): that read-only justification is now enforced, not just
-    documented — ``_supplied_api_key`` drops a query-string key on anything
-    but a read.
-
-    A ``dataset_write`` key off its own dataset's feature routes resolves to
-    None, like an invalid key: a valid bearer token on the same request then
+    A dataset key off its scope's routes on its own dataset resolves to None,
+    like an invalid key: a valid bearer token on the same request then
     authenticates it as the token's user. A key that resolves is recorded on
     ``db`` for the request's guards and audit events.
     """
@@ -332,11 +311,12 @@ async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
         return None
     if not user.is_active or user.status != "active":
         return None
-    # A dataset_write key off its own dataset's feature routes resolves as no
+    # A dataset key off its scope's routes on its own dataset resolves as no
     # key at all, before the usage bump, so the refusal matches an invalid key
     # and tells the caller nothing about the route or the dataset.
-    if api_key_obj.scope == "dataset_write" and not _dataset_key_may_call(
-        request, api_key_obj.dataset_id
+    dataset_key_routes = DATASET_KEY_SCOPE_ROUTES.get(api_key_obj.scope)
+    if dataset_key_routes is not None and not _dataset_key_may_call(
+        request, dataset_key_routes, api_key_obj.dataset_id
     ):
         log.warning(
             "api_key_dataset_scope_denied",

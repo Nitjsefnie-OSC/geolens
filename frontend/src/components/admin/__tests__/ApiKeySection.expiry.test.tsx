@@ -136,7 +136,19 @@ describe('ApiKeySection expiry', () => {
   it('badges a key bound to one dataset', () => {
     listing([makeKey({ scope: 'dataset_write', dataset_id: 'ds-1' })]);
     render(<ApiKeySection userId="u1" />);
-    expect(screen.getByText('apiKeys.scopeDatasetWrite')).toBeInTheDocument();
+    expect(screen.getByText('admin:apiKeys.scopeDatasetWrite')).toBeInTheDocument();
+  });
+
+  it('badges an append-only key bound to one dataset', () => {
+    listing([makeKey({ scope: 'dataset_append', dataset_id: 'ds-1' })]);
+    render(<ApiKeySection userId="u1" />);
+    expect(screen.getByText('admin:apiKeys.scopeDatasetAppend')).toBeInTheDocument();
+  });
+
+  it('still badges a scope this build does not know', () => {
+    listing([makeKey({ scope: 'dataset_future', dataset_id: 'ds-1' })]);
+    render(<ApiKeySection userId="u1" />);
+    expect(screen.getByText('dataset_future')).toBeInTheDocument();
   });
 
   it('lets a key row wrap so it never widens the edit dialog', () => {

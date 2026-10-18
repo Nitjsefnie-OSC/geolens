@@ -89,6 +89,30 @@ and releases use semantic versioning.
   with no value in the column are kept, and a timestamp without time zone is
   read as UTC. Retention is off by default. Saving a setting that would
   delete rows right away first shows how many and asks to confirm.
+- Append-only dataset keys, for an integration that only adds features, such
+  as a webhook posting device positions. Tick "Add features only" when
+  creating a key on the dataset's Access tab, or send
+  `"scope": "dataset_append"` to `POST /datasets/{dataset_id}/api-keys`. The
+  key authenticates only `POST /datasets/{dataset_id}/features/` (with or
+  without the trailing slash) on its dataset, for one feature or a
+  FeatureCollection. Every other route,
+  including the dataset's feature reads, exports, dry runs, updates and
+  deletes, answers it as an invalid key, so a leaked key can't read the
+  dataset back or rewrite it. Otherwise it follows the dataset write key's
+  rules: it expires within 365 days, acts as the user who minted it and
+  writes while dataset editing is off. Its creates, and their repeats, answer
+  with each feature's `id`, a null `geometry`, empty `properties`, and null
+  `table_id` and `tile_cache_version`, since a stored row can hold defaults
+  and values the key didn't send. An `Idempotency-Key` sent with an
+  append-only key only matches creates made with that same key, and a repeat
+  through it applies nothing. A repeat whose feature was deleted or whose
+  dataset's data was replaced gets 409 `feature_gone` without a tile version,
+  and doesn't roll the tile cache. The create
+  request gains an optional `scope` (`dataset_write`, the default, or
+  `dataset_append`), `scope` in key listings can read `dataset_append`, and
+  the key lists mark these keys "Add only" or "One dataset, add only".
+  Migration 0086 widens the scope checks; its downgrade refuses while an
+  active append-only key exists.
 
 ### Fixed
 

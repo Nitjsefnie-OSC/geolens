@@ -1,4 +1,4 @@
-"""One-dataset write keys: what a ``dataset_write`` key may reach, and how it is refused.
+"""One-dataset keys: what a ``dataset_write`` or ``dataset_append`` key may reach.
 
 The key is bound to one dataset and authenticates only that dataset's feature
 routes. Everywhere else it must look exactly like an invalid key, so a
@@ -17,7 +17,10 @@ from httpx import AsyncClient
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.modules.auth.dependencies import _DATASET_KEY_ROUTES
+from app.platform.request_credential import (
+    DATASET_APPEND_KEY_ROUTES,
+    DATASET_WRITE_KEY_ROUTES,
+)
 from app.modules.catalog.datasets.domain.models import Dataset, Record
 from tests.factories import create_user, get_user_id
 
@@ -1005,8 +1008,8 @@ def _mounted_route_pairs() -> set[tuple[str, str]]:
 
 def test_every_allowed_route_is_mounted_and_names_its_dataset():
     mounted = _mounted_route_pairs()
-    assert _DATASET_KEY_ROUTES <= mounted, _DATASET_KEY_ROUTES - mounted
-    for _, template in _DATASET_KEY_ROUTES:
+    assert DATASET_WRITE_KEY_ROUTES <= mounted, DATASET_WRITE_KEY_ROUTES - mounted
+    for _, template in DATASET_WRITE_KEY_ROUTES:
         assert "{dataset_id}" in template
 
 
@@ -1028,4 +1031,481 @@ def test_every_feature_route_is_classified():
             ("/datasets/{dataset_id}/features", "/collections/{dataset_id}/items")
         )
     }
-    assert feature_routes - refused_on_purpose == set(_DATASET_KEY_ROUTES)
+    assert feature_routes - refused_on_purpose == set(DATASET_WRITE_KEY_ROUTES)
+
+
+def test_every_append_key_route_is_mounted():
+    assert DATASET_APPEND_KEY_ROUTES <= _mounted_route_pairs()
+
+
+async def test_an_append_key_creates_features_in_its_dataset(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound = datasets[0]
+    data = await _mint(client, headers, bound.id, scope="dataset_append")
+    assert (data["scope"], data["dataset_id"]) == ("dataset_append", str(bound.id))
+    key = {"X-Api-Key": data["key"]}
+    base = f"/datasets/{bound.id}/features"
+
+    for create_url in (f"{base}/", base):
+        created = await client.post(
+            create_url,
+            json={"geometry": POINT, "properties": {"name": "made"}},
+            headers=key,
+        )
+        assert created.status_code == 201, created.text
+    resp = await client.post(f"{base}/", json=_collection("a", "b"), headers=key)
+    assert resp.status_code == 201, resp.text
+    assert len(resp.json()["features"]) == 2
+
+    # A retried create answers with the feature the first attempt made.
+    retry = {**key, "Idempotency-Key": "device-1:t1"}
+    body = {"geometry": POINT, "properties": {"name": "retried"}}
+    first = await client.post(f"{base}/", json=body, headers=retry)
+    again = await client.post(f"{base}/", json=body, headers=retry)
+    assert (first.status_code, again.status_code) == (201, 201), again.text
+    assert again.json()["id"] == first.json()["id"]
+
+    listed = (
+        await client.get(f"/datasets/{bound.id}/api-keys", headers=headers)
+    ).json()
+    assert [(k["id"], k["scope"]) for k in listed["items"]] == [
+        (data["id"], "dataset_append")
+    ]
+
+
+async def test_an_append_key_is_refused_on_every_other_route(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound, other = datasets
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    # A feature to aim the reads and writes at, made by the owner.
+    made = await client.post(
+        f"/datasets/{bound.id}/features/",
+        json={"geometry": POINT, "properties": {"name": "existing"}},
+        headers=headers,
+    )
+    assert made.status_code == 201, made.text
+    gid = made.json()["id"]
+    write = {"json": {"geometry": POINT_2, "properties": {"name": "changed"}}}
+    base = f"/datasets/{bound.id}/features"
+
+    for method, url, kwargs in (
+        ("GET", f"{base}/", {}),
+        ("GET", base, {}),
+        ("GET", f"{base}/{gid}", {}),
+        ("GET", f"/datasets/{bound.id}/features.geojson", {}),
+        ("GET", f"/collections/{bound.id}/items", {}),
+        ("GET", f"/collections/{bound.id}/items/", {}),
+        ("GET", f"/collections/{bound.id}/items/{gid}", {}),
+        ("GET", f"/datasets/{bound.id}/export?format=geojson", {}),
+        ("GET", f"/datasets/{bound.id}/rows/", {}),
+        ("PUT", f"{base}/{gid}", write),
+        ("PATCH", f"{base}/{gid}", {"json": {"properties": {"name": "x"}}}),
+        ("DELETE", f"{base}/{gid}", {}),
+        ("POST", f"{base}/dry-run/", write),
+        ("POST", f"{base}/dry-run", write),
+        (
+            "POST",
+            f"/layers/{bound.id}/columns/",
+            {"json": {"name": "added", "type": "text"}},
+        ),
+        ("DELETE", f"/layers/{bound.id}/columns/name", {}),
+        ("GET", f"/datasets/{bound.id}", {}),
+        ("PATCH", f"/datasets/{bound.id}", {"json": {"title": "Renamed"}}),
+        ("DELETE", f"/datasets/{bound.id}", {}),
+        ("GET", f"/datasets/{bound.id}/api-keys", {}),
+        ("POST", f"/datasets/{other.id}/features/", write),
+        ("POST", f"/datasets/{other.id}/features", write),
+        ("POST", f"/datasets/{other.id}/features/", {"json": _collection("x")}),
+        ("GET", f"/collections/{other.id}/items", {}),
+        ("GET", "/auth/me/", {}),
+        ("GET", "/auth/api-keys/", {}),
+        ("POST", "/maps/", {"json": {"name": "Made by an append key"}}),
+        ("GET", "/admin/users/", {}),
+    ):
+        await _assert_refused_like_an_invalid_key(
+            client, method, url, raw_key, **kwargs
+        )
+
+    resp = await client.get(f"{base}/{gid}", headers=headers)
+    assert resp.json()["properties"]["name"] == "existing"
+
+
+async def test_an_append_key_never_reaches_a_feature_its_user_made_elsewhere(
+    client: AsyncClient, owner, datasets
+):
+    """A retry through the key can't answer with, or rewrite, the user's own create."""
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/features/"
+    made = await client.post(
+        url,
+        json={"geometry": POINT, "properties": {"name": "owner's"}},
+        headers={**headers, "Idempotency-Key": "shared"},
+    )
+    assert made.status_code == 201, made.text
+
+    resp = await client.post(
+        url,
+        json={"geometry": POINT_2, "properties": {"name": "via key"}},
+        headers={
+            "X-Api-Key": raw_key,
+            "Idempotency-Key": "shared",
+            "Idempotency-Attempt": "2",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["id"] != made.json()["id"]
+    made_by_key = await client.get(f"{url}{resp.json()['id']}", headers=headers)
+    assert made_by_key.json()["properties"]["name"] == "via key"
+    kept = await client.get(f"{url}{made.json()['id']}", headers=headers)
+    assert kept.json()["properties"]["name"] == "owner's"
+
+
+async def test_an_append_key_writes_while_site_wide_editing_is_off(
+    client: AsyncClient, owner, datasets, monkeypatch
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    await _editing_off(monkeypatch)
+    resp = await client.post(
+        f"/datasets/{bound.id}/features/",
+        json={"geometry": POINT, "properties": {"name": "webhook"}},
+        headers={"X-Api-Key": raw_key},
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_an_append_key_stops_when_its_user_loses_edit_rights(
+    client: AsyncClient, owner, datasets, test_db_session
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    admin_id = await get_user_id(test_db_session, "admin")
+    await test_db_session.execute(
+        text(
+            "UPDATE catalog.records SET created_by = :admin, visibility = 'public' "
+            "WHERE id = :id"
+        ),
+        {"admin": admin_id, "id": bound.record_id},
+    )
+    await test_db_session.commit()
+    resp = await client.post(
+        f"/datasets/{bound.id}/features/",
+        json={"geometry": POINT, "properties": {}},
+        headers={"X-Api-Key": raw_key},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_the_mint_request_takes_only_a_dataset_scope(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound = datasets[0]
+    for scope in ("full", "read_only", "dataset_other"):
+        resp = await client.post(
+            f"/datasets/{bound.id}/api-keys",
+            json={"name": "Wide", "expires_at": _in_days(30), "scope": scope},
+            headers=headers,
+        )
+        assert resp.status_code == 422, (scope, resp.text)
+    resp = await client.post(
+        "/auth/api-keys/",
+        json={"name": "Sneaky", "scope": "dataset_append"},
+        headers=headers,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_an_append_key_retry_never_applies_a_newer_body(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/features/"
+    first = await client.post(
+        url,
+        json={"geometry": POINT, "properties": {"name": "first"}},
+        headers={"X-Api-Key": raw_key, "Idempotency-Key": "device-1:t1"},
+    )
+    assert first.status_code == 201, first.text
+
+    retry = await client.post(
+        url,
+        json={"geometry": POINT_2, "properties": {"name": "second"}},
+        headers={
+            "X-Api-Key": raw_key,
+            "Idempotency-Key": "device-1:t1",
+            "Idempotency-Attempt": "2",
+        },
+    )
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["id"] == first.json()["id"]
+    assert (retry.json()["geometry"], retry.json()["properties"]) == (None, {})
+    stored = await client.get(f"{url}{first.json()['id']}", headers=headers)
+    assert stored.json()["properties"]["name"] == "first"
+    assert stored.json()["geometry"]["coordinates"] == POINT["coordinates"]
+
+
+async def test_an_append_key_retry_shows_nothing_written_since(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/features/"
+    sent = {"X-Api-Key": raw_key, "Idempotency-Key": "device-1:t1"}
+    first = await client.post(
+        url, json={"geometry": POINT, "properties": {"name": "sent"}}, headers=sent
+    )
+    assert first.status_code == 201, first.text
+    gid = first.json()["id"]
+    edited = await client.patch(
+        f"{url}{gid}", json={"properties": {"name": "owner edit"}}, headers=headers
+    )
+    assert edited.status_code == 200, edited.text
+
+    for attempt in ("1", "2"):
+        resp = await client.post(
+            url,
+            json={"geometry": POINT, "properties": {"name": "sent"}},
+            headers={**sent, "Idempotency-Attempt": attempt},
+        )
+        assert resp.status_code == 201, (attempt, resp.text)
+        assert resp.json()["id"] == gid
+        assert "owner edit" not in resp.text
+        assert (resp.json()["geometry"], resp.json()["properties"]) == (None, {})
+        assert resp.json()["tile_cache_version"] is None
+        assert "x-geolens-tile-cache-version" not in resp.headers
+
+
+async def test_two_append_keys_never_share_an_idempotency_key(
+    client: AsyncClient, owner, datasets
+):
+    headers, _ = owner
+    bound = datasets[0]
+    url = f"/datasets/{bound.id}/features/"
+    ids = []
+    for _ in range(2):
+        raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))[
+            "key"
+        ]
+        resp = await client.post(
+            url,
+            json={"geometry": POINT, "properties": {"name": "tracker"}},
+            headers={"X-Api-Key": raw_key, "Idempotency-Key": "device-1:t1"},
+        )
+        assert resp.status_code == 201, resp.text
+        ids.append(resp.json()["id"])
+    assert ids[0] != ids[1]
+
+
+async def test_no_sent_key_matches_an_append_keys_stored_key(
+    client: AsyncClient, owner, datasets
+):
+    import hashlib
+
+    headers, _ = owner
+    bound = datasets[0]
+    data = await _mint(client, headers, bound.id, scope="dataset_append")
+    url = f"/datasets/{bound.id}/features/"
+    body = {"geometry": POINT, "properties": {"name": "x"}}
+    by_key = await client.post(
+        url, json=body, headers={"X-Api-Key": data["key"], "Idempotency-Key": "k1"}
+    )
+    assert by_key.status_code == 201, by_key.text
+
+    digest = hashlib.sha256(b"k1").hexdigest()
+    lookalike = f"api-key:{data['id']}:{digest}"
+    by_session = await client.post(
+        url, json=body, headers={**headers, "Idempotency-Key": lookalike}
+    )
+    assert by_session.status_code == 201, by_session.text
+    assert by_session.json()["id"] != by_key.json()["id"]
+    # The stored form itself has a space, which no sent key may contain.
+    resp = await client.post(
+        url,
+        json=body,
+        headers={**headers, "Idempotency-Key": f"api-key {data['id']}:{digest}"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def _add_defaulted_column(test_db_session, dataset) -> None:
+    await test_db_session.execute(
+        text(
+            f"ALTER TABLE data.{dataset.table_name} "
+            "ADD COLUMN note TEXT DEFAULT 'server default'"
+        )
+    )
+    await test_db_session.commit()
+
+
+async def test_an_append_key_create_answers_with_the_id_alone(
+    client: AsyncClient, owner, datasets, test_db_session
+):
+    headers, _ = owner
+    bound = datasets[0]
+    await _add_defaulted_column(test_db_session, bound)
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/features/"
+    body = {"geometry": POINT, "properties": {"name": "sent"}}
+
+    # A session create shows what the stored row holds beyond the body.
+    by_session = await client.post(url, json=body, headers=headers)
+    assert "server default" in by_session.text
+
+    for create_url in (url, url.rstrip("/")):
+        resp = await client.post(create_url, json=body, headers={"X-Api-Key": raw_key})
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == _id_alone(resp.json()["id"])
+        stored = await client.get(f"{url}{resp.json()['id']}", headers=headers)
+        assert stored.json()["properties"]["name"] == "sent"
+
+
+async def test_an_append_key_collection_create_answers_with_ids_alone(
+    client: AsyncClient, owner, datasets, test_db_session
+):
+    headers, _ = owner
+    bound = datasets[0]
+    await _add_defaulted_column(test_db_session, bound)
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    resp = await client.post(
+        f"/datasets/{bound.id}/features/",
+        json=_collection("a", "b"),
+        headers={"X-Api-Key": raw_key},
+    )
+    assert resp.status_code == 201, resp.text
+    collection = resp.json()
+    assert (collection["table_id"], collection["tile_cache_version"]) == (None, None)
+    assert "server default" not in resp.text
+    assert len(collection["features"]) == 2
+    for feature in collection["features"]:
+        assert isinstance(feature["id"], int)
+        assert feature == _id_alone(feature["id"])
+
+
+def _id_alone(gid: int) -> dict:
+    """Everything an append-only key may learn from a successful create."""
+    return {
+        "type": "Feature",
+        "id": gid,
+        "geometry": None,
+        "properties": {},
+        "table_id": None,
+        "tile_cache_version": None,
+    }
+
+
+async def _tile_version(test_db_session, dataset) -> int | None:
+    await test_db_session.commit()
+    return (
+        await test_db_session.execute(
+            text("SELECT tile_cache_version FROM catalog.datasets WHERE id = :id"),
+            {"id": dataset.id},
+        )
+    ).scalar_one()
+
+
+@pytest.mark.parametrize("alias", ["features/", "features"])
+async def test_append_key_retries_answer_alike_whatever_happens_between(
+    client: AsyncClient, owner, datasets, alias
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/{alias}"
+    body = {"geometry": POINT, "properties": {"name": "sent"}}
+    sent = {"X-Api-Key": raw_key, "Idempotency-Key": "device-1:t1"}
+    first = await client.post(url, json=body, headers=sent)
+    assert first.status_code == 201, first.text
+    gid = first.json()["id"]
+    assert first.json() == _id_alone(gid)
+
+    for attempt in (None, "1", "3", "2"):
+        # Another writer moves the tile version and adds a row in between.
+        other = await client.post(
+            f"/datasets/{bound.id}/features/",
+            json={"geometry": POINT_2, "properties": {"name": "unrelated"}},
+            headers=headers,
+        )
+        assert other.status_code == 201, other.text
+        retry_headers = (
+            sent if attempt is None else {**sent, "Idempotency-Attempt": attempt}
+        )
+        resp = await client.post(
+            url,
+            json={"geometry": POINT_2, "properties": {"name": f"attempt {attempt}"}},
+            headers=retry_headers,
+        )
+        assert resp.status_code == 201, (attempt, resp.text)
+        assert resp.json() == _id_alone(gid), attempt
+    stored = await client.get(f"/datasets/{bound.id}/features/{gid}", headers=headers)
+    assert stored.json()["properties"]["name"] == "sent"
+
+
+async def test_append_key_retries_of_gone_features_show_and_move_nothing(
+    client: AsyncClient, owner, datasets, test_db_session
+):
+    headers, _ = owner
+    bound = datasets[0]
+    raw_key = (await _mint(client, headers, bound.id, scope="dataset_append"))["key"]
+    url = f"/datasets/{bound.id}/features/"
+    body = {"geometry": POINT, "properties": {"name": "sent"}}
+    made = {}
+    for key in ("deleted", "replaced"):
+        resp = await client.post(
+            url, json=body, headers={"X-Api-Key": raw_key, "Idempotency-Key": key}
+        )
+        assert resp.status_code == 201, resp.text
+        made[key] = resp.json()["id"]
+
+    deleted = await client.delete(f"{url}{made['deleted']}", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    deleted_answer = await client.post(
+        url, json=body, headers={"X-Api-Key": raw_key, "Idempotency-Key": "deleted"}
+    )
+
+    # Replace the table, as an overwrite outside GeoLens would.
+    table = bound.table_name
+    await test_db_session.execute(text(f'DROP TABLE "data"."{table}"'))
+    await test_db_session.execute(
+        text(
+            f'CREATE TABLE "data"."{table}" (gid SERIAL PRIMARY KEY, '
+            "geom geometry(Point, 4326), geom_4326 geometry(Geometry, 4326), "
+            "name TEXT)"
+        )
+    )
+    await test_db_session.execute(
+        text(f'GRANT SELECT ON "data"."{table}" TO geolens_reader')
+    )
+    await test_db_session.commit()
+    before = await _tile_version(test_db_session, bound)
+
+    answers = [deleted_answer]
+    for key in ("deleted", "replaced", "replaced", "replaced"):
+        answers.append(
+            await client.post(
+                url,
+                json=body,
+                headers={
+                    "X-Api-Key": raw_key,
+                    "Idempotency-Key": key,
+                    "Idempotency-Attempt": "2",
+                },
+            )
+        )
+    for resp in answers:
+        assert resp.status_code == 409, resp.text
+        assert set(resp.json()["detail"]) == {"code", "message"}, resp.text
+        assert resp.json()["detail"]["code"] == "feature_gone"
+    assert len({resp.text for resp in answers}) == 1
+    assert await _tile_version(test_db_session, bound) == before

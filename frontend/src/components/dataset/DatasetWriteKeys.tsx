@@ -20,8 +20,10 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { FieldLabel } from '@/components/ui/field-label';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -58,6 +60,7 @@ export function DatasetWriteKeys({
 }) {
   const { t } = useTranslation('dataset');
   const expiryLabelId = useId();
+  const appendOnlyId = useId();
   const currentUserId = useAuthStore((s) => s.user?.id);
   const { data: keys, isLoading, isError } = useDatasetApiKeys(datasetId);
   const createKey = useCreateDatasetApiKey(datasetId);
@@ -66,6 +69,7 @@ export function DatasetWriteKeys({
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
   const [expiry, setExpiry] = useState<ExpiryDays>('90');
+  const [appendOnly, setAppendOnly] = useState(false);
   const [revealKey, setRevealKey] = useState<ApiKeyCreateResponse | null>(null);
   const [revokingKey, setRevokingKey] = useState<DatasetApiKeyResponse | null>(null);
   const now = useExpiryClock(keys?.map((key) => key.expires_at) ?? []);
@@ -74,6 +78,7 @@ export function DatasetWriteKeys({
     setShowForm(false);
     setName('');
     setExpiry('90');
+    setAppendOnly(false);
   }
 
   async function handleCreate(e: React.FormEvent) {
@@ -83,6 +88,7 @@ export function DatasetWriteKeys({
       const result = await createKey.mutateAsync({
         name: name.trim(),
         expires_at: expiryFromNow(expiry),
+        scope: appendOnly ? 'dataset_append' : 'dataset_write',
       });
       resetForm();
       setRevealKey(result);
@@ -152,6 +158,22 @@ export function DatasetWriteKeys({
                 </SelectContent>
               </Select>
             </div>
+            <div className="flex basis-full items-start gap-2">
+              <Checkbox
+                id={appendOnlyId}
+                checked={appendOnly}
+                onCheckedChange={(v) => setAppendOnly(v === true)}
+                disabled={createKey.isPending}
+                aria-describedby={`${appendOnlyId}-hint`}
+                className="mt-0.5"
+              />
+              <div className="space-y-0.5">
+                <Label htmlFor={appendOnlyId} className="text-sm">{t('writeKeys.appendOnly')}</Label>
+                <p id={`${appendOnlyId}-hint`} className="text-xs text-muted-foreground">
+                  {t('writeKeys.appendOnlyHint')}
+                </p>
+              </div>
+            </div>
             <Button type="submit" size="sm" disabled={createKey.isPending || !name.trim()}>
               {createKey.isPending && <Loader2 className="size-4 animate-spin" />}
               {createKey.isPending ? t('admin:apiKeys.creating') : t('common:create')}
@@ -184,6 +206,11 @@ export function DatasetWriteKeys({
                       <span className="min-w-0 max-w-full truncate font-medium">{key.name}</span>
                       {key.fingerprint && (
                         <code className="text-xs text-muted-foreground">{key.fingerprint}</code>
+                      )}
+                      {key.scope === 'dataset_append' && (
+                        <Badge variant="secondary" className="px-1.5">
+                          {t('writeKeys.kindAppend')}
+                        </Badge>
                       )}
                       {expired ? (
                         <Badge className={`px-1.5 ${semanticBadgeColors.destructive}`}>

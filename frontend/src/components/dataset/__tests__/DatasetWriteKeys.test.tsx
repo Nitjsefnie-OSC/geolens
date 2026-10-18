@@ -108,6 +108,13 @@ describe('DatasetWriteKeys', () => {
     ).toBeInTheDocument();
   });
 
+  it('describes both kinds of key', async () => {
+    mockList.mockResolvedValue([]);
+    render(<DatasetWriteKeys datasetId="ds-1" canCreate />);
+    expect(await screen.findByText(/An add-only key can only add features\./)).toBeInTheDocument();
+    expect(screen.getByText(/A write key reads and writes this dataset's features/)).toBeInTheDocument();
+  });
+
   it('says so when the dataset has no keys', async () => {
     mockList.mockResolvedValue([]);
     render(<DatasetWriteKeys datasetId="ds-1" canCreate />);
@@ -133,11 +140,47 @@ describe('DatasetWriteKeys', () => {
     const [datasetId, body] = mockCreate.mock.calls[0];
     expect(datasetId).toBe('ds-1');
     expect(body.name).toBe('Survey webhook');
+    expect(body.scope).toBe('dataset_write');
     // The default is 90 days, and never past the server's 365-day cap.
     const expiresIn = new Date(body.expires_at).getTime() - before;
     expect(expiresIn).toBeGreaterThan(89 * DAY_MS);
     expect(expiresIn).toBeLessThanOrEqual(90 * DAY_MS);
     expect(await screen.findByText('raw-secret-value')).toBeInTheDocument();
+  });
+
+  it('mints an append-only key when that option is checked', async () => {
+    mockList.mockResolvedValue([]);
+    const created: ApiKeyCreateResponse = {
+      ...makeKey({ scope: 'dataset_append' }),
+      key: 'raw-secret-value',
+      fingerprint: 'raw-secr…alue',
+    };
+    mockCreate.mockResolvedValue(created);
+    render(<DatasetWriteKeys datasetId="ds-1" canCreate />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create write key' }));
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Tracker' } });
+    const appendOnly = screen.getByRole('checkbox', { name: 'Add features only' });
+    expect(appendOnly).toHaveAccessibleDescription("The key can't read, change or delete features.");
+    expect(appendOnly).not.toBeChecked();
+    fireEvent.click(appendOnly);
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate.mock.calls[0][1]).toMatchObject({ name: 'Tracker', scope: 'dataset_append' });
+  });
+
+  it('shows what each key may do', async () => {
+    mockList.mockResolvedValue([
+      makeKey(),
+      makeKey({ id: 'key-2', name: 'Tracker', scope: 'dataset_append' }),
+    ]);
+    render(<DatasetWriteKeys datasetId="ds-1" canCreate />);
+
+    const tracker = (await screen.findByText('Tracker')).closest('li') as HTMLElement;
+    expect(within(tracker).getByText('Add only')).toBeInTheDocument();
+    const webhook = screen.getByText('Survey webhook').closest('li') as HTMLElement;
+    expect(within(webhook).queryByText('Add only')).not.toBeInTheDocument();
   });
 
   it('revokes a key after confirmation', async () => {
