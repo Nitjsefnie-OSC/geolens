@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.pg_ranges import check_int8_range, check_pg_value_range
 from app.core.geo import seam_extent_wkt_for_table
+from app.modules.catalog.features.idempotency import (  # noqa: F401 - façade for other domains
+    current_table_oid,
+)
 from app.platform.extensions import get_catalog_port
 
 if TYPE_CHECKING:
@@ -1243,6 +1246,41 @@ async def delete_feature(
     if row is None:
         raise ValueError("Feature not found")
     return _prior_bounds_from_row(row)
+
+
+class MissingFeaturesError(Exception):
+    """A batch delete named features that do not exist."""
+
+    def __init__(self, gids: list[int]) -> None:
+        super().__init__(f"Features not found: {', '.join(map(str, gids))}")
+        self.gids = gids
+
+
+async def delete_features(
+    db: AsyncSession, table_name: str, gids: Sequence[int]
+) -> tuple[list[int], list[Bounds | None]]:
+    """Hard-delete features by gid, returning the gids and envelopes removed.
+
+    A gid sent twice is deleted once. Raises ``MissingFeaturesError`` naming
+    every gid that does not exist; the rows that did are already deleted in
+    the transaction, so the caller must roll it back.
+    """
+    wanted = list(dict.fromkeys(gids))
+    # A gid outside bigint can match no row, and binding it would fail. The
+    # bigint array lets an int4 gid column report a larger gid as missing.
+    bindable = [gid for gid in wanted if -(2**63) <= gid < 2**63]
+    result = await db.execute(
+        text(
+            f"DELETE FROM {get_catalog_port().quote_table(table_name)} "
+            f"WHERE gid = ANY(CAST(:gids AS bigint[])) "
+            f"RETURNING gid, {_PRIOR_BOUNDS_COLS}"
+        ).bindparams(gids=bindable)
+    )
+    removed = {row.gid: _prior_bounds_from_row(row) for row in result}
+    missing = [gid for gid in wanted if gid not in removed]
+    if missing:
+        raise MissingFeaturesError(missing)
+    return wanted, [removed[gid] for gid in wanted]
 
 
 async def _refresh_count_and_extent(
