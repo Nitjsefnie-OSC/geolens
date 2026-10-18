@@ -1,5 +1,6 @@
-"""Detector for unscoped finding markers and provenance prefixes in ``backend/app``
-comments and docstrings.
+"""Detector for unscoped finding markers and provenance prefixes in
+``backend/app`` comments and docstrings, ``backend/openapi.json`` descriptions
+and the comments of the rest of the tracked tree outside tests.
 
 Stdlib only and importable without ``app.core.config``, so the pre-commit
 hook runs ``main()`` directly. AGENTS.md > Contracts and Comments.
@@ -11,20 +12,22 @@ import ast
 import io
 import json
 import re
+import subprocess
 import sys
 import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
+REPO_ROOT = APP_ROOT.parents[1]
 
 # A coded finding id (`SEC-002`, `T-1214-17`, `PERF-N5`, `IA-P0-01`). The
 # numeric tail excludes `AUTO-GENERATED` and a `^[A-Z]+$` regex; the uppercase
 # segments exclude GHSA ids and `X-Esri-Authorization`.
 MARKER_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[A-Z]?[0-9]+[A-Z0-9]*\b")
 
-# An agent or tool name used as a comment tag. No general shape covers this
-# half, so it is a denylist and says so.
+# An agent or tool name used as a comment tag. No general shape covers it, so
+# it is a denylist. Like a provenance prefix, an anchor never scopes it.
 AGENT_TAG_RE = re.compile(r"(?i)\b(ponytail)\s*:")
 
 # Internal-cadence and planning-note references, which MARKER_RE's hyphenated
@@ -43,13 +46,21 @@ PLANNING_NOTE_RE = re.compile(
     r"|\b[\w-]*(?:PLAN|RESEARCH)\.md\b|\b[A-Z0-9][\w-]*-FOLLOWUP\b"
 )
 
-# A commit-style provenance prefix (`fix(#1234):`, `feat(#88 review)`). It
-# carries its own issue number, so the anchor rule below never applies.
-PROVENANCE_RE = re.compile(r"\b(?:fix|feat|refactor|perf|chore|test)\(#\d+[^)\n]*\)")
+# A commit-style provenance prefix of any type (`fix(#1234):`, `sec(#88
+# review)`, `fix(site#86)`, `fix(review #1800 round 3)`), a code reviewer's
+# name, or a review round. Each carries its own history, so the anchor rule
+# below never applies. `Claude` is a product name here, so it is not listed.
+PROVENANCE_RE = re.compile(
+    r"\b[a-z][a-z0-9-]*\([^()\n]*#\d+[^()\n]*\)"
+    r"|\b(?:codex|coderabbit|copilot|chatgpt)\b|\bround\s*\d+\b|\breview\s+r\d+\b",
+    re.IGNORECASE,
+)
 
-# What makes a marker scoped: an issue or PR number a reader can look up.
+# What makes a marker scoped: an issue, PR or advisory id a reader can look up.
 # Two digits minimum, so `Pitfall #5` and a `#1f2937` colour do not count.
-ANCHOR_RE = re.compile(r"#\d{2,6}\b|\bGH-\d{2,6}\b|\bCVE-\d{4}-\d{4,7}\b")
+ANCHOR_RE = re.compile(
+    r"#\d{2,6}\b|\bGH-\d{2,6}\b|\bCVE-\d{4}-\d{4,7}\b|\bPYSEC-\d{4}-\d+\b"
+)
 
 # Tokens carrying the marker SHAPE that name a published standard, so they
 # resolve for any reader. A literal list, not a prefix family: `ISO-8601` is
@@ -91,6 +102,17 @@ TECHNICAL_VOCABULARY = frozenset(
         # A committed, publicly readable design record (.github/ADR-002.md),
         # as resolvable as a CVE id or a GH-NNNN issue.
         "ADR-002",
+        # SPDX licence ids as MARKER_RE cuts them ("BSD-3-Clause" -> "BSD-3").
+        "BSD-2",
+        "BSD-3",
+        "CC0-1",
+        "MPL-2",
+        "OFL-1",
+        "PSF-2",
+        # Copernicus DEM product, a device pixel ratio, a Trivy check id.
+        "GLO-30",
+        "DPR-2",
+        "DS-0002",
     }
 )
 
@@ -184,27 +206,37 @@ def markers_in(
 ) -> tuple[str, ...]:
     """Finding markers in one unit, vocabulary removed, sorted and deduped."""
     found = {t for t in MARKER_RE.findall(text) if t not in vocabulary}
-    found.update(m.group(1) for m in AGENT_TAG_RE.finditer(text))
     found.update(CADENCE_RE.findall(text))
     found.update(PLANNING_NOTE_RE.findall(text))
     return tuple(sorted(found))
 
 
+def _line_hits(
+    lines: list[str], markers=markers_in
+) -> list[tuple[int, tuple[str, ...]]]:
+    """``(offset, found)`` for each line with an unanchored marker, an agent tag
+    or a provenance prefix."""
+    anchored = [ANCHOR_RE.search(line) is not None for line in lines]
+    out = []
+    for offset, line in enumerate(lines):
+        found = markers(line)
+        low = max(0, offset - ANCHOR_WINDOW)
+        if found and any(anchored[low : offset + ANCHOR_WINDOW + 1]):
+            found = ()
+        found += tuple(m.group(1) for m in AGENT_TAG_RE.finditer(line))
+        found += tuple(PROVENANCE_RE.findall(line))
+        if found:
+            out.append((offset, found))
+    return out
+
+
 def scan_module(module: str, source: str) -> list[Hit]:
     """Unanchored marker-bearing lines in one module's documentation."""
-    hits = []
-    for unit in iter_units(source, module):
-        lines = unit.text.splitlines()
-        anchored = [ANCHOR_RE.search(line) is not None for line in lines]
-        for offset, line in enumerate(lines):
-            markers = markers_in(line)
-            low = max(0, offset - ANCHOR_WINDOW)
-            if markers and any(anchored[low : offset + ANCHOR_WINDOW + 1]):
-                markers = ()
-            found = markers + tuple(PROVENANCE_RE.findall(line))
-            if found:
-                hits.append(Hit(module, unit.lineno + offset, unit.kind, found))
-    return hits
+    return [
+        Hit(module, unit.lineno + offset, unit.kind, found)
+        for unit in iter_units(source, module)
+        for offset, found in _line_hits(unit.text.splitlines())
+    ]
 
 
 def scan_tree(app_root: Path = APP_ROOT) -> tuple[list[Hit], int, int]:
@@ -247,17 +279,20 @@ def check(app_root: Path = APP_ROOT) -> list[str]:
             " — the scan is not seeing the documentation"
         )
 
-    if hits:
-        problems.append(
-            f"{len(hits)} documentation lines carry unanchored finding markers "
-            "or fix(#N)-style provenance prefixes. Remove unnecessary tags and "
-            "keep the explanation; provenance belongs in Git and the PR. Anchor "
-            "only an essential marker reference, or — if it names a published "
-            "standard — add it to TECHNICAL_VOCABULARY:"
-        )
-        problems.extend(f"    {hit.describe()}" for hit in hits)
+    return problems + _hit_report(hits)
 
-    return problems
+
+def _hit_report(hits: list[Hit]) -> list[str]:
+    if not hits:
+        return []
+    return [
+        f"{len(hits)} documentation lines carry unanchored finding markers, "
+        "agent tags or fix(#N)-style provenance prefixes. Remove unnecessary "
+        "tags and keep the explanation; provenance belongs in Git and the PR. "
+        "Anchor only an essential marker reference, or — if it names a "
+        "published standard — add it to TECHNICAL_VOCABULARY:",
+        *(f"    {hit.describe()}" for hit in hits),
+    ]
 
 
 # Field/Query ``description=``/``summary=`` strings are literals, not
@@ -315,19 +350,11 @@ def _openapi_descriptions(node: object, path: str = "$") -> list[tuple[str, str,
 def scan_openapi(spec: object) -> list[Hit]:
     """Unanchored marker-bearing lines in every ``description``/``summary``
     in ``spec``."""
-    hits: list[Hit] = []
-    for json_path, key, text in _openapi_descriptions(spec):
-        lines = text.splitlines()
-        anchored = [ANCHOR_RE.search(line) is not None for line in lines]
-        for offset, line in enumerate(lines):
-            markers = _openapi_markers(line)
-            low = max(0, offset - ANCHOR_WINDOW)
-            if markers and any(anchored[low : offset + ANCHOR_WINDOW + 1]):
-                markers = ()
-            found = markers + tuple(PROVENANCE_RE.findall(line))
-            if found:
-                hits.append(Hit(json_path, offset + 1, f"openapi-{key}", found))
-    return hits
+    return [
+        Hit(json_path, offset + 1, f"openapi-{key}", found)
+        for json_path, key, text in _openapi_descriptions(spec)
+        for offset, found in _line_hits(text.splitlines(), _openapi_markers)
+    ]
 
 
 def check_openapi(openapi_path: Path = OPENAPI_PATH) -> list[str]:
@@ -360,13 +387,149 @@ def check_openapi(openapi_path: Path = OPENAPI_PATH) -> list[str]:
     return problems
 
 
+# The rest of the tracked tree: Python outside backend/app, configuration,
+# scripts, workflows and non-test frontend code. Tests may name what they
+# test, generated SDK code mirrors openapi.json, and Markdown is prose.
+_REPO_SKIP_RE = re.compile(
+    r"^backend/app/|(^|/)(tests?|__tests__|e2e)/|\.(test|spec)\.[cm]?[jt]sx?$"
+    r"|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$|^sdks/python/geolens/(api|models)/"
+    r"|^sdks/typescript/src/client/|api\.generated\.ts$"
+)
+
+
+@dataclass(frozen=True)
+class _Syntax:
+    """How one file type writes comments: a line-comment start, a block
+    comment's open and close, and the quotes that hide either."""
+
+    line: re.Pattern[str] | None
+    block: tuple[str, str] | None
+    quotes: str
+
+
+# A `#` starts a comment only at the start of a line or after whitespace.
+_C_STYLE = _Syntax(re.compile(r"//"), ("/*", "*/"), "'\"`")
+_COMMENT_SYNTAX: tuple[tuple[re.Pattern[str], _Syntax], ...] = (
+    (
+        re.compile(
+            r"\.(sh|ya?ml|toml|conf|ini|mako)$"
+            r"|(^|/)(Dockerfile[^/]*|Makefile|CODEOWNERS|\.env[^/]*\.example"
+            r"|\.(git|docker)ignore)$"
+        ),
+        _Syntax(re.compile(r"(?<!\S)#"), None, "'\""),
+    ),
+    (re.compile(r"\.([cm]?[jt]sx?|ql|jsonc)$"), _C_STYLE),
+    (re.compile(r"\.css$"), _Syntax(None, ("/*", "*/"), "'\"")),
+    (re.compile(r"\.sql$"), _Syntax(re.compile(r"--"), ("/*", "*/"), "'")),
+    (re.compile(r"\.(html|svg)$"), _Syntax(None, ("<!--", "-->"), "")),
+)
+
+
+def comment_lines(text: str, syntax: _Syntax) -> list[str]:
+    """Each line's comment text, "" where it has none. A block comment carries
+    across lines; a quoted string hides comment syntax within its line."""
+    out = []
+    close = None
+    for line in text.splitlines():
+        parts = []
+        quote = None
+        i = 0
+        while i < len(line):
+            if close:
+                j = line.find(close, i)
+                parts.append(line[i:] if j < 0 else line[i:j])
+                if j < 0:
+                    break
+                i, close = j + len(close), None
+                continue
+            char = line[i]
+            if quote:
+                if char == "\\":
+                    i += 1
+                elif char == quote:
+                    quote = None
+            elif char in syntax.quotes:
+                quote = char
+            elif syntax.block and line.startswith(syntax.block[0], i):
+                i += len(syntax.block[0])
+                close = syntax.block[1]
+                continue
+            elif syntax.line and (m := syntax.line.match(line, i)):
+                parts.append(line[m.end() :])
+                break
+            i += 1
+        out.append(" ".join(parts))
+    return out
+
+
+# `main` carries about 850 such files; a listing that silently comes back
+# short (a moved root, a narrowed pattern) must fail, not pass.
+MIN_REPO_FILES = 700
+
+
+def scan_comment_lines(path: str, text: str, syntax: _Syntax) -> list[Hit]:
+    """Unanchored marker-bearing comment lines in a file that is not Python."""
+    return [
+        Hit(path, offset + 1, "comment", found)
+        for offset, found in _line_hits(comment_lines(text, syntax))
+    ]
+
+
+def repo_files(root: Path = REPO_ROOT) -> list[tuple[str, _Syntax | None]]:
+    """Tracked files outside backend/app that the scan reads, each with its
+    comment syntax, or None for Python."""
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True
+        ).stdout.decode()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise MarkerScanError(f"{root}: could not list tracked files: {exc}") from exc
+    out = []
+    for rel in listing.split("\0"):
+        if not rel or _REPO_SKIP_RE.search(rel):
+            continue
+        syntax = next((syn for kind, syn in _COMMENT_SYNTAX if kind.search(rel)), None)
+        if syntax is not None or rel.endswith(".py"):
+            out.append((rel, syntax))
+    return out
+
+
+def scan_repo(root: Path = REPO_ROOT) -> tuple[list[Hit], int]:
+    """Scan tracked files outside backend/app. Returns (hits, files scanned)."""
+    hits: list[Hit] = []
+    files = 0
+    for rel, syntax in repo_files(root):
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise MarkerScanError(f"{rel}: could not read: {exc}") from exc
+        files += 1
+        if syntax is None:
+            hits.extend(scan_module(rel, text))
+        else:
+            hits.extend(scan_comment_lines(rel, text, syntax))
+    return hits, files
+
+
+def check_repo(root: Path = REPO_ROOT) -> list[str]:
+    """Every violation in tracked files outside backend/app, as printable lines."""
+    hits, files = scan_repo(root)
+    problems = []
+    if files < MIN_REPO_FILES:
+        problems.append(
+            f"scanned {files} tracked files outside backend/app, floor is"
+            f" {MIN_REPO_FILES} — the scan is not seeing the tree"
+        )
+    return problems + _hit_report(hits)
+
+
 def main() -> int:
     """Print every violation and return 1, or return 0 on a clean tree."""
-    problems = check() + check_openapi()
+    problems = check() + check_openapi() + check_repo()
     if not problems:
         return 0
     print(
-        "FAIL: unscoped finding markers in backend/app comments/docstrings or"
+        "FAIL: unscoped finding markers in comments/docstrings or"
         " backend/openapi.json descriptions"
     )
     for line in problems:
