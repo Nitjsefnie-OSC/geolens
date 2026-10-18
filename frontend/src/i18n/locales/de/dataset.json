@@ -100,6 +100,7 @@
     "connect": "Verbinden",
     "createVrt": "VRT erstellen",
     "downloadCog": "COG herunterladen",
+    "download": "Herunterladen",
     "addToMap": "zu einer Karte hinzuzufügen"
   },
   "header": {
@@ -185,9 +186,7 @@
     "fgb": "FlatGeobuf",
     "pmtiles": "PMTiles",
     "duckdbHint": "Mit DuckDB abfragen",
-    "button": "Exportieren",
-    "failed": "Export fehlgeschlagen",
-    "formatLabel": "Exportformat"
+    "failed": "Export fehlgeschlagen"
   },
   "attributes": {
     "noData": "Keine Daten verfügbar",
@@ -432,7 +431,8 @@
     "columnType": "Typ",
     "noColumns": "Noch keine Attributspalten.",
     "dropWarning": "Das Entfernen von „{{name}}\" löscht die Spalte und alle ihre Werte dauerhaft.",
-    "usedByMaps": "Von {{mapCount}} gespeicherten Karte(n) verwendet — Stile, Filter oder Beschriftungen, die diese Spalte referenzieren, funktionieren dann nicht mehr.",
+    "usedByMaps_one": "Von {{count}} gespeicherter Karte verwendet — Stile, Filter oder Beschriftungen, die diese Spalte referenzieren, funktionieren dann nicht mehr.",
+    "usedByMaps_other": "Von {{count}} gespeicherten Karten verwendet — Stile, Filter oder Beschriftungen, die diese Spalte referenzieren, funktionieren dann nicht mehr.",
     "addColumn": "Spalte hinzufügen",
     "add": "Hinzufügen",
     "columnNamePlaceholder": "column_name",
@@ -495,21 +495,19 @@
   "validation": {
     "title": "Validierungsstatus",
     "readyToPublish": "Bereit zur Veröffentlichung",
-    "issuesBlocking": "{{count}} Problem(e) blockieren die Veröffentlichung",
-    "issuesFound": "{{count}} Problem(e) gefunden",
-    "warnings": "{{count}} Warnung(en)",
+    "issuesBlocking_one": "{{count}} Problem blockiert die Veröffentlichung",
+    "issuesBlocking_other": "{{count}} Probleme blockieren die Veröffentlichung",
+    "issuesFound_one": "{{count}} Problem gefunden",
+    "issuesFound_other": "{{count}} Probleme gefunden",
+    "warnings_one": "{{count}} Warnung",
+    "warnings_other": "{{count}} Warnungen",
     "goToField": "Zum Feld gehen",
-    "helperBlocking": "{{errorCount}} blockierende(s) Problem(e) und {{warningCount}} Warnung(en) erfordern Aufmerksamkeit. Beheben Sie wahrscheinliche Ursachen und öffnen Sie dann Fehlerbehebung für geführte Schritte.",
-    "helperIssues": "{{errorCount}} Problem(e) und {{warningCount}} Warnung(en) erfordern Aufmerksamkeit. Beheben Sie wahrscheinliche Ursachen und öffnen Sie dann Fehlerbehebung für geführte Schritte.",
-    "helperWarnings": "{{warningCount}} Warnung(en) gefunden. Prüfen Sie wahrscheinliche Ursachen vor der Veröffentlichung.",
+    "helperBlocking": "Diese Probleme blockieren die Veröffentlichung. Beheben Sie sie und öffnen Sie dann Fehlerbehebung für geführte Schritte.",
+    "helperIssues": "Beheben Sie diese Probleme und öffnen Sie dann Fehlerbehebung für geführte Schritte.",
+    "helperWarnings": "Prüfen Sie diese Warnungen vor der Veröffentlichung.",
     "likelyCompact": "Wahrscheinlich:",
     "troubleshootAction": "Fehlerbehebung",
     "readOnlyGuidance": "Bitten Sie den Eigentümer des Datensatzes oder einen oben genannten Kontakt, diese Validierungsprobleme zu beheben.",
-    "health": {
-      "title": "Datensatz-Zustand",
-      "ready": "Auf Kurs",
-      "description": "{{requiredCount}} erforderliche(s) und {{recommendedCount}} empfohlene(s) Element(e) müssen noch überprüft werden."
-    },
     "actions": {
       "summary": "Zusammenfassung überprüfen",
       "contacts": "Kontakte überprüfen",
@@ -527,7 +525,8 @@
     "troubleshoot": {
       "trigger": "Fehlerbehebung",
       "title": "Validierungs-Fehlerbehebung",
-      "description": "Überprüfen Sie {{count}} Validierungsproblem(e) und folgen Sie den nächsten Schritten zur Behebung.",
+      "description_one": "Überprüfen Sie {{count}} Validierungsproblem und folgen Sie den nächsten Schritten zur Behebung.",
+      "description_other": "Überprüfen Sie {{count}} Validierungsprobleme und folgen Sie den nächsten Schritten zur Behebung.",
       "likelyNextSteps": "Wahrscheinliche nächste Schritte",
       "noIssues": "Keine aktiven Probleme erkannt. Führen Sie die Validierung erneut aus, wenn Sie Warnungen oder Fehler erwartet haben.",
       "blockingErrors": "Blockierende Fehler ({{count}})",
@@ -632,9 +631,7 @@
     "other": "Weitere Zugänge",
     "noDistributions": "Hier sind keine weiteren Downloads oder Dienste aufgeführt.",
     "connectWithClient": "Mit QGIS, Python oder curl verbinden",
-    "otherFormats": "In einem anderen Format herunterladen",
     "accessPermissions": "Wer auf diesen Datensatz zugreifen kann",
-    "auto": "auto",
     "primary": "Primär",
     "copyUrl": "URL kopieren",
     "downloadUrl": "Herunterladen",
@@ -669,6 +666,7 @@
     "themeCategory": "Themenkategorie",
     "sourceUrl": "Quell-URL",
     "sourceUrlPlaceholder": "https://...",
+    "editThemeCategories": "Kategorien bearbeiten",
     "themeCategoryUpdated": "Themenkategorie aktualisiert",
     "themeCategoryUpdateFailed": "Themenkategorie konnte nicht aktualisiert werden",
     "updateFrequencyOptions": {
@@ -954,7 +952,7 @@
         "sourceUsed": "Verwendete Quelle: {{source}}",
         "columnsRemoved": "Entfernte Spalten: {{columns}}",
         "typesChanged": "Geänderte Spaltentypen: {{columns}}",
-        "permalink": "Link",
+        "permalink": "Link zu dieser Ausführung",
         "reason": {
           "source_count_unavailable": "GeoLens konnte die abgerufenen Zeilen nicht mit der Quelle vergleichen; die Veröffentlichung muss geprüft werden.",
           "empty_result": "Die neuen Daten würden einen nicht leeren Datensatz durch einen leeren ersetzen.",

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@/test/test-utils';
+import { fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
 import userEvent from '@testing-library/user-event';
 import { toast } from 'sonner';
 import {
@@ -29,10 +29,8 @@ vi.mock('sonner', () => ({
 // A plain <a href download> browser navigation carries no
 // Authorization header, so a private/unpublished dataset's export endpoint
 // would reject it as anonymous. Same-origin distributions route through
-// this authenticated helper instead — mocked here the same way
-// ExportButton.test.tsx mocks downloadExport (the sibling wrapper around
-// the same underlying authenticatedRawFetch + token-refresh machinery,
-// which is covered at the api/client.test.ts level already).
+// this authenticated helper instead. Its fetch and token-refresh machinery
+// is covered at the api/client.test.ts level already.
 vi.mock('@/api/datasets', () => ({
   authenticatedDownload: vi.fn(),
 }));
@@ -212,6 +210,98 @@ describe('DistributionsList', () => {
     expect(screen.getByText('https://catalog.example.com/api/collections/1/items')).toBeInTheDocument();
     expect(screen.getByText('https://catalog.example.com/api/tiles/data.example/{z}/{x}/{y}.pbf')).toBeInTheDocument();
     expect(screen.getByText('https://example.com/app')).toBeInTheDocument();
+  });
+
+  describe('compact rows', () => {
+    beforeEach(() => {
+      mockUseDistributions.mockReturnValue({
+        data: { distributions: DISTRIBUTIONS_WITH_MANUAL_ROW, total: 3 },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useDistributions>);
+    });
+
+    it('puts format, title, URL and both actions on one row without an "(auto)" chip', () => {
+      render(<DistributionsList recordId="record-1" />);
+
+      const row = screen.getByText('GeoPackage Download').closest('li') as HTMLElement;
+      expect(within(row).getByText('gpkg')).toBeInTheDocument();
+      expect(within(row).getByText('https://catalog.example.com/api/datasets/1/export?format=gpkg')).toBeInTheDocument();
+      expect(within(row).getByRole('button', { name: 'Download' })).toBeInTheDocument();
+      expect(within(row).getByRole('button', { name: 'Copy URL' })).toBeInTheDocument();
+      expect(screen.queryByText(/\(auto\)/)).not.toBeInTheDocument();
+    });
+
+    it('saves an export row as <dataset title>.<ext>, a shapefile as a zip', async () => {
+      const user = userEvent.setup();
+      mockAuthenticatedDownload.mockResolvedValue(undefined);
+      mockUseDistributions.mockReturnValue({
+        data: {
+          distributions: [{
+            ...DISTRIBUTIONS_WITH_MANUAL_ROW[0],
+            id: 'shp-1',
+            format: 'shp',
+            title: 'Shapefile Download',
+            url: '/datasets/1/export?format=shp',
+          }],
+          total: 1,
+        },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useDistributions>);
+      render(<DistributionsList recordId="record-1" datasetTitle="Manhattan Building Heights" />);
+
+      await user.click(screen.getByRole('button', { name: 'Download' }));
+
+      expect(mockAuthenticatedDownload).toHaveBeenCalledWith(
+        'https://catalog.example.com/api/datasets/1/export?format=shp',
+        'Manhattan Building Heights.zip',
+      );
+    });
+
+    it('keeps a manual row named after itself even when its format matches an export', async () => {
+      const user = userEvent.setup();
+      mockAuthenticatedDownload.mockResolvedValue(undefined);
+      mockUseDistributions.mockReturnValue({
+        data: {
+          distributions: [{
+            ...DISTRIBUTIONS_WITH_MANUAL_ROW[0],
+            id: 'manual-shp',
+            auto_generated: false,
+            format: 'shp',
+            title: 'Raw roads',
+            url: '/datasets/1/files/roads.shp',
+          }],
+          total: 1,
+        },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useDistributions>);
+      render(<DistributionsList recordId="record-1" datasetTitle="Manhattan Building Heights" />);
+
+      await user.click(screen.getByRole('button', { name: 'Download' }));
+
+      expect(mockAuthenticatedDownload).toHaveBeenCalledWith(expect.any(String), 'Raw roads.shp');
+    });
+
+    it.each([
+      ['with the dataset title', 'Manhattan Building Heights', /FROM 'Manhattan Building Heights\.parquet'/],
+      ['with the row title when no dataset title is given', undefined, /FROM 'GeoParquet Download\.parquet'/],
+    ])('offers a DuckDB snippet for the GeoParquet download %s', (_name, datasetTitle, expected) => {
+      mockUseDistributions.mockReturnValue({
+        data: {
+          distributions: [{
+            ...DISTRIBUTIONS_WITH_MANUAL_ROW[0],
+            id: 'parquet-1',
+            format: 'parquet',
+            title: 'GeoParquet Download',
+            url: '/datasets/1/export?format=parquet',
+          }],
+          total: 1,
+        },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useDistributions>);
+      render(<DistributionsList recordId="record-1" datasetTitle={datasetTitle} />);
+
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    });
   });
 
   // Each distribution row offers a way to fetch the resource, not just copy

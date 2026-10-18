@@ -112,14 +112,16 @@ async def validate_record(
                 AttributeMetadata.dataset_id == dataset.id,
                 AttributeMetadata.is_current == True,  # noqa: E712
                 AttributeMetadata.description.is_(None),
-                AttributeMetadata.semantic_role != "geometry",
+                AttributeMetadata.semantic_role.is_distinct_from("geometry"),
             )
         )
         if attr_without_desc and attr_without_desc > 0:
             warnings.append(
                 ValidationIssue(
                     "attribute_descriptions",
-                    f"{attr_without_desc} attribute(s) missing descriptions",
+                    f"{attr_without_desc} attribute missing a description"
+                    if attr_without_desc == 1
+                    else f"{attr_without_desc} attributes missing descriptions",
                     "warning",
                 )
             )

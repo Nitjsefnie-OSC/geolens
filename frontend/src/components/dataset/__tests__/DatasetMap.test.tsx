@@ -35,6 +35,7 @@ const fakeMap = vi.hoisted(
     new Proxy({} as Record<string, unknown>, {
       get(target, prop: string) {
         if (prop === 'fitBounds' || prop === 'flyTo') return mapSpy[prop];
+        if (prop === 'getContainer') return () => containerState.el ?? document.createElement('div');
         if (!(prop in target)) target[prop] = vi.fn();
         return target[prop];
       },
@@ -97,10 +98,12 @@ vi.mock('@vis.gl/react-maplibre', async () => {
       if (id === 'bbox-source') mapSpy.bboxSourceAttribution = attribution;
       return children ?? null;
     },
-    Layer: () => null,
+    Layer: ({ id }: { id?: string }) => <div data-testid={`layer-${id}`} />,
     NavigationControl: () => <div data-testid="nav-control" />,
   };
 });
+
+const containerState = vi.hoisted(() => ({ el: null as HTMLElement | null }));
 
 vi.mock('@/components/theme-provider', () => ({
   useTheme: () => ({ resolvedTheme: 'light' }),
@@ -286,6 +289,41 @@ describe('DatasetMap interaction state', () => {
     expect(screen.getByTestId('dataset-map-shell').className).toContain(
       '[&_.maplibregl-ctrl-bottom-right]:max-w-[calc(100%-5.5rem)]',
     );
+  });
+
+  it('folds the open attribution control on a narrow map only', () => {
+    const props = { bbox: [-10, -10, 10, 10] as [number, number, number, number], tableName: 't', geometryType: 'Polygon', datasetId: 'dataset-1' };
+    const mountWithWidth = (width: number) => {
+      const container = document.createElement('div');
+      Object.defineProperty(container, 'clientWidth', { value: width });
+      container.innerHTML = '<details class="maplibregl-ctrl-attrib maplibregl-compact maplibregl-compact-show" open></details>';
+      containerState.el = container;
+      mapSpy.attachMapInstance = true;
+      const { unmount } = render(<DatasetMap {...props} />);
+      return { attrib: container.querySelector('.maplibregl-ctrl-attrib')!, unmount };
+    };
+
+    const { attrib: narrow, unmount } = mountWithWidth(390);
+    expect(narrow).not.toHaveAttribute('open');
+    expect(narrow).not.toHaveClass('maplibregl-compact-show');
+
+    unmount();
+    const { attrib: wide } = mountWithWidth(1200);
+    expect(wide).toHaveAttribute('open');
+    expect(wide).toHaveClass('maplibregl-compact-show');
+    mapSpy.attachMapInstance = false;
+    containerState.el = null;
+  });
+
+  it('draws the dashed extent outline for a regional dataset', () => {
+    render(<DatasetMap bbox={[-74.5, 40.5, -73.5, 41.5]} tableName="t" geometryType="Polygon" datasetId="dataset-1" />);
+    expect(screen.getByTestId('layer-bbox-line')).toBeInTheDocument();
+  });
+
+  it('skips the extent outline when the dataset spans the whole world', () => {
+    render(<DatasetMap bbox={[-180, -85, 180, 85]} tableName="t" geometryType="Point" datasetId="dataset-1" />);
+    expect(screen.queryByTestId('layer-bbox-line')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('layer-bbox-fill')).not.toBeInTheDocument();
   });
 
   it('enables interaction and editing controls once edit mode is active', () => {

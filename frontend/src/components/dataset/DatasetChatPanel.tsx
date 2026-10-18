@@ -16,6 +16,13 @@ import { cn } from '@/lib/utils';
 import type { ChatAction, ChatHistoryMessage } from '@/types/api';
 import { randomId } from '@/lib/random-id';
 
+/** Set on the document root while the Ask AI launcher is showing. */
+const FLOATING_DOCK_INSET_VAR = '--floating-dock-inset';
+
+// Launcher offset (bottom-10, or bottom-44 when lifted above the pending-edits bar) plus its height and a margin.
+const DOCK_INSET = '5.5rem';
+const LIFTED_DOCK_INSET = '14rem';
+
 const prefersReducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
 
 // The launcher always clears the sticky pending-edits bar, which sits higher once the footer scrolls in.
@@ -133,6 +140,17 @@ export function DatasetChatPanel({
     onOpenChange?.(open && isAIAvailable);
     return () => onOpenChange?.(false);
   }, [open, isAIAvailable, onOpenChange]);
+
+  // The launcher floats over the page bottom; the page reads this to keep its last content clear of it.
+  const launcherVisible = isAIAvailable && !open;
+  useEffect(() => {
+    if (!launcherVisible) return undefined;
+    const root = document.documentElement;
+    root.style.setProperty(FLOATING_DOCK_INSET_VAR, abovePendingBar ? LIFTED_DOCK_INSET : DOCK_INSET);
+    return () => {
+      root.style.removeProperty(FLOATING_DOCK_INSET_VAR);
+    };
+  }, [launcherVisible, abovePendingBar]);
 
   const handleSend = useCallback(async () => {
     const userMsg = input.trim();

@@ -92,11 +92,12 @@
     "editDetails": "Edit Details",
     "editGeometry": "Edit Features",
     "draw": "Draw",
-    "reupload": "Re-Upload",
+    "reupload": "Re-upload",
     "reuploadTooltip": "Replace this dataset's source file",
     "createVrt": "Create VRT",
     "createVrtTooltip": "Create a VRT mosaic from this raster",
     "downloadCog": "Download COG",
+    "download": "Download",
     "delete": "Delete",
     "deleteTooltip": "Delete this dataset",
     "connect": "Connect",
@@ -185,9 +186,7 @@
     "fgb": "FlatGeobuf",
     "pmtiles": "PMTiles",
     "duckdbHint": "Query with DuckDB",
-    "button": "Export",
-    "failed": "Export failed",
-    "formatLabel": "Export format"
+    "failed": "Export failed"
   },
   "attributes": {
     "noData": "No data available",
@@ -267,7 +266,7 @@
     "dependentVrtMessage": "This dataset is used as a source in the following VRTs. Remove it from these VRTs before deleting."
   },
   "reupload": {
-    "title": "Re-Upload Dataset",
+    "title": "Re-upload dataset",
     "descriptions": {
       "sourceSelect": "Choose a source for this re-upload.",
       "select": "Select a file to replace the current dataset data.",
@@ -394,7 +393,8 @@
     "columnType": "Type",
     "noColumns": "No attribute columns yet.",
     "dropWarning": "Removing \"{{name}}\" permanently deletes the column and all its values.",
-    "usedByMaps": "Used by {{mapCount}} saved map(s) — styles, filters, or labels referencing this column will break.",
+    "usedByMaps_one": "Used by {{count}} saved map — styles, filters, or labels referencing this column will break.",
+    "usedByMaps_other": "Used by {{count}} saved maps — styles, filters, or labels referencing this column will break.",
     "addColumn": "Add Column",
     "add": "Add",
     "columnNamePlaceholder": "column_name",
@@ -500,21 +500,19 @@
   "validation": {
     "title": "Validation Status",
     "readyToPublish": "Ready to publish",
-    "issuesBlocking": "{{count}} issue(s) blocking publish",
-    "issuesFound": "{{count}} issue(s) found",
-    "warnings": "{{count}} warning(s)",
+    "issuesBlocking_one": "{{count}} issue blocking publish",
+    "issuesBlocking_other": "{{count}} issues blocking publish",
+    "issuesFound_one": "{{count}} issue found",
+    "issuesFound_other": "{{count}} issues found",
+    "warnings_one": "{{count}} warning",
+    "warnings_other": "{{count}} warnings",
     "goToField": "Go to field",
-    "helperBlocking": "{{errorCount}} blocking issue(s) and {{warningCount}} warning(s) need attention. Resolve likely causes, then open Troubleshoot for guided fixes.",
-    "helperIssues": "{{errorCount}} issue(s) and {{warningCount}} warning(s) need attention. Resolve likely causes, then open Troubleshoot for guided fixes.",
-    "helperWarnings": "{{warningCount}} warning(s) found. Review likely causes before publishing.",
+    "helperBlocking": "These issues block publishing. Resolve them, then open Troubleshoot for guided fixes.",
+    "helperIssues": "Resolve these issues, then open Troubleshoot for guided fixes.",
+    "helperWarnings": "Review these warnings before publishing.",
     "likelyCompact": "Likely:",
     "troubleshootAction": "Troubleshoot",
     "readOnlyGuidance": "Ask the dataset owner or a contact listed above to address these validation issues.",
-    "health": {
-      "title": "Dataset Health",
-      "ready": "On track",
-      "description": "{{requiredCount}} required item(s) and {{recommendedCount}} recommended item(s) still need review."
-    },
     "actions": {
       "summary": "Review summary",
       "contacts": "Review contacts",
@@ -532,7 +530,8 @@
     "troubleshoot": {
       "trigger": "Troubleshoot",
       "title": "Validation troubleshooting",
-      "description": "Review {{count}} validation issue(s) and follow the next steps to resolve them.",
+      "description_one": "Review {{count}} validation issue and follow the next steps to resolve it.",
+      "description_other": "Review {{count}} validation issues and follow the next steps to resolve them.",
       "likelyNextSteps": "Likely next steps",
       "noIssues": "No active issues detected. Re-run validation if you expected warnings or errors.",
       "blockingErrors": "Blocking errors ({{count}})",
@@ -594,9 +593,7 @@
     "other": "Additional Access",
     "noDistributions": "No additional downloads or services are listed here.",
     "connectWithClient": "Connect with QGIS, Python, or curl",
-    "otherFormats": "Download another format",
     "accessPermissions": "Who can access this dataset",
-    "auto": "auto",
     "primary": "Primary",
     "copyUrl": "Copy URL",
     "downloadUrl": "Download",
@@ -650,6 +647,7 @@
     "themeCategory": "Theme Category",
     "sourceUrl": "Source URL",
     "sourceUrlPlaceholder": "https://...",
+    "editThemeCategories": "Edit categories",
     "themeCategoryUpdated": "Theme category updated",
     "themeCategoryUpdateFailed": "Failed to update theme category",
     "updateFrequencyOptions": {
@@ -916,7 +914,7 @@
         "sourceUsed": "Source used: {{source}}",
         "columnsRemoved": "Columns removed: {{columns}}",
         "typesChanged": "Column types changed: {{columns}}",
-        "permalink": "Link",
+        "permalink": "Link to this run",
         "reason": {
           "source_count_unavailable": "GeoLens could not compare the fetched row count with the source, so publication requires review.",
           "empty_result": "The new data would replace a non-empty dataset with an empty one.",

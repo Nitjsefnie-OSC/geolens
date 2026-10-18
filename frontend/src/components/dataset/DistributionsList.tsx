@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import {
@@ -6,10 +6,13 @@ import {
   useSetPrimaryDistribution,
 } from '@/components/dataset/hooks/use-records';
 import { useTileConfig } from '@/hooks/use-settings';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { CopyButton } from '@/components/ui/copy-button';
+import { cn } from '@/lib/utils';
+import { exportFilename, isExportFormat } from '@/lib/export-formats';
+import { URL_CHIP_CLASS } from '@/components/dataset/url-chip';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Copy, Check, Circle, CircleDot, Loader2, Download } from 'lucide-react';
+import { Circle, CircleDot, Loader2, Download } from 'lucide-react';
 import { LoadingState } from '@/components/layout/LoadingState';
 import {
   getPublicApiBaseUrl,
@@ -28,6 +31,8 @@ interface DistributionsListProps {
    * + `_check_record_ownership` guard on the distribution PATCH endpoint.
    * Everyone else keeps the read-only view (#1395). */
   canEdit?: boolean;
+  /** Names exported downloads after the dataset, e.g. `<title>.zip` for a shapefile. */
+  datasetTitle?: string;
   /** A non-public dataset's own vector tile URL is listed with an API key placeholder. */
   visibility?: DatasetVisibility;
 }
@@ -54,17 +59,33 @@ const DISTRIBUTION_GROUPS: Record<string, DistributionGroup> = {
   other: 'other',
 };
 
+/** Saved name for a row's download: the dataset title for a generated export, the row's own name otherwise. */
+function distributionFilename(distribution: DistributionResponse, datasetTitle?: string): string {
+  if (
+    datasetTitle &&
+    distribution.auto_generated &&
+    distribution.distribution_type === 'download' &&
+    isExportFormat(distribution.format)
+  ) {
+    return exportFilename(datasetTitle, distribution.format);
+  }
+  const base = (distribution.title?.trim() || distribution.distribution_type).replace(/[/\\]/g, '_');
+  return `${base}.${distribution.format}`;
+}
+
 function CopyableUrl({
   distribution,
   publicApiUrl,
+  datasetTitle,
+  className,
 }: {
   distribution: DistributionResponse;
+  datasetTitle?: string;
   publicApiUrl: string | null | undefined;
+  className?: string;
 }) {
   const { t } = useTranslation('dataset');
-  const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const resolvedUrl = resolveDistributionUrl(distribution.url, publicApiUrl);
   // Same-origin (relative, or absolute matching this
   // instance's own API) gets the bearer token; a genuinely external url
@@ -80,37 +101,16 @@ function CopyableUrl({
   // copy-only rows.
   const isFetchable = isFetchableDistributionUrl(distribution.url);
 
-  useEffect(() => () => clearTimeout(timerRef.current), []);
-
-  async function handleCopy() {
-    try {
-      await navigator.clipboard.writeText(resolvedUrl);
-    } catch {
-      const textarea = document.createElement('textarea');
-      textarea.value = resolvedUrl;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
-    }
-    setCopied(true);
-    clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setCopied(false), 2000);
-  }
-
   // A plain <a href download> browser navigation carries no
   // Authorization header, so a private or unpublished dataset's export
   // endpoint rejected it as anonymous. Route same-origin GeoLens resources
-  // through the same refresh-aware, bearer-authenticated fetch-and-save flow
-  // ExportButton already uses (api/datasets.ts's authenticatedDownload).
+  // through a refresh-aware, bearer-authenticated fetch-and-save flow
+  // (api/datasets.ts's authenticatedDownload).
   async function handleAuthenticatedDownload() {
     if (downloading) return;
     setDownloading(true);
     try {
-      const base = (distribution.title?.trim() || distribution.distribution_type).replace(/[/\\]/g, '_');
-      await authenticatedDownload(resolvedUrl, `${base}.${distribution.format}`);
+      await authenticatedDownload(resolvedUrl, distributionFilename(distribution, datasetTitle));
     } catch (err) {
       toast.error(
         err instanceof Error
@@ -123,8 +123,8 @@ function CopyableUrl({
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <code className="flex-1 rounded-sm bg-muted px-2 py-1.5 font-mono text-xs text-foreground truncate" title={resolvedUrl}>
+    <div className={cn('flex min-w-0 items-center gap-2', className)}>
+      <code className={URL_CHIP_CLASS} title={resolvedUrl}>
         {resolvedUrl}
       </code>
       {/* Copy alone cannot fetch the resource. Same-origin GeoLens
@@ -165,16 +165,7 @@ function CopyableUrl({
             </a>
           </Button>
         ))}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-7 w-7 shrink-0"
-        onClick={handleCopy}
-        aria-label={t('distributions.copyUrl')}
-        title={t('distributions.copyUrl')}
-      >
-        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </Button>
+      <CopyButton value={resolvedUrl} label={t('distributions.copyUrl')} />
     </div>
   );
 }
@@ -261,7 +252,7 @@ function groupByType(
   return groups;
 }
 
-export function DistributionsList({ recordId, canEdit = false, visibility = 'public' }: DistributionsListProps) {
+export function DistributionsList({ recordId, canEdit = false, visibility = 'public', datasetTitle }: DistributionsListProps) {
   const { t } = useTranslation('dataset');
   const { data, isLoading, error } = useDistributions(recordId);
   const { data: tileConfig } = useTileConfig();
@@ -296,29 +287,29 @@ export function DistributionsList({ recordId, canEdit = false, visibility = 'pub
 
   const grouped = groupByType(distributions);
 
+  const parquet = grouped.get('download')?.find((dist) => dist.format === 'parquet');
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {TYPE_ORDER.filter((type) => grouped.has(type)).map((type) => (
-        <Card key={type}>
-          <CardHeader className="pb-3">
-            <CardTitle level={3} className="text-sm">{t(TYPE_LABEL_KEYS[type])}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
+        <section key={type} aria-labelledby={`distributions-${type}`}>
+          <h3 id={`distributions-${type}`} className="mb-1 text-sm font-medium">
+            {t(TYPE_LABEL_KEYS[type])}
+          </h3>
+          <ul className="divide-y">
             {grouped.get(type)!.map((dist) => (
-              <div key={dist.id} className="space-y-1.5">
-                <div className="flex items-center gap-2 flex-wrap">
+              <li key={dist.id} className="py-2">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
                   <Badge variant="outline" className="text-xs">
                     {dist.format}
                   </Badge>
+                  {dist.title && (
+                    <span className="text-sm font-medium">{dist.title}</span>
+                  )}
                   {dist.is_primary && (
                     <Badge variant="secondary" className="text-xs">
                       {t('distributions.primary')}
                     </Badge>
-                  )}
-                  {dist.auto_generated && (
-                    <span className="text-xs text-muted-foreground">
-                      ({t('distributions.auto')})
-                    </span>
                   )}
                   {canEdit && !dist.auto_generated && (
                     <SetPrimaryControl
@@ -328,19 +319,51 @@ export function DistributionsList({ recordId, canEdit = false, visibility = 'pub
                       isPendingThisRow={setPrimary.isPending && setPrimary.variables === dist.id}
                     />
                   )}
+                  <CopyableUrl
+                    distribution={dist}
+                    publicApiUrl={publicApiBaseUrl}
+                    datasetTitle={datasetTitle}
+                    className="min-w-56 flex-1 basis-56"
+                  />
                 </div>
-                {dist.title && (
-                  <p className="text-sm font-medium">{dist.title}</p>
-                )}
                 {dist.description && (
-                  <p className="text-xs text-muted-foreground">{dist.description}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{dist.description}</p>
                 )}
-                <CopyableUrl distribution={dist} publicApiUrl={publicApiBaseUrl} />
-              </div>
+              </li>
             ))}
-          </CardContent>
-        </Card>
+          </ul>
+        </section>
       ))}
+      {parquet && <DuckDbHint distribution={parquet} datasetTitle={datasetTitle} />}
+    </div>
+  );
+}
+
+/** GeoParquet is lakehouse-native: a copy-paste DuckDB snippet makes the download queryable, not just archived. */
+function DuckDbHint({
+  distribution,
+  datasetTitle,
+}: {
+  distribution: DistributionResponse;
+  datasetTitle?: string;
+}) {
+  const { t } = useTranslation('dataset');
+  const saved = distributionFilename(distribution, datasetTitle);
+  // A single quote must be doubled to stay a valid DuckDB string literal.
+  const file = saved.replace(/'/g, "''");
+  const snippet = `INSTALL spatial; LOAD spatial;\nSELECT * FROM '${file}' LIMIT 10;`;
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-2.5">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="font-mono text-2xs uppercase tracking-wide text-muted-foreground">
+          {t('export.duckdbHint', { defaultValue: 'Query with DuckDB' })}
+        </span>
+        <CopyButton value={snippet} />
+      </div>
+      <pre className="overflow-x-auto text-2xs leading-5 text-foreground">
+        <code>{snippet}</code>
+      </pre>
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
   useDatasetVersions,
 } from '@/components/dataset/hooks/use-dataset';
 import { OriginBadge, datasetOrigin } from '@/components/dataset/OriginBadge';
+import { REFRESHABLE_ORIGINS } from '@/components/dataset/SourceRefreshAction';
 import { SourceSyncPanel } from '@/components/dataset/SourceSyncPanel';
 import { useVrtGenerations, useVrtSources, useVrtStatus } from '@/components/import/hooks/use-vrt';
 import { Badge } from '@/components/ui/badge';
@@ -262,6 +263,19 @@ function SourceMetric({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+function HistoryCard({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <section aria-labelledby={id}>
+      <Card>
+        <CardHeader>
+          <CardTitle level={2} id={id}>{title}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">{children}</CardContent>
+      </Card>
+    </section>
+  );
+}
+
 function SourceHistory({ dataset }: { dataset: DatasetResponse }) {
   const { t, i18n } = useTranslation('dataset');
   const { data, isLoading, isError } = useDatasetVersions(dataset.id);
@@ -291,10 +305,7 @@ function SourceHistory({ dataset }: { dataset: DatasetResponse }) {
     .slice(0, 5);
 
   return (
-    <section aria-labelledby="source-history-heading" className="space-y-3">
-      <h2 id="source-history-heading" className="text-base font-semibold">
-        {t('sourcePanel.history.title')}
-      </h2>
+    <HistoryCard id="source-history-heading" title={t('sourcePanel.history.title')}>
       {isLoading ? (
         <div className="space-y-2" aria-label={t('sourcePanel.history.loading')}>
           <Skeleton className="h-14 w-full" />
@@ -329,7 +340,7 @@ function SourceHistory({ dataset }: { dataset: DatasetResponse }) {
           ))}
         </ol>
       )}
-    </section>
+    </HistoryCard>
   );
 }
 
@@ -384,10 +395,7 @@ function RefreshRunHistory({
   }, [data, isFetching, limit, runs, skip, targetRunId]);
 
   return (
-    <section aria-labelledby="refresh-history-heading" className="space-y-3">
-      <h2 id="refresh-history-heading" className="text-base font-semibold">
-        {t('sourcePanel.refresh.history.title')}
-      </h2>
+    <HistoryCard id="refresh-history-heading" title={t('sourcePanel.refresh.history.title')}>
       {isLoading ? (
         <div className="space-y-2" aria-label={t('sourcePanel.refresh.history.loading')}>
           <Skeleton className="h-14 w-full" />
@@ -595,7 +603,7 @@ function RefreshRunHistory({
           {t('sourcePanel.refresh.history.loadMore')}
         </Button>
       )}
-    </section>
+    </HistoryCard>
   );
 }
 
@@ -780,6 +788,8 @@ export function SourcePanel({
     (health === 'unknown' && origin != null && HEALTH_CHECKED_ON_REFRESH.has(origin)
       ? t('sourcePanel.healthUnknownHint')
       : null);
+  // Health, freshness, drift and scheduled sync describe a remote source; an uploaded or drawn dataset has none.
+  const hasRemoteSource = origin != null && REFRESHABLE_ORIGINS.has(origin);
   const originKey = isVrt ? 'vrt' : origin ?? 'unknown';
   const storageKey = isVrt ? 'vrt' : origin ?? 'unknown';
 
@@ -827,26 +837,32 @@ export function SourcePanel({
             <SourceMetric label={t('sourcePanel.lastRefreshed')}>
               {formatDateTimeSmart(dataset.last_refreshed_at ?? null)}
             </SourceMetric>
-            <SourceMetric label={t('sourcePanel.lastChecked')}>
-              {formatDateTimeSmart(dataset.last_checked_at ?? null)}
-            </SourceMetric>
+            {hasRemoteSource && (
+              <SourceMetric label={t('sourcePanel.lastChecked')}>
+                {formatDateTimeSmart(dataset.last_checked_at ?? null)}
+              </SourceMetric>
+            )}
             <SourceMetric label={t('sourcePanel.featureCount')}>
               {formatNumber(dataset.feature_count)}
             </SourceMetric>
-            <SourceMetric label={t('sourcePanel.health')}>
-              <StatusBadge kind="health" value={health} />
-              {healthNote && (
-                <span className="mt-1 block text-xs font-normal text-muted-foreground">
-                  {healthNote}
-                </span>
-              )}
-            </SourceMetric>
-            <SourceMetric label={t('sourcePanel.freshness')}>
-              <StatusBadge kind="freshness" value={freshness} />
-            </SourceMetric>
-            <SourceMetric label={t('sourcePanel.drift')}>
-              <StatusBadge kind="drift" value={drift} />
-            </SourceMetric>
+            {hasRemoteSource && (
+              <>
+              <SourceMetric label={t('sourcePanel.health')}>
+                <StatusBadge kind="health" value={health} />
+                {healthNote && (
+                  <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                    {healthNote}
+                  </span>
+                )}
+              </SourceMetric>
+              <SourceMetric label={t('sourcePanel.freshness')}>
+                <StatusBadge kind="freshness" value={freshness} />
+              </SourceMetric>
+              <SourceMetric label={t('sourcePanel.drift')}>
+                <StatusBadge kind="drift" value={drift} />
+              </SourceMetric>
+              </>
+            )}
           </dl>
         </CardContent>
       </Card>
@@ -855,7 +871,9 @@ export function SourcePanel({
         <VrtSection dataset={dataset} isAuthenticated={isAuthenticated} />
       ) : (
         <>
-          <SourceSyncPanel dataset={dataset} canEdit={canEdit} onRunDispatched={onSyncRunDispatched} />
+          {hasRemoteSource && (
+            <SourceSyncPanel dataset={dataset} canEdit={canEdit} onRunDispatched={onSyncRunDispatched} />
+          )}
           <SourceHistory dataset={dataset} />
           {/* Gated the same way SourceRefreshAction is: no origin, nothing
               could ever have been refreshed, so no history to show. */}

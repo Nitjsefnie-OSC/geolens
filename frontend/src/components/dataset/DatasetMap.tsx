@@ -21,7 +21,7 @@ import { AttributeForm } from '@/components/drawing/AttributeForm';
 import { useTileToken, useInvalidateTileTokens } from '@/hooks/use-tile-token';
 import { isSessionRenewalPending, useTileAuthRecovery, useVisibleTileTokenRefresh } from '@/hooks/use-tile-auth-recovery';
 import { useMapLayers, getSourceLayerName, previewSourceId } from '@/components/maps/hooks/use-map-layers';
-import { computeLargeExtentView, isLargeExtent } from '@/lib/map-extent';
+import { computeLargeExtentView, isLargeExtent, isWorldSpanningExtent } from '@/lib/map-extent';
 import { splitBbox, toFitBounds } from '@/lib/bbox';
 import { findElevationColumn } from '@/lib/geo-utils';
 import { useWebGLRecovery } from '@/hooks/use-webgl-recovery';
@@ -789,6 +789,7 @@ export const DatasetMap = memo(function DatasetMap({
         : null,
     [hasBbox, minx, miny, maxx, maxy],
   );
+  const showsWorldExtent = hasBbox && isWorldSpanningExtent(bbox);
   // Only when there's no vector/raster source of this dataset's own to
   // carry it (tileKind null: tiles3d/pointcloud's footprint-only preview) —
   // otherwise that source already shows it, and this would duplicate it.
@@ -799,6 +800,15 @@ export const DatasetMap = memo(function DatasetMap({
       const map = e.target;
       mapRef.current = map;
       setMapInstance(map);
+
+      // MapLibre's compact attribution starts expanded and only folds on the
+      // first drag; fold it now so it doesn't cover a narrow preview.
+      const container = map.getContainer();
+      if (container.clientWidth <= 640) {
+        const attrib = container.querySelector('.maplibregl-ctrl-attrib');
+        attrib?.classList.remove('maplibregl-compact-show');
+        attrib?.removeAttribute('open');
+      }
 
       // Absolutify URLs and attach auth header for raster tile requests.
       // Shared builder — react-maplibre v8 ignores the
@@ -1230,23 +1240,28 @@ export const DatasetMap = memo(function DatasetMap({
         {/* Bbox overlay for spatial context */}
         {bboxGeojson && (
           <Source id="bbox-source" type="geojson" data={bboxGeojson} attribution={bboxAttribution ?? undefined}>
-            <Layer
-              id="bbox-fill"
-              type="fill"
-              paint={{
-                'fill-color': MAP_COLORS.default.fill,
-                'fill-opacity': 0.1,
-              }}
-            />
-            <Layer
-              id="bbox-line"
-              type="line"
-              paint={{
-                'line-color': MAP_COLORS.default.fill,
-                'line-width': 2,
-                'line-dasharray': [2, 2],
-              }}
-            />
+            {/* Direct children: Source injects `source` into each, which a fragment would swallow. */}
+            {!showsWorldExtent && (
+              <Layer
+                id="bbox-fill"
+                type="fill"
+                paint={{
+                  'fill-color': MAP_COLORS.default.fill,
+                  'fill-opacity': 0.1,
+                }}
+              />
+            )}
+            {!showsWorldExtent && (
+              <Layer
+                id="bbox-line"
+                type="line"
+                paint={{
+                  'line-color': MAP_COLORS.default.fill,
+                  'line-width': 2,
+                  'line-dasharray': [2, 2],
+                }}
+              />
+            )}
           </Source>
         )}
       </MapGL>

@@ -100,6 +100,7 @@
     "connect": "Connecter",
     "createVrt": "Créer VRT",
     "downloadCog": "Télécharger COG",
+    "download": "Télécharger",
     "addToMap": "l'ajouter à une carte"
   },
   "header": {
@@ -185,9 +186,7 @@
     "fgb": "FlatGeobuf",
     "pmtiles": "PMTiles",
     "duckdbHint": "Interroger avec DuckDB",
-    "button": "Exporter",
-    "failed": "Échec de l'exportation",
-    "formatLabel": "Format d'exportation"
+    "failed": "Échec de l'exportation"
   },
   "attributes": {
     "noData": "Aucune donnée disponible",
@@ -432,7 +431,8 @@
     "columnType": "Type",
     "noColumns": "Aucune colonne d'attribut pour l'instant.",
     "dropWarning": "La suppression de « {{name}} » efface définitivement la colonne et toutes ses valeurs.",
-    "usedByMaps": "Utilisée par {{mapCount}} carte(s) enregistrée(s) — les styles, filtres ou étiquettes référençant cette colonne seront cassés.",
+    "usedByMaps_one": "Utilisée par {{count}} carte enregistrée — les styles, filtres ou étiquettes référençant cette colonne seront cassés.",
+    "usedByMaps_other": "Utilisée par {{count}} cartes enregistrées — les styles, filtres ou étiquettes référençant cette colonne seront cassés.",
     "addColumn": "Ajouter une colonne",
     "add": "Ajouter",
     "columnNamePlaceholder": "nom_colonne",
@@ -495,21 +495,19 @@
   "validation": {
     "title": "Statut de validation",
     "readyToPublish": "Prêt à publier",
-    "issuesBlocking": "{{count}} problème(s) bloque(nt) la publication",
-    "issuesFound": "{{count}} problème(s) détecté(s)",
-    "warnings": "{{count}} avertissement(s)",
+    "issuesBlocking_one": "{{count}} problème bloque la publication",
+    "issuesBlocking_other": "{{count}} problèmes bloquent la publication",
+    "issuesFound_one": "{{count}} problème détecté",
+    "issuesFound_other": "{{count}} problèmes détectés",
+    "warnings_one": "{{count}} avertissement",
+    "warnings_other": "{{count}} avertissements",
     "goToField": "Aller au champ",
-    "helperBlocking": "{{errorCount}} problème(s) bloquant(s) et {{warningCount}} avertissement(s) nécessitent une action. Corrigez les causes probables puis ouvrez Dépanner pour des étapes guidées.",
-    "helperIssues": "{{errorCount}} problème(s) et {{warningCount}} avertissement(s) nécessitent une action. Corrigez les causes probables puis ouvrez Dépanner pour des étapes guidées.",
-    "helperWarnings": "{{warningCount}} avertissement(s) détecté(s). Vérifiez les causes probables avant de publier.",
+    "helperBlocking": "Ces problèmes bloquent la publication. Corrigez-les puis ouvrez Dépanner pour des étapes guidées.",
+    "helperIssues": "Corrigez ces problèmes puis ouvrez Dépanner pour des étapes guidées.",
+    "helperWarnings": "Vérifiez ces avertissements avant de publier.",
     "likelyCompact": "Cause probable :",
     "troubleshootAction": "Dépanner",
     "readOnlyGuidance": "Demandez au propriétaire du jeu de données ou à un contact indiqué ci-dessus de corriger ces problèmes de validation.",
-    "health": {
-      "title": "Santé du jeu de données",
-      "ready": "En bonne voie",
-      "description": "{{requiredCount}} élément(s) requis et {{recommendedCount}} élément(s) recommandé(s) nécessitent encore une vérification."
-    },
     "actions": {
       "summary": "Vérifier le résumé",
       "contacts": "Vérifier les contacts",
@@ -527,7 +525,8 @@
     "troubleshoot": {
       "trigger": "Dépanner",
       "title": "Dépannage de validation",
-      "description": "Examinez {{count}} problème(s) de validation et suivez les étapes pour les résoudre.",
+      "description_one": "Examinez {{count}} problème de validation et suivez les étapes pour le résoudre.",
+      "description_other": "Examinez {{count}} problèmes de validation et suivez les étapes pour les résoudre.",
       "likelyNextSteps": "Prochaines étapes probables",
       "noIssues": "Aucun problème actif détecté. Relancez la validation si vous attendiez des avertissements ou des erreurs.",
       "blockingErrors": "Erreurs bloquantes ({{count}})",
@@ -632,9 +631,7 @@
     "other": "Accès supplémentaire",
     "noDistributions": "Aucun autre téléchargement ou service n’est répertorié ici.",
     "connectWithClient": "Se connecter avec QGIS, Python ou curl",
-    "otherFormats": "Télécharger dans un autre format",
     "accessPermissions": "Qui peut accéder à ce jeu de données",
-    "auto": "auto",
     "primary": "Principal",
     "copyUrl": "Copier l'URL",
     "downloadUrl": "Télécharger",
@@ -669,6 +666,7 @@
     "themeCategory": "Catégorie thématique",
     "sourceUrl": "URL source",
     "sourceUrlPlaceholder": "https://...",
+    "editThemeCategories": "Modifier les catégories",
     "themeCategoryUpdated": "Catégorie thématique mise à jour",
     "themeCategoryUpdateFailed": "Impossible de mettre à jour la catégorie thématique",
     "updateFrequencyOptions": {
@@ -954,7 +952,7 @@
         "sourceUsed": "Source utilisée : {{source}}",
         "columnsRemoved": "Colonnes supprimées : {{columns}}",
         "typesChanged": "Types de colonne modifiés : {{columns}}",
-        "permalink": "Lien",
+        "permalink": "Lien vers cette exécution",
         "reason": {
           "source_count_unavailable": "GeoLens n’a pas pu comparer les lignes récupérées avec la source ; la publication doit être vérifiée.",
           "empty_result": "Les nouvelles données remplaceraient un jeu de données non vide par un jeu vide.",

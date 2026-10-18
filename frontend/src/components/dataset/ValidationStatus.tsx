@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, AlertTriangle, CheckCircle2, Lightbulb } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useValidation } from '@/components/dataset/hooks/use-dataset';
 import { useFeatureFlags } from '@/hooks/use-settings';
 import { useAuthStore } from '@/stores/auth-store';
@@ -62,14 +62,9 @@ export function ValidationStatus({
     );
   };
 
-  const likelyCauses = deriveLikelyValidationCauses([...data.errors, ...data.warnings], 2, t);
-
   const helperText = errorCount > 0
-    ? t(requireMetadata ? 'validation.helperBlocking' : 'validation.helperIssues', {
-      errorCount,
-      warningCount,
-    })
-    : t('validation.helperWarnings', { warningCount });
+    ? t(requireMetadata ? 'validation.helperBlocking' : 'validation.helperIssues')
+    : t('validation.helperWarnings');
 
   const statusBadge = errorCount > 0 ? (
     <Badge className={`${semanticBadgeColors.destructive} gap-1`}>
@@ -89,6 +84,7 @@ export function ValidationStatus({
   );
 
   if (mode === 'compact') {
+    const likelyCauses = deriveLikelyValidationCauses([...data.errors, ...data.warnings], 2, t);
     return (
       <div className="flex flex-wrap items-center gap-2" data-testid="validation-status-compact">
         {statusBadge}
@@ -130,17 +126,6 @@ export function ValidationStatus({
           <p className="text-sm text-foreground" data-testid="validation-helper-text">
             {canEdit ? helperText : t('validation.readOnlyGuidance')}
           </p>
-
-          {likelyCauses.length > 0 && (
-            <ul className="space-y-1" data-testid="validation-likely-causes">
-              {likelyCauses.map((cause) => (
-                <li key={cause} className="text-sm text-muted-foreground flex items-center gap-1.5">
-                  <Lightbulb className="h-3.5 w-3.5 text-warning" />
-                  {cause}
-                </li>
-              ))}
-            </ul>
-          )}
 
           <Button
             type="button"
