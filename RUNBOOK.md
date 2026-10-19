@@ -1555,25 +1555,32 @@ always check the collector files.
 
 ## 5. Incident response — data loss
 
-Follow this ordered procedure to recover from data loss.
+Follow this ordered procedure to recover from data loss. Stop the backup
+service first, before you look at anything, and keep it stopped until the
+restored data checks out (step 2 says why):
+
+```bash
+docker compose stop backup
+```
 
 ### 1. Assess scope
 
 Determine what was lost:
 - Is the database intact? (`docker compose exec db psql -U geolens -c '\l'`)
 - Are uploaded source files (in `upload_staging`) missing?
-- What is the latest backup timestamp? (`docker compose exec backup sh -c 'ls -lt /backups/daily/*.dump' | head -5`)
+- What is the latest backup timestamp? (`docker run --rm -v <project>_backup_data:/backups:ro alpine sh -c 'ls -lt /backups/daily/*.dump' | head -5`, with your Compose project name from `docker volume ls` as `<project>`)
 
 ### 2. Select the newest valid dump
 
 ```bash
-# List all daily dumps in the backup_data volume, newest first
-docker compose exec backup sh -c 'ls -lt /backups/daily/*.dump'
+# List all daily dumps in the backup_data volume, newest first.
+# Replace <project> with your Compose project name (see `docker volume ls`).
+docker run --rm -v <project>_backup_data:/backups:ro \
+  alpine sh -c 'ls -lt /backups/daily/*.dump'
 
 # Copy the chosen dump and BOTH its paired artifacts out of the volume — the
 # globals dump included, or a fresh-cluster restore has no roles to replay and
 # restore.sh cannot report which ones are missing.
-# Replace <project> with your Compose project name (see `docker volume ls`).
 # umask 077: globals-*.sql holds role password verifiers.
 mkdir -p ./restore && chmod 700 ./restore
 docker run --rm \
@@ -1594,6 +1601,13 @@ docker compose exec -T db \
   pg_restore -f /dev/null < ./restore/geolens_<YYYYmmdd_HHMMSS>.dump \
   && echo "candidate dump reads end-to-end"
 ```
+
+The backup service stays stopped because a day keeps only its newest dump. A
+scheduled run, or the dump every start of the container takes at once, would
+replace that day's good dump with a dump of the damaged or half-restored
+database, and could prune files while you copy them. `restore.sh` restarts only
+`api` and `worker`, so it leaves the backup service stopped. Copy out that day's
+whole backup set too if the one you plan to restore is older.
 
 If the daily dump is corrupt, fall back to a weekly backup under
 `/backups/weekly/`, or to a pre-upgrade dump under `backups/pre-upgrade/`.
@@ -1644,8 +1658,9 @@ stack to confirm the restore procedure from end to end before trusting the data.
   (`docker compose logs backup | grep 'S3 upload complete'`).
 - If the backup cycle missed the recovery window, review `BACKUP_SCHEDULE` and
   whether any `ERROR: pg_dump failed` entries appear in the logs for that period.
-- Re-enable the backup service if it was stopped during recovery:
-  `docker compose start backup`.
+- Re-enable the backup service once the restored data is verified:
+  `docker compose up -d backup`. Unlike `start`, it also recreates the container
+  after `--scale backup=0`, and it takes a dump as it starts.
 
 ---
 
