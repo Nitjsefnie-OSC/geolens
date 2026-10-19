@@ -28,6 +28,13 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 SETTINGS_PY = REPO_ROOT / "backend" / "app" / "core" / "config.py"
 # Settings inherits these fields; they need documenting all the same.
 AI_SETTINGS_PY = REPO_ROOT / "backend" / "app" / "core" / "config_ai.py"
+AUTH_SETTINGS_PY = REPO_ROOT / "backend" / "app" / "core" / "auth_settings.py"
+SETTINGS_CLASSES = (
+    (SETTINGS_PY, "Settings"),
+    (AUTH_SETTINGS_PY, "AuthSettings"),
+    (AI_SETTINGS_PY, "ClaudeSettings"),
+    (AI_SETTINGS_PY, "OpenAISettings"),
+)
 COMPOSE_FILES = (
     REPO_ROOT / "docker-compose.yml",
     REPO_ROOT / "docker-compose.prod.yml",
@@ -188,17 +195,7 @@ def keys_documented_in_example(env_example: Path) -> set[str]:
 
 def settings_field_keys(settings_py: Path, class_name: str = "Settings") -> set[str]:
     """Return environment names represented by the fields of ``class_name``."""
-    tree = ast.parse(settings_py.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return {
-                item.target.id.upper()
-                for item in node.body
-                if isinstance(item, ast.AnnAssign)
-                and isinstance(item.target, ast.Name)
-                and item.target.id != "model_config"
-            }
-    raise ValueError(f"{class_name} class not found in {settings_py}")
+    return set(settings_field_defaults(((settings_py, class_name),)))
 
 
 def _without_yaml_comment(line: str) -> str:
@@ -222,31 +219,52 @@ def compose_host_keys(compose_files: tuple[Path, ...]) -> set[str]:
     return keys
 
 
-def _anchor_environment_keys(text: str) -> dict[str, set[str]]:
+def _environment_value(rest: str) -> str | None:
+    """Return a mapping entry's raw value, or None for a bare `KEY:`."""
+    rest = _without_yaml_comment(rest).strip()
+    if not rest:
+        return None
+    if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+        return rest[1:-1]
+    return rest
+
+
+def _anchor_environment(text: str) -> dict[str, dict[str, str | None]]:
     """Parse top-level YAML environment anchors used by the Compose files."""
     lines = text.splitlines()
-    anchors: dict[str, set[str]] = {}
+    anchors: dict[str, dict[str, str | None]] = {}
     for index, line in enumerate(lines):
         match = re.match(r"^x-[^:]+:\s*&([a-z0-9-]+)\s*$", line)
         if not match:
             continue
-        name = match.group(1)
-        keys: set[str] = set()
+        entries: dict[str, str | None] = {}
         for child in lines[index + 1 :]:
             if child and not child.startswith((" ", "\t", "#")):
                 break
-            key_match = re.match(r"^  ([A-Z][A-Z0-9_]*):", child)
+            key_match = re.match(r"^  ([A-Z][A-Z0-9_]*):(.*)$", child)
             if key_match:
-                keys.add(key_match.group(1))
-        anchors[name] = keys
+                entries[key_match.group(1)] = _environment_value(key_match.group(2))
+        anchors[match.group(1)] = entries
     return anchors
 
 
 def _service_environment_keys(text: str) -> dict[str, set[str]]:
-    """Resolve the small YAML subset used by service environment mappings."""
+    """Resolve the environment variable names each service receives."""
+    return {
+        service: set(entries) for service, entries in _service_environment(text).items()
+    }
+
+
+def _service_environment(text: str) -> dict[str, dict[str, str | None]]:
+    """Resolve the small YAML subset used by service environment mappings.
+
+    Merged anchors come first and a service's own entries override them, as a
+    YAML merge key does.
+    """
     lines = text.splitlines()
-    anchors = _anchor_environment_keys(text)
-    services: dict[str, set[str]] = {}
+    anchors = _anchor_environment(text)
+    services: dict[str, dict[str, str | None]] = {}
+    merged: dict[str, dict[str, str | None]] = {}
     in_services = False
     service: str | None = None
     in_environment = False
@@ -265,7 +283,8 @@ def _service_environment_keys(text: str) -> dict[str, set[str]]:
         service_match = re.match(r"^  ([a-z0-9_-]+):\s*$", line)
         if service_match:
             service = service_match.group(1)
-            services.setdefault(service, set())
+            services.setdefault(service, {})
+            merged.setdefault(service, {})
             in_environment = False
             continue
         if service is None:
@@ -278,13 +297,13 @@ def _service_environment_keys(text: str) -> dict[str, set[str]]:
         if not in_environment:
             continue
 
-        direct = re.match(r"^      ([A-Z][A-Z0-9_]*):", line)
+        direct = re.match(r"^      ([A-Z][A-Z0-9_]*):(.*)$", line)
         if direct:
-            services[service].add(direct.group(1))
+            services[service][direct.group(1)] = _environment_value(direct.group(2))
         for alias in re.findall(r"\*([a-z0-9-]+)", line):
-            services[service].update(anchors.get(alias, set()))
+            merged[service].update(anchors.get(alias, {}))
 
-    return services
+    return {name: {**merged[name], **entries} for name, entries in services.items()}
 
 
 def compose_contract_errors(compose_files: tuple[Path, ...]) -> list[str]:
@@ -367,6 +386,356 @@ def db_knobs_absent_from_services(
     return errors
 
 
+# The services that load Settings. Other services take their own variables.
+SETTINGS_SERVICES = ("api", "worker", "migrate")
+
+# Settings fields no Compose service lists, each with its reason.
+SETTINGS_NOT_IN_COMPOSE: dict[str, str] = {
+    "POSTGRES_DB_TEST": "test database name; only the host test suite reads it",
+    "AWS_ROLE_ARN": "the platform injects it (EKS IRSA / Pod Identity)",
+    "AWS_WEB_IDENTITY_TOKEN_FILE": "the platform injects it (EKS IRSA / Pod Identity)",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI": "the platform injects it (ECS/EKS)",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "the platform injects it (ECS/EKS)",
+}
+
+_API_ONLY = "read only by the HTTP app, not by the job worker"
+_WORKER_ONLY = "read only by the job worker"
+_MIGRATE_ONLY = "the migration identity; api and worker run as the runtime role"
+
+# Settings fields each long-running service deliberately does not receive.
+SERVICE_SETTINGS_EXCLUSIONS: dict[str, dict[str, str]] = {
+    "api": {
+        "WORKER_CONCURRENCY": _WORKER_ONLY,
+        "WORKER_QUEUES": _WORKER_ONLY,
+        "WORKER_SHUTDOWN_TIMEOUT": _WORKER_ONLY,
+        "URL_IMPORT_FETCH_MAX_SECONDS": "the URL-import fetch runs in the worker",
+        "ANALYSIS_MATERIALIZE_TIMEOUT_SECONDS": "the materialize task runs in the worker",
+        "ANALYSIS_REGISTRATION_TIMEOUT_SECONDS": "the materialize task runs in the worker",
+        "ANALYSIS_MATERIALIZE_WORK_MEM_MB": "the materialize task runs in the worker",
+        "GEOLENS_MIGRATION_DB_ROLE": _MIGRATE_ONLY,
+    },
+    "worker": {
+        "GEOLENS_MIGRATION_DB_ROLE": _MIGRATE_ONLY,
+        # Serving: uvicorn, the query sandbox, the tile pool and cache.
+        "UVICORN_WORKERS": _API_ONLY,
+        "SANDBOX_QUERY_SLOTS": _API_ONLY,
+        "TILE_POOL_MIN_SIZE": _API_ONLY,
+        "TILE_POOL_MAX_SIZE": _API_ONLY,
+        "TILE_CACHE_TTL": _API_ONLY,
+        "TILE_SIGNING_SECRET": _API_ONLY,
+        "CDN_BASE_URL": _API_ONLY,
+        "TITILER_BASE_URL": _API_ONLY,
+        "REMOTE_RASTER_RELAY_BASE_URL": _API_ONLY,
+        "CORS_ALLOWED_ORIGINS": _API_ONLY,
+        # Upload doors and presigned uploads.
+        "UPLOAD_MAX_SIZE_MB": _API_ONLY,
+        "UPLOAD_ALLOWED_EXTENSIONS": _API_ONLY,
+        "PRESIGNED_MULTIPART_THRESHOLD_MB": _API_ONLY,
+        # Sign-in and registration policy.
+        "REGISTRATION_ENABLED": _API_ONLY,
+        "EMAIL_VERIFICATION_REQUIRED": _API_ONLY,
+        "PASSWORD_LOGIN_ENABLED": _API_ONLY,
+        "LOGIN_RATE_LIMIT": _API_ONLY,
+        "ALLOWED_EMAIL_DOMAINS": _API_ONLY,
+        # Public URLs and page content.
+        "LANDING_FIRST": _API_ONLY,
+        "BANNER_ENABLED": _API_ONLY,
+        "BANNER_TEXT": _API_ONLY,
+        "BANNER_COLOR": _API_ONLY,
+        "PUBLIC_APP_URL": _API_ONLY,
+        "PUBLIC_API_URL": _API_ONLY,
+        "PUBLIC_BASE_URL": _API_ONLY,
+        "PRIVACY_URL": _API_ONLY,
+        "DCAT_CONTACT_EMAIL": _API_ONLY,
+    },
+}
+
+# migrate needs only database, auth and edition settings: every Settings field
+# in these anchors, plus the fields below.
+MIGRATE_SETTINGS_ANCHORS = ("db-env", "auth-env", "db-ssl-env", "edition-env")
+MIGRATE_SETTINGS: dict[str, str] = {
+    "GEOLENS_MIGRATION_DB_ROLE": _MIGRATE_ONLY,
+    "EMBEDDING_DIMS": "migration 0012 types the embedding vector column",
+    "ENV_ONLY_CONFIG": "migration 0012 reads it",
+}
+
+# Entries whose Compose value deliberately differs from the Settings default,
+# so they must stay explicit. A key applies to every Settings service; a
+# `service:KEY` entry applies to that service only.
+COMPOSE_SPECIFIC_DEFAULTS: dict[str, str] = {
+    "POSTGRES_HOST": "the db service's hostname on the Compose network",
+    "POSTGRES_PORT": "the db container port; DB_PORT is only the host binding",
+    "POSTGRES_USER": "runtime role, falling back to the bootstrap user",
+    "POSTGRES_PASSWORD": "runtime role password, falling back to the bootstrap one",
+    "POSTGRES_DB": "always taken from .env, which the db service also reads",
+    "UPLOAD_STAGING_DIR": "pinned to the shared upload_staging mount target",
+    "PUBLIC_APP_URL": "the bundled frontend's localhost:8080 entry point",
+    "PUBLIC_API_URL": "the bundled frontend's localhost:8080/api proxy",
+    "api:UVICORN_WORKERS": "prod runs 2 workers; dev keeps 1 for --reload",
+    "migrate:GEOLENS_RUNTIME_DB_ROLE": "migrate runs as the privileged identity",
+    "migrate:GEOLENS_MIGRATION_DB_ROLE": "derived from the runtime role setting",
+    "migrate:EMBEDDING_DIMS": "an unset dimension must stay empty for migration 0012",
+    # Wiring tests in backend/tests pin these four to the `${KEY:-}` form.
+    "SECRET_ENCRYPTION_KEY": "pinned by test_secret_encryption_key_1871.py",
+    "SECRET_ENCRYPTION_KEY_PREVIOUS": "pinned by test_secret_encryption_key_1871.py",
+    "S3_PUBLIC_ENDPOINT": "pinned by test_config.py",
+    "DATABASE_URL_OVERRIDE": "pinned by test_entrypoint_migration_toggle.py; "
+    "migrate prefers MIGRATION_DATABASE_URL_OVERRIDE",
+    # The Anthropic and OpenAI SDKs read these names from the process
+    # environment when the app passes None, and an empty value and an unset
+    # one take different paths there.
+    "OPENAI_API_KEY": "read by the OpenAI SDK from the environment",
+    "ANTHROPIC_FOUNDRY_API_KEY": "read by the Anthropic SDK from the environment",
+    "ANTHROPIC_FOUNDRY_RESOURCE": "read by the Anthropic SDK from the environment",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "read by the Anthropic SDK from the environment",
+    "CLOUD_ML_REGION": "read by the Anthropic SDK from the environment",
+}
+
+_REQUIRED = object()
+_NOT_LITERAL = object()
+_SAME_KEY_DEFAULT_RE = re.compile(r"^\$\{([A-Z][A-Z0-9_]*):-([^${}]*)\}$")
+_TRUE = frozenset({"1", "true", "yes", "on", "t", "y"})
+_FALSE = frozenset({"0", "false", "no", "off", "f", "n"})
+
+
+def settings_field_defaults(
+    classes: tuple[tuple[Path, str], ...] = SETTINGS_CLASSES,
+) -> dict[str, object]:
+    """Return each field's literal default by environment name.
+
+    The default is `_REQUIRED` for a field without one and `_NOT_LITERAL` when
+    it is computed.
+    """
+    fields: dict[str, object] = {}
+    for path, class_name in classes:
+        for item in _class_body(path, class_name):
+            if not isinstance(item, ast.AnnAssign) or not isinstance(
+                item.target, ast.Name
+            ):
+                continue
+            if item.target.id == "model_config":
+                continue
+            value = item.value
+            computed = False
+            if isinstance(value, ast.Call) and getattr(value.func, "id", "") == "Field":
+                keywords = {k.arg: k.value for k in value.keywords}
+                computed = "default_factory" in keywords
+                value = keywords.get("default", (value.args or [None])[0])
+            if computed:
+                default: object = _NOT_LITERAL
+            elif value is None:
+                default = _REQUIRED
+            else:
+                try:
+                    default = ast.literal_eval(value)
+                except ValueError:
+                    default = _NOT_LITERAL
+            fields[item.target.id.upper()] = default
+    return fields
+
+
+def blank_normalized_fields(
+    classes: tuple[tuple[Path, str], ...] = SETTINGS_CLASSES,
+) -> set[str]:
+    """Fields whose before-validator turns a blank string into the default.
+
+    Recognized by name: a `mode="before"` field_validator whose function ends
+    in `_to_none` or `_to_default`.
+    """
+    keys: set[str] = set()
+    for path, class_name in classes:
+        for item in _class_body(path, class_name):
+            if not isinstance(item, ast.FunctionDef):
+                continue
+            if not item.name.endswith(("_to_none", "_to_default")):
+                continue
+            for decorator in item.decorator_list:
+                if not (
+                    isinstance(decorator, ast.Call)
+                    and getattr(decorator.func, "id", "") == "field_validator"
+                    and any(
+                        k.arg == "mode" and getattr(k.value, "value", "") == "before"
+                        for k in decorator.keywords
+                    )
+                ):
+                    continue
+                keys.update(
+                    arg.value.upper()
+                    for arg in decorator.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                )
+    return keys
+
+
+def _class_body(path: Path, class_name: str) -> list[ast.stmt]:
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return node.body
+    raise ValueError(f"{class_name} class not found in {path}")
+
+
+def _parses_to_default(raw: str, default: object) -> bool:
+    """Whether a non-empty Compose default equals the literal Settings default."""
+    if isinstance(default, bool):
+        return raw.strip().lower() in (_TRUE if default else _FALSE)
+    if isinstance(default, int):
+        try:
+            return int(raw) == default
+        except ValueError:
+            return False
+    return isinstance(default, str) and raw == default
+
+
+def _compose_specific(service: str, key: str) -> bool:
+    return key in COMPOSE_SPECIFIC_DEFAULTS or (
+        f"{service}:{key}" in COMPOSE_SPECIFIC_DEFAULTS
+    )
+
+
+def compose_settings_errors(
+    compose_files: tuple[Path, ...],
+    fields: dict[str, object],
+    blank_normalized: set[str],
+) -> list[str]:
+    """Check how the Settings services receive each Settings field.
+
+    Each Settings service must receive the fields `_coverage_errors` expects
+    of it. A bare `KEY:` passes the host value through and otherwise
+    leaves the Settings default in charge, so it is the form for any entry
+    whose Compose default would only repeat that default for both an unset
+    and an empty host value. Bare is wrong for a key without a Settings
+    field, for one listed in COMPOSE_SPECIFIC_DEFAULTS, and for one whose
+    `${KEY:-default}` also turns an empty host value into the default,
+    because each would drop a value Compose supplies. Every other explicit
+    value must equal the Settings default or be listed with its reason.
+    """
+    errors: list[str] = []
+    explicit_seen: set[str] = set()
+    for path in compose_files:
+        text = path.read_text()
+        environments = _service_environment(text)
+        errors.extend(_coverage_errors(path.name, text, environments, fields))
+        for service in SETTINGS_SERVICES:
+            for key, raw in environments.get(service, {}).items():
+                where = f"{path.name}:{service} {key}"
+                if raw is None:
+                    if key not in fields:
+                        errors.append(
+                            f"{where} is bare but is no Settings field, so "
+                            "nothing supplies a value when the host leaves it unset"
+                        )
+                    elif _compose_specific(service, key):
+                        errors.append(
+                            f"{where} is bare, which drops the Compose-specific "
+                            "value COMPOSE_SPECIFIC_DEFAULTS lists for it"
+                        )
+                    elif fields[key] is _NOT_LITERAL and key not in blank_normalized:
+                        errors.append(
+                            f"{where} is bare, so an empty host value reaches "
+                            "Settings as '' instead of its computed default; map it "
+                            "explicitly and list it in COMPOSE_SPECIFIC_DEFAULTS"
+                        )
+                    elif fields[key] not in (None, "", _REQUIRED, _NOT_LITERAL) and (
+                        key not in blank_normalized
+                    ):
+                        errors.append(
+                            f"{where} is bare, so an empty host value reaches "
+                            f"Settings as '' instead of {fields[key]!r}; keep "
+                            f"the `${{{key}:-...}}` default"
+                        )
+                    continue
+                if key not in fields:
+                    continue
+                if _compose_specific(service, key):
+                    explicit_seen.update({key, f"{service}:{key}"})
+                    continue
+                default = fields[key]
+                if default is _REQUIRED and raw == f"${{{key}}}":
+                    continue
+                match = _SAME_KEY_DEFAULT_RE.match(raw)
+                if not match or match.group(1) != key:
+                    errors.append(
+                        f"{where} = {raw!r} is not the Settings default; list it "
+                        "in COMPOSE_SPECIFIC_DEFAULTS with a reason"
+                    )
+                    continue
+                compose_default = match.group(2)
+                if compose_default == "":
+                    if default == "" or key in blank_normalized:
+                        errors.append(
+                            f"{where} = {raw!r} repeats the Settings default; "
+                            f"write it bare as `{key}:`"
+                        )
+                    else:
+                        errors.append(
+                            f"{where} = {raw!r}: an empty value is not the "
+                            f"Settings default {default!r}; list it in "
+                            "COMPOSE_SPECIFIC_DEFAULTS with a reason"
+                        )
+                elif default is _NOT_LITERAL or not _parses_to_default(
+                    compose_default, default
+                ):
+                    errors.append(
+                        f"{where} = {raw!r} differs from the Settings default "
+                        f"{'(computed)' if default is _NOT_LITERAL else repr(default)}; "
+                        "align them or list it in COMPOSE_SPECIFIC_DEFAULTS"
+                    )
+    for entry in sorted(set(COMPOSE_SPECIFIC_DEFAULTS) - explicit_seen):
+        errors.append(
+            f"COMPOSE_SPECIFIC_DEFAULTS lists {entry}, which no Settings service "
+            "sets explicitly any more"
+        )
+    listed = {
+        "SETTINGS_NOT_IN_COMPOSE": SETTINGS_NOT_IN_COMPOSE,
+        "MIGRATE_SETTINGS": MIGRATE_SETTINGS,
+        **{
+            f"SERVICE_SETTINGS_EXCLUSIONS[{service!r}]": excluded
+            for service, excluded in SERVICE_SETTINGS_EXCLUSIONS.items()
+        },
+    }
+    for name, entries in listed.items():
+        for key in sorted(set(entries) - set(fields)):
+            errors.append(f"{name} lists {key}, which is no Settings field")
+    return errors
+
+
+def _coverage_errors(
+    name: str,
+    text: str,
+    environments: dict[str, dict[str, str | None]],
+    fields: dict[str, object],
+) -> list[str]:
+    """Check each Settings service receives the fields it is expected to.
+
+    api and worker take every Settings field minus their reasoned exclusions,
+    and an exclusion the service does receive is stale. migrate takes the
+    Settings fields of its anchors plus MIGRATE_SETTINGS.
+    """
+    errors: list[str] = []
+    for service, excluded in SERVICE_SETTINGS_EXCLUSIONS.items():
+        received = set(environments.get(service, {}))
+        expected = set(fields) - set(SETTINGS_NOT_IN_COMPOSE) - set(excluded)
+        missing = sorted(expected - received)
+        if missing:
+            errors.append(f"{name}:{service} never receives {', '.join(missing)}")
+        stale = sorted(set(excluded) & received)
+        if stale:
+            errors.append(
+                f"{name}:{service} receives {', '.join(stale)}, which "
+                "SERVICE_SETTINGS_EXCLUSIONS excludes for it"
+            )
+    anchors = _anchor_environment(text)
+    expected = set(MIGRATE_SETTINGS)
+    for anchor in MIGRATE_SETTINGS_ANCHORS:
+        if anchor not in anchors:
+            errors.append(f"{name}: anchor &{anchor} for migrate is missing")
+        expected.update(key for key in anchors.get(anchor, {}) if key in fields)
+    missing = sorted(expected - set(environments.get("migrate", {})))
+    if missing:
+        errors.append(f"{name}:migrate never receives {', '.join(missing)}")
+    return errors
+
+
 def raw_environment_keys() -> set[str]:
     """Find non-Settings env reads needed to identify stale example entries."""
     keys: set[str] = set()
@@ -406,6 +775,7 @@ def main() -> int:
         ENV_EXAMPLE,
         SETTINGS_PY,
         AI_SETTINGS_PY,
+        AUTH_SETTINGS_PY,
         *COMPOSE_FILES,
     )
     missing_files = [path for path in required_files if not path.is_file()]
@@ -416,10 +786,8 @@ def main() -> int:
 
     written = keys_written_by_installer(INSTALL_SH)
     documented = keys_documented_in_example(ENV_EXAMPLE)
-    settings_keys = (
-        settings_field_keys(SETTINGS_PY)
-        | settings_field_keys(AI_SETTINGS_PY, "ClaudeSettings")
-        | settings_field_keys(AI_SETTINGS_PY, "OpenAISettings")
+    settings_keys = set().union(
+        *(settings_field_keys(path, name) for path, name in SETTINGS_CLASSES)
     )
     compose_keys = compose_host_keys(COMPOSE_FILES)
     raw_keys = raw_environment_keys()
@@ -464,6 +832,12 @@ def main() -> int:
         failures.append(
             ("documented DB_* knobs that no container receives", inert_db_knobs)
         )
+
+    settings_errors = compose_settings_errors(
+        COMPOSE_FILES, settings_field_defaults(), blank_normalized_fields()
+    )
+    if settings_errors:
+        failures.append(("Settings fields Compose passes wrongly", settings_errors))
 
     phantom_scripts = unresolvable_doc_script_refs()
     if phantom_scripts:
