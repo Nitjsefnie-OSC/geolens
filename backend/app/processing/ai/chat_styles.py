@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.csv_safety import numeric_column_names
 from app.processing.ai.chat_constants import _get_ramp_colors
 from app.processing.ai.schemas import ChatMapLayer
 
@@ -55,6 +56,22 @@ async def _build_data_driven_style(
 
     if not target_layer:
         return {"error": f"Layer {layer_id} not found"}
+    render_mode = (target_layer.style_config or {}).get("render_mode")
+    if render_mode == "heatmap":
+        return {
+            "error": "A heatmap's colour follows point density, not a column. "
+            "To weight it by a column, use set_style with a heatmap-weight expression."
+        }
+    if render_mode == "symbol":
+        return {
+            "error": "Symbol layers draw icons, so a column can't colour them. "
+            "Switch the layer to point first to colour it by a column."
+        }
+    if render_mode == "cluster":
+        return {
+            "error": "Cluster bubbles aggregate many features, so a column can't "
+            "colour them. Switch the layer to point first to colour it by a column."
+        }
 
     table_name = target_layer.dataset_table_name
 
@@ -242,3 +259,76 @@ async def _build_graduated_style(
             "breaks": break_entries,
         },
     }
+
+
+# Mirrors RENDERER_CAPABILITIES in frontend components/builder/renderAs.ts.
+_RENDER_AS_BY_FAMILY = {
+    "point": ("point", "symbol", "heatmap", "cluster"),
+    "line": ("line", "arrow"),
+    "polygon": ("fill", "stroke", "fill-stroke", "extrusion-3d"),
+}
+_RENDER_AS_STORED_AS_RENDER_MODE = {"symbol", "heatmap", "cluster", "arrow"}
+
+
+def apply_render_as(tool_input: dict, layers: list[ChatMapLayer]) -> dict:
+    """Validate a set_render_as call and record the new mode on its layer.
+
+    The layer's style_config is updated in place so set_style later in the
+    same turn validates paint against the new render mode.
+    """
+    target = next((lyr for lyr in layers if lyr.id == tool_input.get("layer_id")), None)
+    if target is None:
+        return {"error": "That layer is not on this map."}
+    if target.layer_type == "raster_geolens":
+        return {"error": "Raster layers have one render type and cannot be switched."}
+    gt = (target.geometry_type or "").upper()
+    family = next((f for f in ("point", "line", "polygon") if f.upper() in gt), None)
+    allowed = _RENDER_AS_BY_FAMILY.get(family or "", ())
+    render_as = tool_input.get("render_as")
+    if render_as not in allowed:
+        return {
+            "error": f"'{render_as}' is not available for this layer. "
+            f"Choose one of: {', '.join(allowed) or 'none'}."
+        }
+    # Mirrors canUseClusterSource in frontend components/builder/cluster-source.ts.
+    if render_as == "cluster" and target.layer_type not in (
+        None,
+        "vector_geolens",
+        "geojson",
+    ):
+        return {"error": "Only vector layers can be clustered."}
+    if render_as == "cluster" and target.feature_count is None:
+        return {"error": "Cluster needs the layer's feature count, which is unknown."}
+    if render_as == "extrusion-3d":
+        numeric = numeric_column_names(target.column_info)
+        height_column = tool_input.get("height_column")
+        builder = (target.style_config or {}).get("builder") or {}
+        current = builder.get("heightColumn") or (target.paint or {}).get(
+            "_height_column"
+        )
+        if height_column is None and current not in numeric:
+            # Name the column here: the client's fallback type check is looser.
+            height_column = next(
+                (
+                    c["name"]
+                    for c in target.column_info or []
+                    if isinstance(c, dict) and c.get("name") in numeric
+                ),
+                None,
+            )
+            if height_column is None:
+                return {
+                    "error": "This layer has no numeric column to take 3D heights from."
+                }
+            tool_input = {**tool_input, "height_column": height_column}
+        elif height_column is not None and height_column not in numeric:
+            return {
+                "error": f"'{height_column}' is not a numeric column on this layer."
+            }
+    style = dict(target.style_config or {})
+    if render_as in _RENDER_AS_STORED_AS_RENDER_MODE:
+        style["render_mode"] = render_as
+    else:
+        style.pop("render_mode", None)
+    target.style_config = style
+    return {"type": "set_render_as", **tool_input}

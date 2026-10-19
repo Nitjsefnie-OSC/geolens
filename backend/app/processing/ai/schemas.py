@@ -176,6 +176,9 @@ def _valid_paint_props_for_geometry(
     # filter would strip every heatmap property.
     if render_mode == "heatmap":
         return "heatmap", _VALID_PAINT_PROPS["heatmap"]
+    if render_mode == "symbol":
+        # Symbol layers draw icons; paint only holds the circle paint for a return to points.
+        return "symbol", set()
     layer_type = _paint_layer_type_for_geometry(geometry_type)
     if not layer_type:
         return None, set()
@@ -479,6 +482,7 @@ class ChatAction(BaseModel):
         "remove_layer",
         "show_query_result",
         "set_opacity",
+        "set_render_as",
     ]
     layer_id: str | None = None
     expression: list | None = None  # for set_filter
@@ -491,6 +495,8 @@ class ChatAction(BaseModel):
     dataset_name: str | None = None  # for add_layer (staging-chip display label)
     visible: bool | None = None  # for toggle_visibility
     opacity: float | None = Field(None, ge=0.0, le=1.0)  # for set_opacity
+    render_as: str | None = None  # for set_render_as
+    height_column: str | None = None  # for set_render_as extrusion-3d
     geojson: GeoJSONFeatureCollection | None = None  # for show_query_result
     bbox: list[float] | None = None  # for show_query_result
     rows: list[list] | None = (

@@ -30,7 +30,7 @@ from app.processing.ai.chat_geojson import (
 )
 from app.processing.ai.colors import is_css_colorish, label_halo_color
 from app.processing.ai import sandbox_bounds
-from app.processing.ai.chat_styles import _build_data_driven_style
+from app.processing.ai.chat_styles import _build_data_driven_style, apply_render_as
 from app.processing.ai.schemas import (
     ChatMapLayer,
     validate_paint_property_names_with_feedback,
@@ -375,6 +375,9 @@ async def _execute_chat_tool(
     if tool_name == "set_data_driven_style":
         return await _build_data_driven_style(tool_input, session, layers, port=port)
 
+    if tool_name == "set_render_as":
+        return apply_render_as(tool_input, layers)
+
     # Validate set_style paint and explicit clear lists against geometry type.
     if tool_name == "set_style" and (
         tool_input.get("paint") or tool_input.get("clear_paint")
@@ -491,7 +494,7 @@ def _collect_chat_action(tool_name: str, tool_input: dict, result: dict) -> dict
             return collect_run_analysis_action(result)
         return None
 
-    if tool_name == "set_data_driven_style":
+    if tool_name in {"set_data_driven_style", "set_render_as"}:
         if "error" not in result:
             return result
         return None

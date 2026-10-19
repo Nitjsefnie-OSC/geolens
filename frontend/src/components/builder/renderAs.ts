@@ -205,6 +205,17 @@ function defaultHeightColumn(layer: RenderAsLayer): string {
   return numericColumn?.name ?? layer.dataset_column_info?.[0]?.name ?? 'height';
 }
 
+/** The heatmap paint to keep for a return to heatmap mode. */
+function heatmapPaintStash(layer: RenderAsLayer): Record<string, unknown> | undefined {
+  return getCurrentRenderAs(layer) === 'heatmap' ? { ...(layer.paint ?? {}) } : layer.style_config?.heatmapPaint;
+}
+
+/** The circle paint stashed on heatmap entry; an empty stash counts as none. */
+function stashedCirclePaint(layer: RenderAsLayer): Record<string, unknown> | undefined {
+  const saved = layer.style_config?.savedCirclePaint;
+  return saved && Object.keys(saved).length > 0 ? saved : undefined;
+}
+
 function polygonPaint(layer: RenderAsLayer): Record<string, unknown> {
   return {
     ...DEFAULT_FILL_PAINT,
@@ -337,9 +348,9 @@ export function hasCustomizedRenderAsStyle(layer: RenderAsLayer): boolean {
     }
 
     case 'cluster': {
-      // clusterColor is auto-seeded on mode entry (from the circle paint), so
-      // presence alone isn't customization; diverging from the seed is (as for
-      // extrusion heightColumn). Any non-empty ramp is user-authored state.
+      // A clusterColor equal to the point colour (older maps seeded it on mode
+      // entry) is not customization; a diverging one is, as for extrusion
+      // heightColumn. Any non-empty ramp is user-authored state.
       const seededClusterColor = typeof paint['circle-color'] === 'string'
         ? paint['circle-color']
         : DEFAULT_CIRCLE_PAINT['circle-color'];
@@ -356,10 +367,10 @@ export function hasCustomizedRenderAsStyle(layer: RenderAsLayer): boolean {
     }
 
     case 'arrow': {
-      // arrowColor is auto-seeded on mode entry from the line paint (as
-      // clusterColor/heightColumn); diverging from the seed is destructible
-      // state. Every editor-persisted builder field (arrow*, cluster*,
-      // heightColumn, symbol.*) is covered by this switch.
+      // An arrowColor equal to the line colour (older maps seeded it on mode
+      // entry) is not customization; a diverging one is destructible state.
+      // Every editor-persisted builder field (arrow*, cluster*, heightColumn,
+      // symbol.*) is covered by this switch.
       const seededArrowColor = typeof paint['line-color'] === 'string'
         ? paint['line-color']
         : MAP_COLORS.default.fill;
@@ -391,38 +402,47 @@ export function hasCustomizedRenderAsStyle(layer: RenderAsLayer): boolean {
   }
 }
 
-export function buildRenderAsPatch(layer: RenderAsLayer, renderAs: RenderAsId): RenderAsMutation | null {
+export function buildRenderAsPatch(
+  layer: RenderAsLayer,
+  renderAs: RenderAsId,
+  options: { heightColumn?: string } = {},
+): RenderAsMutation | null {
   if (!getRenderAsOptions(layer).some((option) => option.id === renderAs)) return null;
 
   if (renderAs === 'point') {
+    const current = getCurrentRenderAs(layer);
     const style = styleWithoutRenderMode(layer, {
-      heatmapPaint: getCurrentRenderAs(layer) === 'heatmap' ? { ...(layer.paint ?? {}) } : layer.style_config?.heatmapPaint,
+      heatmapPaint: heatmapPaintStash(layer),
       savedCirclePaint: undefined,
       symbol: undefined,
     });
-    const savedCirclePaint = layer.style_config?.savedCirclePaint;
+    // Cluster draws its unclustered points with the layer's own circle paint.
+    const circlePaint = current === 'cluster' ? layer.paint : stashedCirclePaint(layer);
     return {
       adapterType: 'circle',
       patch: {
         layer_type: vectorLayerType(layer),
-        paint: savedCirclePaint && Object.keys(savedCirclePaint).length > 0
-          ? { ...savedCirclePaint }
-          : { ...DEFAULT_CIRCLE_PAINT },
+        paint: { ...(circlePaint ?? DEFAULT_CIRCLE_PAINT) },
         style_config: style,
       },
     };
   }
 
   if (renderAs === 'symbol') {
+    // Only a heatmap holds non-circle paint; every other mode's live paint is the circle paint.
+    const circlePaint = getCurrentRenderAs(layer) === 'heatmap'
+      ? stashedCirclePaint(layer)
+      : layer.paint;
     return {
       adapterType: 'symbol',
       patch: {
         layer_type: vectorLayerType(layer),
-        paint: { ...(layer.style_config?.savedCirclePaint ?? layer.paint ?? DEFAULT_CIRCLE_PAINT) },
+        paint: { ...(circlePaint ?? DEFAULT_CIRCLE_PAINT) },
         style_config: compactRecord({
           ...styleRecord(layer),
           render_mode: 'symbol',
-          savedCirclePaint: layer.style_config?.savedCirclePaint ?? { ...(layer.paint ?? DEFAULT_CIRCLE_PAINT) },
+          heatmapPaint: heatmapPaintStash(layer),
+          savedCirclePaint: { ...(circlePaint ?? DEFAULT_CIRCLE_PAINT) },
           symbol: layer.style_config?.symbol ?? {
             iconImage: 'marker',
             iconSize: 1,
@@ -457,10 +477,10 @@ export function buildRenderAsPatch(layer: RenderAsLayer, renderAs: RenderAsId): 
   }
 
   if (renderAs === 'cluster') {
-    const circlePaint = { ...(layer.paint ?? DEFAULT_CIRCLE_PAINT) };
-    const clusterColor = typeof circlePaint['circle-color'] === 'string'
-      ? circlePaint['circle-color']
-      : DEFAULT_CIRCLE_PAINT['circle-color'];
+    // Heatmap paint holds heatmap-* keys; the circle paint is stashed.
+    const circlePaint = getCurrentRenderAs(layer) === 'heatmap'
+      ? { ...(stashedCirclePaint(layer) ?? DEFAULT_CIRCLE_PAINT) }
+      : { ...(layer.paint ?? DEFAULT_CIRCLE_PAINT) };
     return {
       adapterType: 'circle',
       patch: {
@@ -470,10 +490,10 @@ export function buildRenderAsPatch(layer: RenderAsLayer, renderAs: RenderAsId): 
           ...builderRecord(layer),
           clusterRadius: layer.style_config?.builder?.clusterRadius ?? 48,
           clusterMaxZoom: layer.style_config?.builder?.clusterMaxZoom ?? 14,
-          clusterColor: layer.style_config?.builder?.clusterColor ?? clusterColor,
+          // Unset until chosen, so cluster bubbles follow later circle-color edits.
           clusterTextColor: layer.style_config?.builder?.clusterTextColor ?? MAP_COLORS.cluster.text,
           clusterTextSize: layer.style_config?.builder?.clusterTextSize ?? 12,
-        }, { render_mode: 'cluster' }),
+        }, { render_mode: 'cluster', savedCirclePaint: undefined, heatmapPaint: heatmapPaintStash(layer) }),
       },
     };
   }
@@ -489,16 +509,13 @@ export function buildRenderAsPatch(layer: RenderAsLayer, renderAs: RenderAsId): 
   }
 
   if (renderAs === 'arrow') {
-    const lineColor = typeof layer.paint?.['line-color'] === 'string'
-      ? layer.paint['line-color']
-      : MAP_COLORS.default.fill;
     return {
       adapterType: 'line',
       patch: {
         layer_type: vectorLayerType(layer),
+        // arrowColor stays unset until chosen, so arrows follow later line-color edits.
         style_config: styleWithBuilder(layer, {
           ...builderRecord(layer),
-          arrowColor: layer.style_config?.builder?.arrowColor ?? lineColor,
           arrowSize: layer.style_config?.builder?.arrowSize ?? DEFAULT_ARROW_SIZE,
           arrowSpacing: layer.style_config?.builder?.arrowSpacing ?? DEFAULT_ARROW_SPACING,
         }, { render_mode: 'arrow' }),
@@ -535,7 +552,7 @@ export function buildRenderAsPatch(layer: RenderAsLayer, renderAs: RenderAsId): 
     }
 
     if (renderAs === 'extrusion-3d') {
-      builder.heightColumn = numericHeightColumn(layer);
+      builder.heightColumn = options.heightColumn ?? numericHeightColumn(layer);
       builder.heightScale = typeof priorHeightScale === 'number' ? priorHeightScale : 1;
       builder.extrusionMinZoom = typeof priorExtrusionMinZoom === 'number' ? priorExtrusionMinZoom : DEFAULT_EXTRUSION_MIN_ZOOM;
       // The shared extrusion-opacity cap, not a hardcoded value.

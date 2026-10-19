@@ -10,6 +10,7 @@ import {
   makeBuilderMap,
   makeMapLibreMock,
 } from '@/components/builder/__tests__/fixtures/map-builder-fixtures';
+import type { FilterSpecification } from 'maplibre-gl';
 import type { MapLayerResponse, MapResponse } from '@/types/api';
 
 const makeMockLayer = makeBuilderLayer;
@@ -487,6 +488,91 @@ describe('useBuilderLayers', () => {
     expect(result.current.hasUnsavedChanges).toBe(true);
   });
 
+  it('chatLayerActions render switch keeps a filter applied earlier in the same turn', () => {
+    const layer = makeMockLayer({ id: 'layer-1', dataset_geometry_type: 'Point', paint: {} });
+    const { result } = renderBuilderLayers(makeMapData([layer]));
+    const filter = ['==', ['get', 'kind'], 'cafe'] as FilterSpecification;
+
+    act(() => {
+      result.current.chatLayerActions.onFilterChange('layer-1', filter);
+      result.current.chatLayerActions.onRenderAsChange?.('layer-1', 'heatmap');
+    });
+
+    const updated = result.current.localLayers[0];
+    expect(updated.style_config?.render_mode).toBe('heatmap');
+    expect(updated.filter).toEqual(filter);
+  });
+
+  it('chatLayerActions extrusion uses the requested height column', () => {
+    const layer = makeMockLayer({
+      dataset_geometry_type: 'POLYGON',
+      dataset_column_info: [{ name: 'objectid', type: 'integer' }, { name: 'floors', type: 'integer' }],
+    });
+    const { result } = renderBuilderLayers(makeMapData([layer]));
+
+    act(() => {
+      result.current.chatLayerActions.onRenderAsChange?.('layer-1', 'extrusion-3d', { heightColumn: 'floors' });
+    });
+
+    expect(result.current.localLayers[0].style_config?.builder?.heightColumn).toBe('floors');
+  });
+
+  it('chatLayerActions render switch to the current mode changes nothing', () => {
+    const layer = makeMockLayer({ id: 'layer-1', dataset_geometry_type: 'Point', paint: { 'circle-color': '#2255aa' } });
+    const { result } = renderBuilderLayers(makeMapData([layer]));
+
+    const switched: Array<boolean | undefined> = [];
+    act(() => {
+      switched.push(result.current.chatLayerActions.onRenderAsChange?.('layer-1', 'point'));
+      // A stray height column only matters for extrusion.
+      switched.push(result.current.chatLayerActions.onRenderAsChange?.('layer-1', 'point', { heightColumn: 'floors' }));
+    });
+
+    expect(switched).toEqual([false, false]);
+    expect(result.current.localLayers[0].paint).toEqual({ 'circle-color': '#2255aa' });
+    expect(result.current.hasUnsavedChanges).toBe(false);
+  });
+
+  it('a data-driven colour after leaving a heatmap keeps its tuning for the return trip', () => {
+    const tuned = { 'heatmap-radius': 45, 'heatmap-intensity': 2 };
+    const layer = makeMockLayer({
+      id: 'layer-1',
+      dataset_geometry_type: 'Point',
+      paint: tuned,
+      style_config: { render_mode: 'heatmap', savedCirclePaint: { 'circle-color': '#2255aa' } } as MapLayerResponse['style_config'],
+    });
+    const { result } = renderBuilderLayers(makeMapData([layer]));
+    const categorical = { mode: 'categorical', column: 'kind' } as NonNullable<MapLayerResponse['style_config']>;
+
+    act(() => {
+      const actions = result.current.chatLayerActions;
+      actions.onRenderAsChange?.('layer-1', 'point');
+      actions.onStyleConfigChange('layer-1', categorical, { 'circle-color': ['match', ['get', 'kind'], 'a', '#dc2626', '#6b7280'] });
+    });
+    act(() => {
+      result.current.chatLayerActions.onRenderAsChange?.('layer-1', 'heatmap');
+    });
+
+    expect(result.current.localLayers[0].paint).toEqual(tuned);
+  });
+
+  it('chatLayerActions.getLayer sees edits made earlier in the same tick', () => {
+    const layer = makeMockLayer({ id: 'layer-1', dataset_geometry_type: 'Point', paint: {} });
+    const { result } = renderBuilderLayers(makeMapData([layer]));
+    const seen: Array<MapLayerResponse | undefined> = [];
+
+    act(() => {
+      const actions = result.current.chatLayerActions;
+      actions.onPaintChange('layer-1', { 'circle-color': '#dc2626' });
+      seen.push(actions.getLayer?.('layer-1'));
+      actions.onRenderAsChange?.('layer-1', 'heatmap');
+      seen.push(actions.getLayer?.('layer-1'));
+    });
+
+    expect(seen[0]?.paint).toEqual({ 'circle-color': '#dc2626' });
+    expect(seen[1]?.style_config?.render_mode).toBe('heatmap');
+  });
+
   it('handleToggleExpand sets expandedLayerId and defaults to style tab', () => {
     const layer = makeMockLayer();
     const mapData = makeMapData([layer]);
@@ -609,7 +695,6 @@ describe('useBuilderLayers', () => {
         handleAddDataset: result.current.handleAddDataset,
         handleAiRemoveLayer: result.current.handleAiRemoveLayer,
         handleToggleLegend: result.current.handleToggleLegend,
-        handleRenderModeChange: result.current.handleRenderModeChange,
         handleRenderAsChange: result.current.handleRenderAsChange,
         handleDuplicateRendering: result.current.handleDuplicateRendering,
         dispatchLayerAction: result.current.dispatchLayerAction,

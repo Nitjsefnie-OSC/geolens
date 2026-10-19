@@ -11,6 +11,7 @@ import {
   hasCustomizedRenderAsStyle,
 } from '../renderAs';
 import type { MapLayerResponse, StyleConfig } from '@/types/api';
+import { DEFAULT_CIRCLE_PAINT } from '../layer-adapters/builder-defaults';
 
 function layer(overrides: Partial<MapLayerResponse> = {}): MapLayerResponse {
   return {
@@ -252,12 +253,13 @@ describe('renderAs view model', () => {
         builder: expect.objectContaining({
           clusterRadius: 48,
           clusterMaxZoom: 14,
-          clusterColor: '#2255aa',
           clusterTextColor: '#ffffff',
           clusterTextSize: 12,
         }),
       }),
     }));
+    // Unset, so the bubbles keep following the point colour.
+    expect(mutation?.patch.style_config?.builder).not.toHaveProperty('clusterColor');
     for (const key of Object.keys(mutation?.patch ?? {})) {
       expect(RENDER_AS_WRITABLE_FIELDS).toContain(key);
     }
@@ -269,6 +271,72 @@ describe('renderAs view model', () => {
         }),
       }),
     );
+  });
+
+  it('keeps the circle paint when leaving cluster for points', () => {
+    const circlePaint = { 'circle-color': ['match', ['get', 'ada'], 1, '#16a34a', '#6b7280'], 'circle-radius': 5 };
+    const clustered = layer({
+      dataset_geometry_type: 'POINT',
+      dataset_feature_count: 100,
+      paint: circlePaint,
+      style_config: { render_mode: 'cluster' } as StyleConfig,
+    });
+
+    expect(buildRenderAsPatch(clustered, 'point')?.patch.paint).toEqual(circlePaint);
+  });
+
+  it('enters symbols from cluster with the live circle paint, not a stale stash', () => {
+    const clustered = layer({
+      dataset_geometry_type: 'POINT',
+      dataset_feature_count: 100,
+      paint: { 'circle-color': '#dc2626' },
+      style_config: { render_mode: 'cluster', savedCirclePaint: { 'circle-color': '#2255aa' } } as StyleConfig,
+    });
+
+    const mutation = buildRenderAsPatch(clustered, 'symbol');
+
+    expect(mutation?.patch.paint).toEqual({ 'circle-color': '#dc2626' });
+    expect(mutation?.patch.style_config?.savedCirclePaint).toEqual({ 'circle-color': '#dc2626' });
+  });
+
+  it('treats an empty circle stash as none when leaving a heatmap', () => {
+    const heatmap = layer({
+      dataset_geometry_type: 'POINT',
+      dataset_feature_count: 100,
+      paint: { 'heatmap-radius': 30 },
+      style_config: { render_mode: 'heatmap', savedCirclePaint: {} } as StyleConfig,
+    });
+
+    expect(buildRenderAsPatch(heatmap, 'symbol')?.patch.paint).toEqual(DEFAULT_CIRCLE_PAINT);
+    expect(buildRenderAsPatch(heatmap, 'cluster')?.patch.paint).toEqual(DEFAULT_CIRCLE_PAINT);
+  });
+
+  it.each(['symbol', 'cluster'] as const)('keeps a tuned heatmap for a return trip through %s', (target) => {
+    const tuned = { 'heatmap-radius': 45, 'heatmap-intensity': 2 };
+    const heatmap = layer({
+      dataset_geometry_type: 'POINT',
+      dataset_feature_count: 100,
+      paint: tuned,
+      style_config: { render_mode: 'heatmap', savedCirclePaint: { 'circle-color': '#2255aa' } } as StyleConfig,
+    });
+
+    const away = buildRenderAsPatch(heatmap, target);
+    expect(away?.patch.style_config?.heatmapPaint).toEqual(tuned);
+    const back = buildRenderAsPatch({ ...heatmap, ...away?.patch } as MapLayerResponse, 'heatmap');
+    expect(back?.patch.paint).toEqual(tuned);
+  });
+
+  it('enters cluster from heatmap with the stashed circle paint', () => {
+    const heatmap = layer({
+      dataset_geometry_type: 'POINT',
+      dataset_feature_count: 100,
+      paint: { 'heatmap-radius': 30 },
+      style_config: { render_mode: 'heatmap', savedCirclePaint: { 'circle-color': '#2255aa' } } as StyleConfig,
+    });
+
+    expect(buildRenderAsPatch(heatmap, 'cluster')?.patch.paint).toEqual({ 'circle-color': '#2255aa' });
+    // The stash only belongs to heatmap mode.
+    expect(buildRenderAsPatch(heatmap, 'cluster')?.patch.style_config).not.toHaveProperty('savedCirclePaint');
   });
 
   it('builds polygon fill, stroke, and 3D extrusion patches without is_3d', () => {
@@ -309,12 +377,13 @@ describe('renderAs view model', () => {
       style_config: expect.objectContaining({
         render_mode: 'arrow',
         builder: expect.objectContaining({
-          arrowColor: '#2255aa',
           arrowSize: 14,
           arrowSpacing: 80,
         }),
       }),
     }));
+    // Unset, so the arrows keep following the line colour.
+    expect(mutation?.patch.style_config?.builder).not.toHaveProperty('arrowColor');
     for (const key of Object.keys(mutation?.patch ?? {})) {
       expect(RENDER_AS_WRITABLE_FIELDS).toContain(key);
     }

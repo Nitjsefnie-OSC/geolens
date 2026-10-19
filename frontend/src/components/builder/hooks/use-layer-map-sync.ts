@@ -231,14 +231,14 @@ export function useLayerMapSync(
   setLocalLayers: React.Dispatch<React.SetStateAction<MapLayerResponse[]>>,
   setHasUnsavedChanges: React.Dispatch<React.SetStateAction<boolean>>,
   mapInstanceRef: React.RefObject<MaplibreMap | null>,
+  layersRef: React.RefObject<MapLayerResponse[]>,
 ) {
-  // Mirror current layers in a ref so memoized callbacks read fresh state
-  // without `localLayers` in their deps, which would invalidate them on every
-  // mutation and re-render every StackRow.
-  const layersRef = useRef(localLayers);
+  // Callbacks read layers through the caller's ref, so `localLayers` stays out
+  // of their deps (which would re-render every StackRow) and an edit's same-tick
+  // write is visible to the caller's other handlers.
   useLayoutEffect(() => {
     layersRef.current = localLayers;
-  }, [localLayers]);
+  }, [layersRef, localLayers]);
 
   // Map writes deferred to `idle` because the style was mid-swap, keyed by
   // layer id and replayed in order. See applyLayerUpdate.
@@ -348,7 +348,7 @@ export function useLayerMapSync(
       }
       writeToMap(map);
     },
-    [setLocalLayers, setHasUnsavedChanges, mapInstanceRef],
+    [setLocalLayers, setHasUnsavedChanges, mapInstanceRef, layersRef],
   );
 
   const handleToggleVisibility = useCallback(
@@ -357,7 +357,7 @@ export function useLayerMapSync(
       const nextVisible = visible !== undefined ? visible : !current?.visible;
       applyLayerUpdate(layerId, (l) => ({ ...l, visible: nextVisible }), writeBuilderLayer);
     },
-    [applyLayerUpdate],
+    [applyLayerUpdate, layersRef],
   );
 
   const handlePaintChange = useCallback(
@@ -372,7 +372,7 @@ export function useLayerMapSync(
         }),
       );
     },
-    [applyLayerUpdate],
+    [applyLayerUpdate, layersRef],
   );
 
   const handleStyleConfigChange = useCallback(
@@ -394,22 +394,19 @@ export function useLayerMapSync(
         layerId,
         (l) => {
           // `replace` restores the config verbatim, as Revert-to-saved must (not
-          // keeping the draft's style_config.builder). The default branch below
-          // preserves the builder when the incoming config omits one, so setting a
-          // data-driven color doesn't wipe your outline width; on revert that
-          // would strand a discarded builder-only edit and keep the layer dirty.
+          // keeping the draft's builder or stash). The default branch keeps the
+          // builder and the heatmap stash when the incoming config omits them, so
+          // a data-driven color doesn't wipe your outline width or a heatmap's
+          // tuning for a return trip; on revert that would strand discarded edits
+          // and keep the layer dirty.
+          const carried: Partial<StyleConfig> = {};
+          if (config?.builder === undefined && l.style_config?.builder) carried.builder = l.style_config.builder;
+          if (config?.heatmapPaint === undefined && l.style_config?.heatmapPaint) carried.heatmapPaint = l.style_config.heatmapPaint;
           let mergedConfig: StyleConfig | null = opts?.replace
             ? config
             : config
-              ? {
-                  ...config,
-                  ...(config.builder === undefined && l.style_config?.builder
-                    ? { builder: l.style_config.builder }
-                    : {}),
-                }
-              : l.style_config?.builder
-                ? ({ builder: l.style_config.builder } as StyleConfig)
-                : null;
+              ? { ...config, ...carried }
+              : Object.keys(carried).length > 0 ? (carried as StyleConfig) : null;
           if (isDataDrivenColor && mergedConfig?.builder?.lineGradient) {
             const { lineGradient: _droppedLineGradient, ...restBuilder } = mergedConfig.builder;
             mergedConfig = {
@@ -449,7 +446,7 @@ export function useLayerMapSync(
         },
       );
     },
-    [applyLayerUpdate],
+    [applyLayerUpdate, layersRef],
   );
 
   const handleFilterChange = useCallback(
