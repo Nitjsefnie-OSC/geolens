@@ -271,6 +271,13 @@ def _is_env_only() -> bool:
     return settings.env_only_config
 
 
+def _request_host_origin(request: Request) -> str | None:
+    """``scheme://host`` the request reached GeoLens at, from the proxy headers."""
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
+    return f"{scheme}://{host}" if host else None
+
+
 def _request_origin_decision(request: Request | None) -> tuple[str | None, bool]:
     """``(origin, allowlist_rejected)`` derived from the request headers.
 
@@ -301,11 +308,9 @@ def _request_origin_decision(request: Request | None) -> tuple[str | None, bool]
                 candidate = f"{parsed.scheme}://{parsed.netloc}"
 
     if candidate is None:
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
-        if not host:
+        candidate = _request_host_origin(request)
+        if candidate is None:
             return None, False
-        candidate = f"{scheme}://{host}"
 
     # Enforce CORS allowlist when configured.
     allowlist = settings.cors_origins_list
@@ -640,6 +645,33 @@ async def get_public_app_url(
         db, request=request, for_external_use=for_external_use
     )
     return app_url
+
+
+async def get_browser_reachable_app_url(
+    db: AsyncSession,
+    *,
+    request: Request | None = None,
+) -> str | None:
+    """The app URL for a document another machine loads, such as an exported style.
+
+    The configured ``PUBLIC_APP_URL`` (or a validated tenant origin) is used
+    unless it is loopback, such as the shipped Compose default
+    ``http://localhost:8080`` left on a remote install. Otherwise the URL is the
+    host the request reached GeoLens at, from Host/X-Forwarded-Host, keeping
+    the configured path. Origin and Referer name the consumer's page on a
+    cross-origin fetch, so they are never used. None when neither gives a
+    usable host.
+    """
+    configured = await get_shareable_app_url(db, request=request)
+    if configured and not is_loopback_host(urlsplit(configured).hostname or ""):
+        return configured
+    derived = _request_host_origin(request) if request is not None else None
+    hostname = urlsplit(derived).hostname if derived else None
+    if hostname and hostname not in ("api", "backend"):
+        if not is_loopback_host(hostname) or configured is None:
+            path = urlsplit(configured).path.rstrip("/") if configured else ""
+            return f"{derived}{path}"
+    return configured
 
 
 async def get_dataset_service_url(

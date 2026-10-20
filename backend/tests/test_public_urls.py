@@ -568,3 +568,72 @@ async def test_get_public_api_url_propagates_for_external_use_flag(
         await public_urls.get_public_api_url(
             AsyncMock(), request=request, for_external_use=True
         )
+
+
+@pytest.mark.parametrize(
+    ("configured", "headers", "expected"),
+    [
+        # The shipped default on a remote install: the host the request reached.
+        (
+            "http://localhost:8080",
+            {"host": "maps.example.com"},
+            "https://maps.example.com",
+        ),
+        # A sub-path install keeps its path when only the host is replaced.
+        (
+            "http://localhost:8080/geolens",
+            {"host": "maps.example.com"},
+            "https://maps.example.com/geolens",
+        ),
+        # Local dev: the caller is on the same machine, so loopback is right.
+        ("http://localhost:8080", {"host": "localhost:8080"}, "http://localhost:8080"),
+        # Internal container hostnames aren't reachable from outside.
+        ("http://localhost:8080", {"host": "api:8000"}, "http://localhost:8080"),
+        (None, {"host": "api:8000"}, None),
+        # Unset: a cross-origin consumer's Origin and Referer never win.
+        (
+            None,
+            {
+                "host": "maps.example.com",
+                "origin": "https://consumer.example",
+                "referer": "https://consumer.example/editor",
+            },
+            "https://maps.example.com",
+        ),
+        (
+            "http://localhost:8080",
+            {
+                "host": "api:8000",
+                "x-forwarded-host": "maps.example.com",
+                "x-forwarded-proto": "https",
+                "origin": "https://consumer.example",
+            },
+            "https://maps.example.com",
+        ),
+        # A real configured URL always wins, sub-path included.
+        (
+            "https://example.com/geolens",
+            {"host": "other.example.com"},
+            "https://example.com/geolens",
+        ),
+    ],
+)
+async def test_browser_reachable_app_url(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    headers: dict[str, str],
+    expected: str | None,
+) -> None:
+    monkeypatch.setattr(public_urls.settings, "env_only_config", True, raising=False)
+    monkeypatch.setattr(
+        public_urls.settings, "public_app_url", configured, raising=False
+    )
+    monkeypatch.setattr(public_urls.settings, "public_api_url", None, raising=False)
+    monkeypatch.setattr(public_urls.settings, "public_base_url", None, raising=False)
+    monkeypatch.setattr(public_urls.settings, "cors_allowed_origins", "", raising=False)
+
+    url = await public_urls.get_browser_reachable_app_url(
+        AsyncMock(), request=_make_request(netloc="api:8000", headers=headers)
+    )
+
+    assert url == expected

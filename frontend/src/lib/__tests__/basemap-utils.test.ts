@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { StyleSpecification } from 'maplibre-gl';
 import {
   toMaplibreStyle,
@@ -66,6 +66,36 @@ describe('toMaplibreStyle', () => {
       type: 'raster',
       source: 'basemap',
     });
+  });
+
+  it('points raster-basemap glyphs at the bundled same-origin fonts', () => {
+    const result = toMaplibreStyle('https://tile.openstreetmap.org/{z}/{x}/{y}.png') as StyleSpecification;
+    expect(result.glyphs).toBe(`${window.location.origin}/fonts/{fontstack}/{range}.pbf`);
+  });
+
+  it.each([
+    ['/geolens/', '/geolens/'],
+    ['/geolens', '/geolens/'],
+    ['./', '/'],
+    ['', '/'],
+  ])('keeps the build base %j in the bundled glyph URL', (base, path) => {
+    vi.stubEnv('BASE_URL', base);
+    try {
+      const result = toMaplibreStyle('https://tile.openstreetmap.org/{z}/{x}/{y}.png') as StyleSpecification;
+      expect(result.glyphs).toBe(`${window.location.origin}${path}fonts/{fontstack}/{range}.pbf`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('uses an absolute build base as is', () => {
+    vi.stubEnv('BASE_URL', 'https://static.example.com/app/');
+    try {
+      const result = toMaplibreStyle('https://tile.openstreetmap.org/{z}/{x}/{y}.png') as StyleSpecification;
+      expect(result.glyphs).toBe('https://static.example.com/app/fonts/{fontstack}/{range}.pbf');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('includes attribution on raster source when provided', () => {
@@ -360,7 +390,7 @@ describe('BLANK_BASEMAP_ID', () => {
     // label layers (companion `*-label`, symbol-mode text) are added to this
     // style, and MapLibre cannot render any text-field without one. Glyphs are
     // fetched lazily, so a label-free blank map still makes no font requests.
-    expect(result.glyphs).toBe('https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf');
+    expect(result.glyphs).toBe(`${window.location.origin}/fonts/{fontstack}/{range}.pbf`);
   });
 
   it('toMaplibreStyle blank ignores attribution param', () => {
