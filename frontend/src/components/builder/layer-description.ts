@@ -9,7 +9,7 @@ import type {
 import type { TileToken, UnsignedRasterTileTemplate } from '@/api/tiles';
 import { effectiveDemRenderMode } from '@/lib/dem-render-mode';
 import { isFolderGroupLayer } from '@/lib/layer-capabilities';
-import { sanitizeNullableNumericFilter } from '@/lib/maplibre-filter-utils';
+import { maplibreFilterToCql2, sanitizeNullableNumericFilter } from '@/lib/maplibre-filter-utils';
 import { extractPlaceholders } from '@/lib/popup-template';
 import { buildClusterTileUrl, buildSignedTileUrl, getMvtSourceLayerName } from '@/lib/tile-utils';
 import type { LabelConfig, PopupConfig, StyleConfig } from '@/types/api';
@@ -248,6 +248,32 @@ function clusterOptions(layer: SyncLayerInput) {
   return getClusterSourceOptions({ style_config: layer.style_config } as AdapterLayerInput);
 }
 
+// The route's limits on a filter: its length and its bind parameters.
+const MAX_CLUSTER_FILTER_CHARS = 4096;
+const MAX_CLUSTER_FILTER_VALUES = 1000;
+
+function countValues(node: unknown): number {
+  if (Array.isArray(node)) return node.reduce((sum: number, child) => sum + countValues(child), 0);
+  if (node && typeof node === 'object') {
+    return Object.entries(node).reduce((sum, [key, child]) => sum + (key === 'property' || key === 'op' ? 0 : countValues(child)), 0);
+  }
+  return 1;
+}
+
+/**
+ * The layer filter as the cluster tile route's CQL2-JSON `filter`, or undefined when there is
+ * none, it has no CQL2 form, or it exceeds the route's limits. Bubble counts then include the
+ * points the filter hides, as before.
+ */
+function serverClusterFilter(layer: SyncLayerInput): string | undefined {
+  const cql2 = maplibreFilterToCql2(layer.filter, layer.dataset_column_info);
+  if (!cql2 || cql2 === 'unsupported') return undefined;
+  const json = JSON.stringify(cql2);
+  return json.length <= MAX_CLUSTER_FILTER_CHARS && countValues(cql2) <= MAX_CLUSTER_FILTER_VALUES
+    ? json
+    : undefined;
+}
+
 // A source filter runs once, at load, on the raw GeoJSON feature: no camera state and no tile geometry.
 const LAYER_ONLY_OPERATORS = new Set([
   'zoom',
@@ -363,7 +389,7 @@ function vectorSource(
   return {
     type: 'vector',
     tiles: [serverCluster
-      ? buildClusterTileUrl(layer.dataset_table_name, vectorToken, tileBaseUrl, tileVersion, clusterOptions(layer), cols)
+      ? buildClusterTileUrl(layer.dataset_table_name, vectorToken, tileBaseUrl, tileVersion, { ...clusterOptions(layer), filter: serverClusterFilter(layer) }, cols)
       : buildSignedTileUrl(layer.dataset_table_name, vectorToken, tileBaseUrl, tileVersion, cols)],
     minzoom: VECTOR_SOURCE_MINZOOM,
     maxzoom: serverCluster ? CLUSTER_SOURCE_MAXZOOM : VECTOR_SOURCE_MAXZOOM,

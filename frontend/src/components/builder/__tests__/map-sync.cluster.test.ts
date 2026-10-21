@@ -184,6 +184,71 @@ describe('syncLayersToMap cluster rendering', () => {
   // Server-cluster sources forward the data-driven / popup columns
   // as cols= so UNCLUSTERED features (past cluster max zoom) keep the
   // attributes their categorical paint and popups reference.
+  it('sends the layer filter to the server-cluster tile URL as CQL2', () => {
+    const map = makeMockMap();
+    const layer = makeLayer({
+      feature_count: 20_000,
+      filter: ['==', ['get', 'kind'], 'a'] as SyncLayerInput['filter'],
+    });
+
+    syncLayersToMap(map, [layer], tokenMap(layer), undefined, { current: new Set() }, { current: '' });
+
+    expect(buildClusterTileUrl).toHaveBeenLastCalledWith(
+      'points',
+      VECTOR_TOKEN,
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ filter: JSON.stringify({ op: '=', args: [{ property: 'kind' }, 'a'] }) }),
+      ['kind'],
+    );
+  });
+
+  it('types temporal literals in the server-cluster filter from the layer column types', () => {
+    const map = makeMockMap();
+    const layer = makeLayer({
+      feature_count: 20_000,
+      filter: ['>=', ['get', 'seen'], '2004-01-01'] as SyncLayerInput['filter'],
+      dataset_column_info: [{ name: 'seen', type: 'date' }],
+    });
+
+    syncLayersToMap(map, [layer], tokenMap(layer), undefined, { current: new Set() }, { current: '' });
+
+    const options = vi.mocked(buildClusterTileUrl).mock.lastCall?.[4];
+    expect(JSON.parse(options?.filter ?? 'null')).toEqual({
+      op: '>=',
+      args: [{ property: 'seen' }, { date: '2004-01-01' }],
+    });
+  });
+
+  it('leaves a filter off the server-cluster URL when it exceeds the route limits', () => {
+    const map = makeMockMap();
+    const many = Array.from({ length: 150 }, (_, i) => `a-value-that-is-long-${i}-xxxxxxxxxxxx`);
+    const layer = makeLayer({
+      feature_count: 20_000,
+      filter: ['in', ['get', 'kind'], ...many] as unknown as SyncLayerInput['filter'],
+    });
+
+    syncLayersToMap(map, [layer], tokenMap(layer), undefined, { current: new Set() }, { current: '' });
+
+    expect(vi.mocked(buildClusterTileUrl).mock.lastCall?.[4]?.filter).toBeUndefined();
+  });
+
+  it('drops points with a missing value for a less-than comparison, as the layer filter does', () => {
+    const map = makeMockMap();
+    const layer = makeLayer({
+      feature_count: 20_000,
+      filter: ['<', ['get', 'score'], 5] as SyncLayerInput['filter'],
+    });
+
+    syncLayersToMap(map, [layer], tokenMap(layer), undefined, { current: new Set() }, { current: '' });
+
+    // The layer's sanitized filter gives a missing value a high fallback, so it fails `<`.
+    expect(JSON.parse(vi.mocked(buildClusterTileUrl).mock.lastCall?.[4]?.filter ?? 'null')).toEqual({
+      op: '<',
+      args: [{ property: 'score' }, 5],
+    });
+  });
+
   it('forwards data-driven columns to the server-cluster tile URL', () => {
     const map = makeMockMap();
     const layer = makeLayer({
