@@ -2231,3 +2231,40 @@ async def test_an_endpoint_write_waits_for_a_model_reset_in_progress(
             resp = await reset
 
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.anyio
+async def test_sync_log_level_applies_a_level_saved_by_another_process(monkeypatch):
+    """Only the saving process runs _on_change; peers converge via the sync."""
+    import logging
+
+    from app.core import persistent_config as pc
+
+    root = logging.getLogger()
+    original = root.level
+
+    async def _stored(_db):
+        return "debug"
+
+    monkeypatch.setattr(pc.LOG_LEVEL, "get", _stored)
+    root.setLevel(logging.WARNING)
+    try:
+        await pc.sync_log_level(None)  # type: ignore[arg-type]
+        assert root.level == logging.DEBUG
+    finally:
+        root.setLevel(original)
+        pc.apply_http_logger_levels(logging.getLevelName(original))
+
+
+@pytest.mark.anyio
+async def test_the_api_warmer_applies_the_shared_log_level():
+    """Structural, because the warmer is a closure inside the API lifespan."""
+    import inspect
+
+    from app.api import main
+
+    source = inspect.getsource(main.lifespan)
+    start = source.index("async def _rate_limit_warmer")
+    end = source.index("rate_limit_warmer_task = asyncio.create_task", start)
+
+    assert "await sync_log_level(session)" in source[start:end]

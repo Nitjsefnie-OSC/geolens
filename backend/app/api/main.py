@@ -472,7 +472,8 @@ async def lifespan(app: FastAPI):
         """slowapi's sync accessors read a per-process cache that
         set()/reset() seeds for 30s on the ONE worker that wrote it — admin
         changes never propagate fleet-wide. Re-resolve from the DB (get()
-        warms the cache) on every worker, below _CACHE_TTL.
+        warms the cache) on every worker, below _CACHE_TTL. The log level
+        has the same single-process side effect, so it is re-applied here.
         """
         from app.core.db import async_session
         from app.core.persistent_config import (
@@ -480,6 +481,7 @@ async def lifespan(app: FastAPI):
             GLOBAL_RATE_LIMIT,
             LOGIN_RATE_LIMIT,
             SEMANTIC_SEARCH_RATE_LIMIT,
+            sync_log_level,
         )
 
         warmer_log = structlog.stdlib.get_logger("rate_limit_warmer")
@@ -494,6 +496,7 @@ async def lifespan(app: FastAPI):
                 async with async_session() as session:
                     for cfg in configs:
                         await cfg.get(session)
+                    await sync_log_level(session)
             except asyncio.CancelledError:
                 raise
             except (
@@ -1562,10 +1565,9 @@ init_metrics(app)
 #   "healthy" resets _last_health_alert_at so recovery gets a fresh alert.
 _last_health_alert_at: float | None = None
 _last_health_status: str = "healthy"
-# Cooldown window: emit at most one health alert per 5 minutes (low-noise
-# requirement).  Docker healthcheck polls every 10 s → at most
-# one alert per 30 polls while the system remains degraded.
-_HEALTH_ALERT_COOLDOWN_SECS: float = 300.0
+# Probes can finish out of order; an older one never moves the alert state.
+_health_probe_seq = 0
+_health_applied_seq = 0
 
 
 # Liveness, split out from readiness. `/health` 503s if the
@@ -1609,9 +1611,17 @@ async def health(request: Request):
     """Health check endpoint for ALB, Docker, and Nginx."""
     import time
 
-    from app.observability.health.service import check_health
+    from app.observability.health.service import (
+        HEALTH_ALERT_COOLDOWN_SECS,
+        check_health,
+        claim_health_alert,
+        release_health_alert,
+    )
     from fastapi.responses import JSONResponse
 
+    global _health_probe_seq, _health_applied_seq  # noqa: PLW0603
+    _health_probe_seq += 1
+    seq = _health_probe_seq
     result = await check_health()
     # Report version + build commit so a deployment can be
     # verified over HTTP (prod disables /docs). GEOLENS_BUILD_SHA is
@@ -1621,6 +1631,9 @@ async def health(request: Request):
     result["version"] = app.version
     result["build"] = os.environ.get("GEOLENS_BUILD_SHA") or None
     status_code = 200 if result["status"] == "healthy" else 503
+    if seq < _health_applied_seq:
+        return JSONResponse(content=result, status_code=status_code)
+    _health_applied_seq = seq
 
     # Emit a health-alert when degraded and the toggle is on, cooldown-deduped
     # so repeated unhealthy polls don't spam admin channels. Runs as a
@@ -1648,7 +1661,7 @@ async def health(request: Request):
         # None => no alert sent since boot/recovery → fire immediately.
         if (
             _last_health_alert_at is None
-            or now - _last_health_alert_at >= _HEALTH_ALERT_COOLDOWN_SECS
+            or now - _last_health_alert_at >= HEALTH_ALERT_COOLDOWN_SECS
         ):
             _last_health_alert_at = now
             from app.platform.notifications.events import (  # LAZY
@@ -1656,22 +1669,27 @@ async def health(request: Request):
                 emit_event_safe,
             )
 
-            _component = component
-            health_alert_task = BackgroundTask(
-                emit_event_safe,
-                event_key="health_alert",
-                build=lambda: build_event_notification(
-                    "health_alert",
-                    subject=f"GeoLens health degraded: {_component}",
-                    body=(
-                        f"The GeoLens health check reported a degraded status.\n\n"
-                        f"Failing component: {_component}"
+            # One replica wins the shared key per window, so the fleet sends a
+            # single alert.
+            if await claim_health_alert(failing):
+                _component = component
+                health_alert_task = BackgroundTask(
+                    emit_event_safe,
+                    event_key="health_alert",
+                    build=lambda: build_event_notification(
+                        "health_alert",
+                        subject=f"GeoLens health degraded: {_component}",
+                        body=(
+                            f"The GeoLens health check reported a degraded status.\n\n"
+                            f"Failing component: {_component}"
+                        ),
+                        extra={"component": _component, "status": current_status},
                     ),
-                    extra={"component": _component, "status": current_status},
-                ),
-            )
+                )
     else:
         # System is healthy: reset status so a future recurrence re-alerts.
+        if _last_health_status != "healthy":
+            await release_health_alert()
         _last_health_status = "healthy"
         _last_health_alert_at = None
 

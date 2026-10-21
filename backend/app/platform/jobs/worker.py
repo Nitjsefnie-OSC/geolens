@@ -635,6 +635,9 @@ async def main() -> None:
     # to claim a credential the API's downtime expired. EXPIRE is idempotent,
     # so the two hosts overlapping is cheap.
     credential_renewal_task = asyncio.create_task(renew_credentials_periodically())
+    from app.core.persistent_config import run_log_level_sync
+
+    log_level_task = asyncio.create_task(run_log_level_sync())
 
     try:
         shutdown_timeout = settings.worker_shutdown_timeout
@@ -716,6 +719,7 @@ async def main() -> None:
         memory_metrics_task.cancel()
         pool_metrics_task.cancel()
         credential_renewal_task.cancel()
+        log_level_task.cancel()
         health_task.cancel()
         try:
             await asyncio.gather(
@@ -723,6 +727,7 @@ async def main() -> None:
                 memory_metrics_task,
                 pool_metrics_task,
                 credential_renewal_task,
+                log_level_task,
                 health_task,
                 return_exceptions=True,
             )

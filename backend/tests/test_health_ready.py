@@ -10,16 +10,17 @@ replica, so pulling one of them fixes nothing.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.pool import NullPool, QueuePool
 from httpx import ASGITransport, AsyncClient
 
 from app.observability.health import service
 
 
-async def _answers() -> None:
+async def _answers(*_engine) -> None:
     return None
 
 
-async def _unreachable() -> None:
+async def _unreachable(*_engine) -> None:
     raise ConnectionError("unreachable")
 
 
@@ -88,24 +89,67 @@ class _Engine:
 @pytest.mark.anyio
 async def test_not_ready_when_the_catalog_table_is_missing(monkeypatch):
     """PostgreSQL returns NULL, not an error, for a relation that is gone."""
-    import app.core.db as db
-
-    monkeypatch.setattr(db, "engine", _Engine(None))
+    monkeypatch.setattr(service, "get_readiness_engine", lambda: _Engine(None))
 
     assert await service.check_readiness() == {"status": "not_ready"}
 
 
 @pytest.mark.anyio
 async def test_ready_when_the_catalog_table_resolves(monkeypatch):
-    import app.core.db as db
-
-    monkeypatch.setattr(db, "engine", _Engine("catalog.datasets"))
+    monkeypatch.setattr(
+        service, "get_readiness_engine", lambda: _Engine("catalog.datasets")
+    )
 
     assert await service.check_readiness() == {"status": "ready"}
 
 
-def test_health_ready_stays_out_of_the_published_contract():
-    """Infrastructure surface, like /health/live, so no SDK regeneration."""
-    from app.api.main import app
+@pytest.mark.anyio
+async def test_general_health_leaves_the_readiness_pool_to_readiness(monkeypatch):
+    """`/health` traffic must not queue a readiness probe behind its one slot."""
+    import app.core.db as db
 
-    assert "/health/ready" not in app.openapi()["paths"]
+    monkeypatch.setattr(db, "engine", _Engine("catalog.datasets"))
+    monkeypatch.setattr(service, "get_readiness_engine", lambda: _Engine(None))
+    monkeypatch.setattr(service, "_check_cache", _answers)
+    monkeypatch.setattr(service, "_check_storage", _answers)
+
+    result = await service.check_health()
+
+    assert result["providers"]["database"]["status"] == "ok"
+
+
+def test_readiness_engine_is_not_the_shared_engine():
+    """An exhausted request pool must not make every replica unready."""
+    import app.core.db as db
+
+    readiness_engine = service.get_readiness_engine()
+
+    assert readiness_engine is not db.engine
+    assert readiness_engine.sync_engine.pool is not db.engine.sync_engine.pool
+
+
+@pytest.mark.parametrize(
+    ("pooler", "pool_class"), [(False, QueuePool), (True, NullPool)]
+)
+def test_readiness_engine_pool(monkeypatch, pooler, pool_class):
+    from app.core.db.session import build_readiness_engine
+
+    monkeypatch.setattr("app.core.config.settings.db_use_external_pooler", pooler)
+
+    pool = build_readiness_engine().sync_engine.pool
+
+    assert isinstance(pool, pool_class)
+    if not pooler:
+        assert pool.size() == 1
+        assert pool._max_overflow == 0
+
+
+@pytest.mark.anyio
+async def test_claim_health_alert_is_granted_once_per_window(monkeypatch):
+    from app.platform.cache import provider
+    from app.platform.cache.memory import InMemoryCacheProvider
+
+    monkeypatch.setattr(provider, "_cache_provider", InMemoryCacheProvider())
+
+    assert await service.claim_health_alert(["database"]) is True
+    assert await service.claim_health_alert(["database"]) is False

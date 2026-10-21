@@ -2,13 +2,14 @@
 
 import asyncio
 import time
+import uuid
 from contextvars import ContextVar
 from typing import Any, Coroutine
 
 import structlog
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -49,15 +50,30 @@ async def _probe(name: str, coro: Coroutine[Any, Any, None]) -> dict[str, Any]:
         return result
 
 
-async def _check_database() -> None:
+_readiness_engine: AsyncEngine | None = None
+
+
+def get_readiness_engine() -> AsyncEngine:
+    """Engine whose pool is separate from the request pool's."""
+    global _readiness_engine
+    if _readiness_engine is None:
+        from app.core.db.session import build_readiness_engine
+
+        _readiness_engine = build_readiness_engine()
+    return _readiness_engine
+
+
+async def _check_database(engine: AsyncEngine | None = None) -> None:
     """Probe database health by exercising a real query path.
 
     A plain ``SELECT 1`` only verifies the connection pool; it does not
     detect a hung database, broken search_path, or missing catalog schema.
     We additionally run a tiny query against the catalog schema so a
     genuinely unhealthy DB (hung, wrong schema, locks) reports as degraded.
+    ``engine`` defaults to the request pool; readiness passes its own.
     """
-    from app.core.db import engine  # late-bind for tests
+    if engine is None:
+        from app.core.db import engine  # late-bind for tests
 
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
@@ -119,7 +135,7 @@ async def check_readiness() -> dict[str, str]:
     every replica, so neither decides whether one API process can take
     traffic; ``check_health`` still reports both.
     """
-    database = await _probe("database", _check_database())
+    database = await _probe("database", _check_database(get_readiness_engine()))
     return {"status": "ready" if database["status"] == "ok" else "not_ready"}
 
 
@@ -153,3 +169,63 @@ async def check_oidc_health(db: AsyncSession) -> dict[str, dict[str, Any]]:
     finally:
         _include_probe_errors.reset(token)
     return {p.slug: result for p, result in zip(providers, probes)}
+
+
+HEALTH_ALERT_COOLDOWN_SECS = 300
+_HEALTH_ALERT_KEY = "health_alert:sent"
+_alert_claim_token: str | None = None
+# A recovery must not run between a claim's write and its token being stored.
+_alert_claim_lock = asyncio.Lock()
+
+
+async def claim_health_alert(failing: list[str]) -> bool:
+    """True when this process should send the degraded-health alert.
+
+    With a shared cache (Redis) one replica wins the key per cooldown window,
+    so the fleet sends a single alert; the key expires on its own. Only a
+    stored key counts as another replica's claim: ``set_if_absent`` also
+    answers False when its write fails, and that must not swallow the alert.
+    Without a reachable Redis the claim is per-process.
+    """
+    global _alert_claim_token
+    if "cache" in failing:
+        return True
+
+    from app.platform.cache import get_cache
+
+    cache = get_cache()
+    token = uuid.uuid4().hex
+    try:
+        async with asyncio.timeout(HEALTH_TIMEOUT), _alert_claim_lock:
+            if await cache.set_if_absent(
+                _HEALTH_ALERT_KEY, token, ttl=HEALTH_ALERT_COOLDOWN_SECS
+            ):
+                _alert_claim_token = token
+                return True
+            # Remember the incident another replica claimed, so whichever
+            # replica sees recovery can release it.
+            _alert_claim_token = await cache.get(_HEALTH_ALERT_KEY)
+            return _alert_claim_token is None
+    except Exception as exc:  # broad: a cache fault or stall must not block the alert
+        logger.warning("health_alert_claim_failed", error=str(exc))
+        return True
+
+
+async def release_health_alert() -> None:
+    """Drop the claim for the incident this process saw, so a new incident alerts.
+
+    A claim taken for a newer incident holds a different token and stays.
+    """
+    global _alert_claim_token
+    from app.platform.cache import get_cache
+
+    try:
+        async with asyncio.timeout(HEALTH_TIMEOUT), _alert_claim_lock:
+            token, _alert_claim_token = _alert_claim_token, None
+            if token is None:
+                return
+            cache = get_cache()
+            if await cache.get(_HEALTH_ALERT_KEY) == token:
+                await cache.delete(_HEALTH_ALERT_KEY)
+    except Exception as exc:  # broad: recovery must not fail on a cache fault
+        logger.warning("health_alert_release_failed", error=str(exc))

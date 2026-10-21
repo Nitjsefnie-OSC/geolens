@@ -258,6 +258,302 @@ class TestHealthAlert:
         yield
         limiter.enabled = prev
 
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        """The shared alert key must not leak between tests."""
+        from app.platform.cache import provider
+        from app.platform.cache.memory import InMemoryCacheProvider
+
+        monkeypatch.setattr(provider, "_cache_provider", InMemoryCacheProvider())
+        monkeypatch.setattr("app.observability.health.service._alert_claim_token", None)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("failing", "write_fails", "expected_alerts"),
+        [
+            # Another replica already holds the shared claim.
+            ("database", False, 0),
+            # A cache outage makes the claim unreliable, so the alert still goes out.
+            ("cache", False, 1),
+            # A failed write is not a claim, so the alert still goes out.
+            ("database", True, 1),
+        ],
+    )
+    async def test_health_alert_with_a_held_shared_claim(
+        self, monkeypatch, failing, write_fails, expected_alerts
+    ) -> None:
+        monkeypatch.setattr("app.core.config.settings.notify_on_health_alert", True)
+        monkeypatch.setattr(
+            "app.core.config.settings.notification_admin_email", "admin@example.com"
+        )
+        from app.observability.health import service as health_svc
+        from app.platform.cache import get_cache
+        from app.platform.notifications import events as events_mod
+
+        notify_calls: list = []
+
+        async def _capture_notify(n):
+            notify_calls.append(n)
+
+        monkeypatch.setattr(events_mod, "notify", _capture_notify)
+        monkeypatch.setattr(
+            health_svc,
+            "check_health",
+            AsyncMock(
+                return_value={
+                    "status": "degraded",
+                    "providers": {failing: {"status": "error"}},
+                }
+            ),
+        )
+        if write_fails:
+            from app.platform.cache import provider
+            from app.platform.cache.memory import InMemoryCacheProvider
+
+            class _WriteFails(InMemoryCacheProvider):
+                async def set_if_absent(self, key, value, ttl=300, *, security=False):
+                    return False
+
+            monkeypatch.setattr(provider, "_cache_provider", _WriteFails())
+        else:
+            await get_cache().set_if_absent(health_svc._HEALTH_ALERT_KEY, 1, ttl=300)
+
+        import app.api.main as main_mod
+
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+        response = await _run_health(request)
+
+        assert response.status_code == 503
+        assert len(notify_calls) == expected_alerts
+
+    @pytest.mark.anyio
+    async def test_recovery_releases_the_shared_alert_claim(self, monkeypatch) -> None:
+        monkeypatch.setattr("app.core.config.settings.notify_on_health_alert", True)
+        monkeypatch.setattr(
+            "app.core.config.settings.notification_admin_email", "admin@example.com"
+        )
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.notifications import events as events_mod
+
+        notify_calls: list = []
+
+        async def _capture_notify(n):
+            notify_calls.append(n)
+
+        monkeypatch.setattr(events_mod, "notify", _capture_notify)
+        degraded = {
+            "status": "degraded",
+            "providers": {"database": {"status": "error"}},
+        }
+        healthy = {"status": "healthy", "providers": {}}
+        check = AsyncMock(side_effect=[degraded, healthy, degraded])
+        monkeypatch.setattr(health_svc, "check_health", check)
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        for _ in range(3):
+            await _run_health(request)
+
+        # The second incident starts inside the first one's cooldown window.
+        assert len(notify_calls) == 2
+
+    @pytest.mark.anyio
+    async def test_recovery_releases_a_claim_another_replica_took(
+        self, monkeypatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.cache import get_cache
+
+        degraded = {
+            "status": "degraded",
+            "providers": {"database": {"status": "error"}},
+        }
+        healthy = {"status": "healthy", "providers": {}}
+        monkeypatch.setattr(
+            health_svc, "check_health", AsyncMock(side_effect=[degraded, healthy])
+        )
+        await get_cache().set_if_absent(health_svc._HEALTH_ALERT_KEY, "other", ttl=300)
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        await _run_health(request)
+        await _run_health(request)
+
+        assert await get_cache().get(health_svc._HEALTH_ALERT_KEY) is None
+
+    @pytest.mark.anyio
+    async def test_recovery_waits_for_an_in_flight_claim(self, monkeypatch) -> None:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.cache import get_cache, provider
+        from app.platform.cache.memory import InMemoryCacheProvider
+
+        entered, proceed = asyncio.Event(), asyncio.Event()
+
+        class _SlowClaim(InMemoryCacheProvider):
+            async def set_if_absent(self, key, value, ttl=300, *, security=False):
+                entered.set()
+                await proceed.wait()
+                return await super().set_if_absent(key, value, ttl, security=security)
+
+        monkeypatch.setattr(provider, "_cache_provider", _SlowClaim())
+        degraded = {
+            "status": "degraded",
+            "providers": {"database": {"status": "error"}},
+        }
+        healthy = {"status": "healthy", "providers": {}}
+        monkeypatch.setattr(
+            health_svc, "check_health", AsyncMock(side_effect=[degraded, healthy])
+        )
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        claiming = asyncio.create_task(_run_health(request))
+        await entered.wait()
+        recovering = asyncio.create_task(_run_health(request))
+        await asyncio.sleep(0)
+        proceed.set()
+        await asyncio.gather(claiming, recovering)
+
+        assert await get_cache().get(health_svc._HEALTH_ALERT_KEY) is None
+
+    @pytest.mark.anyio
+    async def test_a_stalled_cache_does_not_hold_the_health_response(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("app.core.config.settings.notify_on_health_alert", True)
+        monkeypatch.setattr(
+            "app.core.config.settings.notification_admin_email", "admin@example.com"
+        )
+        import asyncio
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.cache import provider
+        from app.platform.cache.memory import InMemoryCacheProvider
+        from app.platform.notifications import events as events_mod
+
+        class _Stalls(InMemoryCacheProvider):
+            async def set_if_absent(self, key, value, ttl=300, *, security=False):
+                await asyncio.Event().wait()
+
+        notify_calls: list = []
+
+        async def _capture_notify(n):
+            notify_calls.append(n)
+
+        monkeypatch.setattr(provider, "_cache_provider", _Stalls())
+        monkeypatch.setattr(events_mod, "notify", _capture_notify)
+        monkeypatch.setattr(health_svc, "HEALTH_TIMEOUT", 0.05)
+        monkeypatch.setattr(
+            health_svc,
+            "check_health",
+            AsyncMock(
+                return_value={
+                    "status": "degraded",
+                    "providers": {"database": {"status": "error"}},
+                }
+            ),
+        )
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        response = await asyncio.wait_for(_run_health(request), timeout=2)
+
+        assert response.status_code == 503
+        assert len(notify_calls) == 1
+
+    @pytest.mark.anyio
+    async def test_a_slower_older_probe_does_not_undo_a_recovery(
+        self, monkeypatch
+    ) -> None:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.cache import get_cache
+
+        finish_old_probe = asyncio.Event()
+        probes = iter(["old", "new"])
+
+        async def _check_health():
+            if next(probes) == "old":
+                await finish_old_probe.wait()
+                return {
+                    "status": "degraded",
+                    "providers": {"database": {"status": "error"}},
+                }
+            return {"status": "healthy", "providers": {}}
+
+        monkeypatch.setattr(health_svc, "check_health", _check_health)
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "healthy"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        old_probe = asyncio.create_task(_run_health(request))
+        await asyncio.sleep(0)
+        await _run_health(request)
+        finish_old_probe.set()
+        response = await old_probe
+
+        assert response.status_code == 503
+        assert main_mod._last_health_status == "healthy"
+        assert await get_cache().get(health_svc._HEALTH_ALERT_KEY) is None
+
+    @pytest.mark.anyio
+    async def test_recovery_keeps_another_replicas_newer_claim(
+        self, monkeypatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        import app.api.main as main_mod
+        from app.observability.health import service as health_svc
+        from app.platform.cache import get_cache
+
+        monkeypatch.setattr(
+            health_svc,
+            "check_health",
+            AsyncMock(return_value={"status": "healthy", "providers": {}}),
+        )
+        # This process alerted for an earlier incident; another replica now
+        # holds the claim for a newer one.
+        monkeypatch.setattr(health_svc, "_alert_claim_token", "earlier")
+        await get_cache().set_if_absent(health_svc._HEALTH_ALERT_KEY, "newer", ttl=300)
+        main_mod._last_health_alert_at = None
+        main_mod._last_health_status = "degraded"
+        request = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        await _run_health(request)
+
+        assert await get_cache().get(health_svc._HEALTH_ALERT_KEY) == "newer"
+
     @pytest.mark.anyio
     async def test_health_alert_fires_on_degraded_when_toggle_on(
         self, monkeypatch
