@@ -4,6 +4,8 @@ import { LineGradientControls } from '../LineGradientControls';
 import { ZoomExpressionEditor } from '../ZoomExpressionEditor';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { MAP_COLORS } from '@/lib/map-colors';
+import { Button } from '@/components/ui/button';
 import { LINE_DASH_PRESETS, LINE_DASH_SERIALIZED, LINE_DEFAULTS, getPaintValue, getEditableNumericPaintValue } from './utils';
 import type { BaseStyleEditorProps } from './types';
 import type { BuilderStyleConfig } from '@/types/api';
@@ -22,8 +24,9 @@ export function LineEditor({
   const isWidthDataDriven = isDataDriven && layer.style_config?.target === 'width';
   const builder = styleConfig?.builder ?? {};
   const isArrow = styleConfig?.render_mode === 'arrow';
-  const arrowColor = (builder as BuilderStyleConfig).arrowColor
-    ?? (typeof paint['line-color'] === 'string' ? paint['line-color'] as string : LINE_DEFAULTS['line-color']);
+  const pickedArrowColor = (builder as BuilderStyleConfig).arrowColor;
+  const lineColor = typeof paint['line-color'] === 'string' ? paint['line-color'] as string : undefined;
+  const arrowColor = pickedArrowColor ?? lineColor ?? LINE_DEFAULTS['line-color'];
 
   return (
     <>
@@ -89,7 +92,20 @@ export function LineEditor({
             label={t('style.arrow.color')}
             color={arrowColor}
             onChange={(hex) => onBuilderChange({ arrowColor: hex } as BuilderStyleConfig)}
+            followsColor={pickedArrowColor === undefined && Array.isArray(paint['line-color'])
+              ? { background: MAP_COLORS.swatch.followsData, label: t('style.arrow.colorMatchesLine') }
+              : undefined}
           />
+          {pickedArrowColor !== undefined && (
+            <Button
+              type="button"
+              variant="link"
+              size="xs"
+              onClick={() => onBuilderChange({ arrowColor: undefined } as BuilderStyleConfig)}
+            >
+              {t('style.arrow.matchLine')}
+            </Button>
+          )}
           <SliderRow
             label={t('style.arrow.size')}
             value={(builder as BuilderStyleConfig).arrowSize ?? 14}
