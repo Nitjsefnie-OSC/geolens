@@ -540,6 +540,33 @@ describe('ChatPanel', () => {
     });
   });
 
+  it('set_opacity on a 3D extrusion also sets the extrusion opacity the layer draws with', async () => {
+    mockStreamChat.mockImplementation(async function* () {
+      yield {
+        event: 'actions',
+        data: { actions: [{ type: 'set_opacity', layer_id: 'layer-1', opacity: 0.5 }] },
+      };
+      yield { event: 'done', data: { explanation: 'Set opacity' } };
+    });
+
+    const user = userEvent.setup();
+    const props = renderPanel({
+      onOpacityChange: vi.fn(),
+      layers: [makeLayer({
+        style_config: { builder: { heightColumn: 'height', extrusionOpacity: 0.92 } } as MapLayerResponse['style_config'],
+      })],
+    });
+    await typeAndSend(user, 'make the buildings 50% transparent');
+
+    await waitFor(() => {
+      expect(props.onStyleConfigChange).toHaveBeenCalledWith(
+        'layer-1',
+        { builder: { heightColumn: 'height', extrusionOpacity: 0.5 } },
+        expect.anything(),
+      );
+    });
+  });
+
   it('clamps AI opacity actions before dispatching them to layer controls', async () => {
     mockStreamChat.mockImplementation(async function* () {
       yield {
@@ -740,6 +767,37 @@ describe('ChatPanel', () => {
       expect(props.onPaintChange).toHaveBeenCalledWith('layer-1', {
         'fill-opacity': 0.45,
         'fill-outline-color': '#111827',
+        'fill-color': '#ff0000',
+      });
+    });
+  });
+
+  it('drops fill-extrusion paint the 3D layer never reads and keeps the fill colour', async () => {
+    mockStreamChat.mockImplementation(async function* () {
+      yield {
+        event: 'actions',
+        data: {
+          actions: [
+            {
+              type: 'set_style',
+              layer_id: 'layer-1',
+              paint: { 'fill-extrusion-opacity': 0.5, 'fill-color': '#ff0000' },
+            },
+          ],
+        },
+      };
+      yield { event: 'done', data: { explanation: 'Styled' } };
+    });
+
+    const user = userEvent.setup();
+    const props = renderPanel({
+      layers: [makeLayer({ paint: { 'fill-opacity': 0.45 } })],
+    });
+    await typeAndSend(user, 'make the buildings red and see-through');
+
+    await waitFor(() => {
+      expect(props.onPaintChange).toHaveBeenCalledWith('layer-1', {
+        'fill-opacity': 0.45,
         'fill-color': '#ff0000',
       });
     });

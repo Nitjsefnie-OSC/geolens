@@ -7,6 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.csv_safety import numeric_column_names
 from app.processing.ai.chat_constants import _get_ramp_colors
+from app.processing.ai.chat_style_guards import (
+    finish_data_driven_result,
+    outline_only_error,
+    record_polygon_mode,
+)
 from app.processing.ai.schemas import ChatMapLayer
 
 if TYPE_CHECKING:
@@ -47,7 +52,9 @@ async def _build_data_driven_style(
     mode = tool_input["mode"]
     column = tool_input["column"]
     default_ramp = "Set2" if mode == "categorical" else "YlOrRd"
-    ramp = tool_input.get("ramp", default_ramp)
+    ramp = tool_input.get("ramp")
+    if not isinstance(ramp, str) or not ramp:
+        ramp = default_ramp
     method = tool_input.get("method", "quantile")
     class_count = tool_input.get("class_count", 5)
     class_count = max(2, min(class_count, 9))
@@ -73,6 +80,12 @@ async def _build_data_driven_style(
             "colour them. Switch the layer to point first to colour it by a column."
         }
 
+    color_prop = _get_color_property(
+        target_layer.geometry_type, layer_type=target_layer.layer_type
+    )
+    if error := outline_only_error(target_layer, color_prop):
+        return {"error": error}
+
     table_name = target_layer.dataset_table_name
 
     if target_layer.column_info:
@@ -82,15 +95,11 @@ async def _build_data_driven_style(
                 "error": f"Column '{column}' not found in layer. Available columns: {', '.join(sorted(col_names)[:10])}"
             }
 
-    color_prop = _get_color_property(
-        target_layer.geometry_type, layer_type=target_layer.layer_type
-    )
-
     # Defense in depth: queries stay within the validated layer set.
     allowed_tables = {layer.dataset_table_name for layer in layers}
 
     if mode == "categorical":
-        return await _build_categorical_style(
+        result = await _build_categorical_style(
             session,
             table_name,
             column,
@@ -100,18 +109,20 @@ async def _build_data_driven_style(
             allowed_tables=allowed_tables,
             port=port,
         )
-    return await _build_graduated_style(
-        session,
-        table_name,
-        column,
-        ramp,
-        method,
-        class_count,
-        color_prop,
-        layer_id,
-        allowed_tables=allowed_tables,
-        port=port,
-    )
+    else:
+        result = await _build_graduated_style(
+            session,
+            table_name,
+            column,
+            ramp,
+            method,
+            class_count,
+            color_prop,
+            layer_id,
+            allowed_tables=allowed_tables,
+            port=port,
+        )
+    return finish_data_driven_result(result, layers)
 
 
 async def _build_categorical_style(
@@ -326,6 +337,8 @@ def apply_render_as(tool_input: dict, layers: list[ChatMapLayer]) -> dict:
                 "error": f"'{height_column}' is not a numeric column on this layer."
             }
     style = dict(target.style_config or {})
+    if family == "polygon":
+        record_polygon_mode(target, style, render_as, tool_input.get("height_column"))
     if render_as in _RENDER_AS_STORED_AS_RENDER_MODE:
         style["render_mode"] = render_as
     else:

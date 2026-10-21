@@ -186,3 +186,336 @@ async def test_extrusion_by_a_text_column_is_replaced_with_a_numeric_one():
 def test_view_only_callers_cannot_switch_render_type():
     assert "set_render_as" in {t["name"] for t in select_chat_tools(can_edit=True)}
     assert "set_render_as" not in {t["name"] for t in select_chat_tools(can_edit=False)}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["categorical", "graduated"])
+async def test_data_driven_fill_colour_on_an_outline_only_polygon_is_refused(mode):
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"fillDisabled": True, "strokeDisabled": False}},
+        )
+    ]
+    style_input = {"layer_id": "layer-1", "mode": mode, "column": "height_m"}
+
+    result = await _run("set_data_driven_style", style_input, layers)
+
+    assert "outline only" in result["error"]
+    assert _collect_chat_action("set_data_driven_style", style_input, result) is None
+
+
+@pytest.mark.anyio
+async def test_switching_to_outline_only_in_a_turn_blocks_a_fill_colour_after_it():
+    layers = [_layer(geometry_type="Polygon")]
+    await _run("set_render_as", {"layer_id": "layer-1", "render_as": "stroke"}, layers)
+
+    style_input = {"layer_id": "layer-1", "mode": "graduated", "column": "height_m"}
+    result = await _run("set_data_driven_style", style_input, layers)
+
+    assert "outline only" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_switching_from_outline_only_to_fill_lifts_the_block():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"fillDisabled": True, "strokeDisabled": False}},
+        )
+    ]
+    await _run("set_render_as", {"layer_id": "layer-1", "render_as": "fill"}, layers)
+
+    builder = layers[0].style_config["builder"]
+    assert builder["fillDisabled"] is False
+    assert builder["strokeDisabled"] is True
+
+
+@pytest.mark.anyio
+async def test_extrusion_paint_the_3d_layer_never_reads_is_dropped_with_a_hint():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"heightColumn": "height_m"}},
+        )
+    ]
+    style_input = {
+        "layer_id": "layer-1",
+        "paint": {"fill-extrusion-opacity": 0.5, "fill-color": "#dc2626"},
+    }
+
+    result = await _run("set_style", style_input, layers)
+
+    assert result["paint"] == {"fill-color": "#dc2626"}
+    assert "fill-color" in result["warnings"][0]
+    assert "set_opacity" in result["warnings"][0]
+
+
+class _ValuesPort:
+    async def get_distinct_values(self, session, table_name, column, **kwargs):
+        return ["a", "b", "c"]
+
+
+async def _run_with_values(tool_name: str, tool_input: dict, layers) -> dict:
+    return await _execute_chat_tool(
+        tool_name,
+        tool_input,
+        AsyncMock(),
+        SimpleNamespace(id=uuid.uuid4(), username="test_user"),
+        set(),
+        layers,
+        port=_ValuesPort(),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_fill_coloured_by_a_column_cannot_then_be_made_invisible():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"fillDisabled": True, "strokeDisabled": False}},
+        )
+    ]
+    await _run(
+        "set_render_as", {"layer_id": "layer-1", "render_as": "fill-stroke"}, layers
+    )
+    coloured = await _run_with_values(
+        "set_data_driven_style",
+        {"layer_id": "layer-1", "mode": "categorical", "column": "name"},
+        layers,
+    )
+    assert "error" not in coloured
+    assert any("fill" in note for note in coloured["notes"])
+
+    hide = await _run_with_values(
+        "set_style",
+        {
+            "layer_id": "layer-1",
+            "paint": {"fill-opacity": 0, "_outline-color": "#111111"},
+        },
+        layers,
+    )
+
+    assert hide["paint"] == {"_outline-color": "#111111"}
+    assert "set_render_as stroke" in hide["warnings"][0]
+
+
+@pytest.mark.anyio
+async def test_an_unknown_ramp_is_reported_with_the_ramp_that_was_used():
+    layers = [_layer(geometry_type="Point")]
+
+    result = await _run_with_values(
+        "set_data_driven_style",
+        {
+            "layer_id": "layer-1",
+            "mode": "categorical",
+            "column": "name",
+            "ramp": "Cividis",
+        },
+        layers,
+    )
+
+    assert (
+        "'Cividis' is not a ramp in the style editor, so YlOrRd was used"
+        in result["notes"][0]
+    )
+
+
+@pytest.mark.anyio
+async def test_a_known_ramp_carries_no_note_on_a_point_layer():
+    layers = [_layer(geometry_type="Point")]
+
+    result = await _run_with_values(
+        "set_data_driven_style",
+        {
+            "layer_id": "layer-1",
+            "mode": "categorical",
+            "column": "name",
+            "ramp": "viridis",
+        },
+        layers,
+    )
+
+    assert "notes" not in result
+
+
+@pytest.mark.anyio
+async def test_a_data_driven_outline_colour_is_dropped_with_a_warning():
+    layers = [_layer(geometry_type="Polygon")]
+    expression = ["match", ["get", "name"], "a", "#ef4444", "#374151"]
+
+    result = await _run(
+        "set_style",
+        {"layer_id": "layer-1", "paint": {"_outline-color": expression}},
+        layers,
+    )
+
+    assert result["paint"] == {}
+    assert "outlines take one colour" in result["warnings"][0]
+
+
+@pytest.mark.anyio
+async def test_fill_opacity_on_a_3d_layer_is_dropped_and_points_to_set_opacity():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"heightColumn": "height_m"}},
+        )
+    ]
+
+    result = await _run(
+        "set_style", {"layer_id": "layer-1", "paint": {"fill-opacity": 0.5}}, layers
+    )
+
+    assert result["paint"] == {}
+    assert "set_opacity" in result["warnings"][0]
+
+
+@pytest.mark.anyio
+async def test_leaving_3d_in_a_turn_lets_fill_opacity_through():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"heightColumn": "height_m"}},
+            paint={"_height_column": "height_m"},
+        )
+    ]
+    await _run("set_render_as", {"layer_id": "layer-1", "render_as": "fill"}, layers)
+
+    result = await _run(
+        "set_style", {"layer_id": "layer-1", "paint": {"fill-opacity": 0.5}}, layers
+    )
+
+    assert result["paint"] == {"fill-opacity": 0.5}
+
+
+@pytest.mark.anyio
+async def test_a_later_style_call_sees_the_paint_an_earlier_one_set():
+    expression = ["match", ["get", "name"], "a", "#ef4444", "#374151"]
+    layers = [_layer(geometry_type="Polygon", paint={"fill-color": expression})]
+
+    await _run(
+        "set_style", {"layer_id": "layer-1", "paint": {"fill-color": "#111111"}}, layers
+    )
+    result = await _run(
+        "set_style", {"layer_id": "layer-1", "paint": {"fill-opacity": 0}}, layers
+    )
+
+    assert result["paint"] == {"fill-opacity": 0}
+
+
+@pytest.mark.anyio
+async def test_a_null_ramp_falls_back_to_the_default():
+    layers = [_layer(geometry_type="Point")]
+
+    result = await _run_with_values(
+        "set_data_driven_style",
+        {"layer_id": "layer-1", "mode": "categorical", "column": "name", "ramp": None},
+        layers,
+    )
+
+    assert "error" not in result
+    assert result["style_config"]["ramp"] == "Set2"
+
+
+@pytest.mark.anyio
+async def test_an_empty_replacement_leaves_the_recorded_paint_alone():
+    expression = ["match", ["get", "name"], "a", "#ef4444", "#374151"]
+    layers = [_layer(geometry_type="Polygon", paint={"fill-color": expression})]
+
+    await _run(
+        "set_style",
+        {
+            "layer_id": "layer-1",
+            "paint": {"circle-color": "#111111"},
+            "replace_paint": True,
+        },
+        layers,
+    )
+
+    assert layers[0].paint == {"fill-color": expression}
+
+
+@pytest.mark.anyio
+async def test_clearing_the_data_driven_fill_in_the_same_call_allows_zero_opacity():
+    expression = ["match", ["get", "name"], "a", "#ef4444", "#374151"]
+    layers = [_layer(geometry_type="Polygon", paint={"fill-color": expression})]
+
+    result = await _run(
+        "set_style",
+        {
+            "layer_id": "layer-1",
+            "paint": {"fill-opacity": 0},
+            "clear_paint": ["fill-color"],
+        },
+        layers,
+    )
+
+    assert result["paint"] == {"fill-opacity": 0}
+
+
+@pytest.mark.anyio
+async def test_a_null_clear_paint_does_not_abort_the_call():
+    layers = [_layer(geometry_type="Polygon")]
+
+    result = await _run(
+        "set_style",
+        {
+            "layer_id": "layer-1",
+            "paint": {"fill-color": "#111111"},
+            "clear_paint": None,
+        },
+        layers,
+    )
+
+    assert result["paint"] == {"fill-color": "#111111"}
+
+
+@pytest.mark.anyio
+async def test_colouring_a_3d_layer_whose_ground_fill_is_off_is_not_refused():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={
+                "builder": {"heightColumn": "height_m", "fillDisabled": True},
+            },
+        )
+    ]
+
+    result = await _run_with_values(
+        "set_data_driven_style",
+        {"layer_id": "layer-1", "mode": "categorical", "column": "name"},
+        layers,
+    )
+
+    assert "error" not in result
+
+
+@pytest.mark.anyio
+async def test_a_replacement_that_drops_the_expression_allows_zero_opacity():
+    expression = ["match", ["get", "name"], "a", "#ef4444", "#374151"]
+    layers = [_layer(geometry_type="Polygon", paint={"fill-color": expression})]
+
+    result = await _run(
+        "set_style",
+        {"layer_id": "layer-1", "paint": {"fill-opacity": 0}, "replace_paint": True},
+        layers,
+    )
+
+    assert result["paint"] == {"fill-opacity": 0}
+
+
+@pytest.mark.anyio
+async def test_a_flat_fill_colour_on_an_outline_only_layer_warns():
+    layers = [
+        _layer(
+            geometry_type="Polygon",
+            style_config={"builder": {"fillDisabled": True, "strokeDisabled": False}},
+        )
+    ]
+
+    result = await _run(
+        "set_style", {"layer_id": "layer-1", "paint": {"fill-color": "#ef4444"}}, layers
+    )
+
+    assert "outline only" in result["warnings"][0]
