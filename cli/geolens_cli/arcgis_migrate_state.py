@@ -70,7 +70,13 @@ class ItemState:
     record_ids: list[str] = field(default_factory=list)
     map_id: str | None = None
     job_ids: list[str] = field(default_factory=list)
+    # Service layer (its id, or its name) -> the dataset imported from it, so
+    # a rerun never imports a layer twice, even after its dataset changed owner.
+    layer_datasets: dict[str, str] = field(default_factory=dict)
+    # Layer -> its committed ingest job, until the job yields the dataset.
+    layer_jobs: dict[str, str] = field(default_factory=dict)
     owner_id: str | None = None
+    notes: list[str] = field(default_factory=list)
     error: str | None = None
     loss_report_path: str | None = None
     metadata_hash: str | None = None
@@ -199,13 +205,14 @@ class MigrationState:
     ) -> None:
         entry = self.item(item_id)
         entry.status = status
-        entry.error = self._clean(error) if error else None
+        entry.error = self.clean(error) if error else None
         entry.finished_at = _now()
         if save:
             self.save()
 
-    def _clean(self, error: str) -> str:
-        return redact_json(error, self._redact)[:MAX_ERROR_CHARS]
+    def clean(self, text: str) -> str:
+        """*text* redacted and shortened, safe to store in the file."""
+        return redact_json(text, self._redact)[:MAX_ERROR_CHARS]
 
     def save(self) -> None:
         if not self._persist:

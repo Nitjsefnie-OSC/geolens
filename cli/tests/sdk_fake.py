@@ -17,6 +17,7 @@ class SdkRequest:
     url: str
     headers: dict[str, str]
     body: bytes
+    timeout: dict[str, float | None]
 
     def json(self) -> Any:
         return json.loads(self.body) if self.body else None
@@ -27,7 +28,7 @@ class FakeGeoLens:
 
     *path* is relative to the instance's base URL, as the SDK writes it
     (``"GET /auth/me/"``). A route is a JSON value (HTTP 200), a
-    ``(status, body)`` tuple, or a callable taking the ``SdkRequest`` and
+    ``(status, body)`` or ``(status, body, headers)`` tuple, or a callable taking the ``SdkRequest`` and
     returning either. An unrouted request answers 404 with a problem body.
     ``token`` is a generated bearer token for the fake's caller to use.
     """
@@ -44,6 +45,7 @@ class FakeGeoLens:
             str(request.url),
             {k.lower(): v for k, v in request.headers.items()},
             request.read(),
+            dict(request.extensions.get("timeout") or {}),
         )
         self.seen.append(seen)
         path = urlsplit(seen.url).path.removeprefix(self.base_path)
@@ -52,5 +54,7 @@ class FakeGeoLens:
             reply = (404, {"detail": "Not Found", "status": 404, "title": "Not Found"})
         if callable(reply):
             reply = reply(seen)
-        status, payload = reply if isinstance(reply, tuple) else (200, reply)
-        return httpx.Response(status, json=payload)
+        status, payload, *headers = reply if isinstance(reply, tuple) else (200, reply)
+        return httpx.Response(
+            status, json=payload, headers=headers[0] if headers else None
+        )
