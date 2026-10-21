@@ -307,19 +307,49 @@ async def _clear_archive_pending(session, job) -> None:
     set_committed_value(job, "user_metadata", remaining)
 
 
+def source_columns_for(info: dict, layer_name: str | None) -> list[dict] | None:
+    """The ogrinfo field list, unless it may describe a layer other than the one loaded.
+
+    With no layer chosen for a multi-layer source, ogrinfo reads the first layer
+    and the loader may keep another.
+    """
+    if info.get("all_layers") and not layer_name:
+        return None
+    return info.get("columns")
+
+
+def _stored_to_source_names(
+    column_info: list[dict], source_columns: list[dict] | None
+) -> dict[str, str]:
+    """Stored column name to source field name, matched by position.
+
+    GDAL creates columns in source field order and a rename keeps the position.
+    A source field named ``gid`` in any case becomes the table's own ``gid`` column, which
+    ``column_info`` leaves out. When the counts still differ a field was
+    dropped or added, so position proves nothing and no column is mapped.
+    """
+    names = [col["name"] for col in source_columns or []]
+    if len(column_info) != len(names):
+        names = [name for name in names if name.lower() != "gid"]
+    if len(column_info) != len(names):
+        return {}
+    return {col["name"]: name for col, name in zip(column_info, names)}
+
+
 async def _run_staging_pipeline(
     session,
     *,
     table_name: str,
     has_geometry: bool | None,
     effective_srid: int | None,
+    source_columns: list[dict] | None = None,
 ) -> StagingResult:
     """Post-process a table ogr2ogr just loaded.
 
     ``has_geometry`` is what the caller knows: None detects it, True
     requires a geometry column and False skips the geometry steps.
-    ``effective_srid`` is the SRID ``geom`` is in. Normalizes the geometry
-    column, clips it to Web Mercator bounds and adds ``geom_4326``, then
+    ``effective_srid`` is the SRID ``geom`` is in. ``source_columns`` is the
+    source layer's ogrinfo field list. Normalizes the geometry column, clips it to Web Mercator bounds and adds ``geom_4326``, then
     grants the reader and reads the metadata, the 3D facts (a 3D point
     table gains ``elev``) and the samples. Returns the clip accounting for
     the caller to warn with. Does not commit.
@@ -359,9 +389,13 @@ async def _run_staging_pipeline(
     )
 
     metadata = await extract_metadata(session, table_name, schema=_schema)
+    # Matched before the elev promotion re-reads the columns and appends one.
+    source_names = _stored_to_source_names(metadata["column_info"], source_columns)
     three_d = await _detect_3d_and_promote_elev(
         session, table_name, metadata, schema=_schema
     )
+    for col in metadata["column_info"]:
+        col["source_name"] = source_names.get(col["name"])
 
     sample_values = await get_sample_values(
         session, table_name, metadata.get("column_info", []), schema=_schema
@@ -599,6 +633,7 @@ async def _ingest_vector_into_staging(
         table_name=target_table,
         has_geometry=has_geometry,
         effective_srid=effective_srid,
+        source_columns=ogrinfo_columns,
     )
 
     if result.geometry_type is None and geometry_type is not None:

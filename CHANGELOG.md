@@ -31,6 +31,10 @@ and releases use semantic versioning.
   version, sign-in methods, basemaps, workflow statuses and rate limits, plus
   upload limits and the caller's permissions and API key scope when the request
   carries credentials.
+- Each column in a dataset's `column_info` now carries `source_name`, the field
+  name in the file it was imported from (for example `POP 2020` for the stored
+  `pop 2020`). It is `null` for datasets imported before this release and for
+  columns that could not be matched. Re-uploading a file fills it in.
 
 ### Fixed
 
