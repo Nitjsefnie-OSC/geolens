@@ -48,6 +48,11 @@ and releases use semantic versioning.
 - Editing a category colour in the map builder no longer resets the layer's catch-all colour to
   grey. A fallback colour set elsewhere, such as in imported style JSON, is kept.
 
+### Fixed
+
+- The message shown when an account is temporarily locked out of signing in now
+  also names API keys as the way back in for scripts and desktop apps.
+
 ## [1.26.0] - 2026-10-18
 
 ### Added
