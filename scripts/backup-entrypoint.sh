@@ -41,6 +41,11 @@ WEEKLY_DIR="${BACKUP_DIR}/weekly"
 # if the compose file changes it.
 STAGING_DIR="${STAGING_DIR:-/staging}"
 
+# "<timestamp> <record id>..." for the dump retention always keeps, with a
+# sample of its catalog record ids, so cycles over a database restarted on an
+# empty volume cannot rotate it out.
+LAST_GOOD_FILE="${BACKUP_DIR}/.last-good-dump"
+
 POSTGRES_DB="${POSTGRES_DB:-geolens}"
 POSTGRES_HOST="${POSTGRES_HOST:-db}"
 BACKUP_RETENTION_DAILY="${BACKUP_RETENTION_DAILY:-7}"
@@ -101,6 +106,14 @@ run_backup() {
     # there to copy or upload after a verification failure removes it.
     local cycle_failed=0
     local dump_ok=1
+    local good_ts="" good_ids="" good_sample=""
+    read -r good_ts good_ids 2>/dev/null < "$LAST_GOOD_FILE" || true
+    [[ "$good_ts" =~ ^[0-9]{8}_[0-9]{6}$ ]] || good_ts=""
+    [[ -n "$good_ts" && "$good_ids" =~ ^[0-9A-Za-z-]+(\ [0-9A-Za-z-]+)*$ ]] || good_ids=""
+    # With no marker yet (first run after an upgrade), the newest set from
+    # before this cycle may be the only real backup of a database already lost.
+    local prior_ts=""
+    [ -n "$good_ts" ] || prior_ts="$(newest_complete_ts "$DAILY_DIR")"
 
     # Orphaned .tmp dumps (pg_dump killed mid-write) match no prune glob and
     # would accumulate forever; a new cycle starting means no dump is in
@@ -152,6 +165,9 @@ run_backup() {
         dump_ok=0
     else
         log "Backup verified: ${filename} fully readable"
+        # A check that can't run fails the cycle: the healthcheck must show
+        # that this dump may not be protected.
+        good_sample="$(good_dump_sample "$good_ts" "$good_ids")" || cycle_failed=1
     fi
 
     # Weekly copy on Sundays. Skipped when verification above already
@@ -229,11 +245,40 @@ run_backup() {
         fi
     fi
 
+    # Only a cycle whose artifacts all landed may take over: retention would
+    # otherwise keep a set with a missing companion and prune a complete one.
+    if [ -n "$good_sample" ] && [ "$cycle_failed" -eq 1 ]; then
+        log "WARNING: this cycle failed, so retention keeps ${good_ts:-no older dump} rather than ${filename}"
+    elif [ -n "$good_sample" ]; then
+        # Through a .tmp name: a torn marker would read back as no marker.
+        if printf '%s %s\n' "$timestamp" "$good_sample" > "${LAST_GOOD_FILE}.tmp" \
+            && mv "${LAST_GOOD_FILE}.tmp" "$LAST_GOOD_FILE"; then
+            good_ts="$timestamp"
+        else
+            rm -f "${LAST_GOOD_FILE}.tmp"
+            log "ERROR: could not record ${filename} as the dump retention keeps — this cycle will be reported as failed"
+            cycle_failed=1
+        fi
+    fi
+    # Persisted without ids so that later empty cycles keep the same dump, and
+    # the first cycle with catalog records takes over.
+    if [ -z "$good_ts" ] && [ -n "$prior_ts" ]; then
+        if printf '%s\n' "$prior_ts" > "${LAST_GOOD_FILE}.tmp" \
+            && mv "${LAST_GOOD_FILE}.tmp" "$LAST_GOOD_FILE"; then
+            log "No dump was marked yet; marking ${prior_ts}, the newest set from before this cycle"
+        else
+            rm -f "${LAST_GOOD_FILE}.tmp"
+            log "ERROR: could not mark ${prior_ts} as the dump retention keeps — this cycle will be reported as failed"
+            cycle_failed=1
+        fi
+        good_ts="$prior_ts"
+    fi
+
     # Retention runs regardless of S3 outcome (dumps set the window; their
     # companions follow) — local backups must be pruned even when the offsite
     # upload failed, or backup_data fills up during an S3 outage.
-    prune_old_backups "$DAILY_DIR" "$BACKUP_RETENTION_DAILY" day
-    prune_old_backups "$WEEKLY_DIR" "$BACKUP_RETENTION_WEEKLY" week
+    prune_old_backups "$DAILY_DIR" "$BACKUP_RETENTION_DAILY" day "$good_ts"
+    prune_old_backups "$WEEKLY_DIR" "$BACKUP_RETENTION_WEEKLY" week "$good_ts"
     # Must run after prune_old_backups — it prunes by what that just left.
     prune_orphaned_companions "$DAILY_DIR"
     prune_orphaned_companions "$WEEKLY_DIR"
@@ -243,8 +288,8 @@ run_backup() {
     # same reason local pruning does — a transient S3 hiccup on THIS cycle's
     # upload must not stop last cycle's objects from being pruned.
     if [ "$BACKUP_S3_ENABLED" = "true" ]; then
-        prune_s3_prefix "daily" "$BACKUP_RETENTION_DAILY" day || cycle_failed=1
-        prune_s3_prefix "weekly" "$BACKUP_RETENTION_WEEKLY" week || cycle_failed=1
+        prune_s3_prefix "daily" "$BACKUP_RETENTION_DAILY" day "$good_ts" || cycle_failed=1
+        prune_s3_prefix "weekly" "$BACKUP_RETENTION_WEEKLY" week "$good_ts" || cycle_failed=1
     fi
 
     # Surface the S3 failure now that retention has run, so the cycle is still
@@ -266,6 +311,44 @@ run_backup() {
     fi
 
     log "Backup cycle complete"
+}
+
+# Prints a fresh sample of catalog record ids when this cycle's dump may take
+# over from the kept one: the database has records and at least half of the ids
+# sampled from the kept dump (any records, for a marker without ids). Prints
+# nothing otherwise, and fails when the check itself can't run. Ids rather than counts, so a re-created database's first
+# upload can't take over even when the lost catalog held a single record. The
+# check runs after pg_dump, outside its snapshot; a database restored in that
+# window could mark a dump that lacks the restored rows, too narrow to engineer
+# for. Stdout carries the result, so logs go to stderr.
+good_dump_sample() {
+    local good_ts="$1" good_ids="$2" row count present sample
+    local -a marked=()
+    read -r -a marked <<< "$good_ids"
+    row="$(psql -X -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" \
+        -d "$POSTGRES_DB" -v ids="{$(IFS=,; printf '%s' "${marked[*]:-}")}" <<'SQL'
+SELECT to_regclass('catalog.records') IS NOT NULL AS has_records_table \gset
+\if :has_records_table
+SELECT count(*), count(*) FILTER (WHERE id::text = ANY (:'ids'::text[])),
+    (SELECT string_agg(id::text, ' ')
+     FROM (SELECT id FROM catalog.records ORDER BY random() LIMIT 100) sampled)
+FROM catalog.records;
+\else
+SELECT 0, 0, '';
+\endif
+SQL
+    )" || row=""
+    IFS='|' read -r count present sample <<< "$row"
+    if ! [[ "$count" =~ ^[0-9]+$ && "$present" =~ ^[0-9]+$ ]]; then
+        log "ERROR: could not check catalog records in ${POSTGRES_DB}${good_ts:+; retention keeps ${good_ts}} — this cycle will be reported as failed" >&2
+        return 1
+    elif [ "$count" -eq 0 ] || [ $((present * 2)) -lt "${#marked[@]}" ]; then
+        if [ -n "$good_ts" ]; then
+            log "WARNING: ${POSTGRES_DB} has ${count} catalog records, ${present} of the ${#marked[@]} sampled from ${good_ts}; retention keeps ${good_ts}. If the records were deleted on purpose, delete ${LAST_GOOD_FILE} to release that dump." >&2
+        fi
+    else
+        printf '%s' "$sample"
+    fi
 }
 
 # Weekly entries are hard links to the daily files: a weekly set costs no extra
@@ -596,7 +679,8 @@ for obj in data.get("Contents", []):
 # the same cycle, leaving a dump with no globals to rebuild roles on a fresh
 # cluster.
 #
-# The listing arrives as positional parameters ("$@"), one key per parameter,
+# The first parameter is an upper bound on the timestamp, or empty for none.
+# The listing follows as positional parameters, one key per parameter,
 # because the caller expands a bash array and array elements are never
 # re-split: a key containing a newline or tab stays one parameter. The
 # `_${ts}.dump` membership check is a plain `[[ glob ]]` test per parameter,
@@ -610,7 +694,8 @@ for obj in data.get("Contents", []):
 # newline can only make the anchored ^...$ pattern fail, never produce a
 # second match.
 s3_newest_complete_ts() {
-    local name ts best="" n2 matched
+    local bound="$1" name ts best="" n2 matched
+    shift
     for name in "${@:-}"; do
         [ -n "$name" ] || continue
         if [[ "$name" == globals-*.sql ]]; then
@@ -626,6 +711,9 @@ s3_newest_complete_ts() {
                     break
                 fi
             done
+            if [ -n "$bound" ] && [ "$ts" \> "$bound" ]; then
+                continue
+            fi
             if [ "$matched" -eq 1 ] && { [ -z "$best" ] || [ "$ts" \> "$best" ]; }; then
                 best="$ts"
             fi
@@ -638,6 +726,7 @@ prune_s3_prefix() {
     local prefix="$1"
     local keep="$2"
     local period="$3"
+    local good="${4:-}"
 
     if [ -z "${S3_BUCKET:-}" ] || [ -z "${S3_ACCESS_KEY_ID:-}" ] || [ -z "${S3_SECRET_ACCESS_KEY:-}" ]; then
         log "ERROR: BACKUP_S3_ENABLED=true but S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY are not all set — cannot prune offsite retention"
@@ -698,7 +787,12 @@ prune_s3_prefix() {
     # otherwise remove the only set restorable onto a fresh cluster.
     local protect=""
     if [ "${#all_names[@]}" -gt 0 ]; then
-        protect="$(s3_newest_complete_ts "${all_names[@]:-}")"
+        protect="$(s3_newest_complete_ts "" "${all_names[@]:-}")"
+        # Prefer a complete set for the marked dump too, when this prefix has one.
+        if [ -n "$good" ]; then
+            good="$(s3_newest_complete_ts "$good" "${all_names[@]:-}")"
+            good="${good:-${4:-}}"
+        fi
     fi
 
     # Dump timestamp and name are two parallel arrays indexed together,
@@ -780,7 +874,7 @@ prune_s3_prefix() {
     local to_remove=0
     if [ "$count" -gt 0 ]; then
         RK_TS=("${dump_ts[@]}")
-        mark_retained "$period" "$keep" "$protect"
+        mark_retained "$period" "$keep" "$protect" "$good"
         local _i
         for ((_i = 0; _i < count; _i++)); do
             if [ "${RK_KEEP[$_i]}" -eq 0 ]; then
@@ -920,8 +1014,8 @@ dump_listing_arrays() {
 }
 
 # The timestamp of the newest set that is complete: a dump with the globals
-# dump that pairs with it. prune_old_backups keeps that one out of the
-# retention window.
+# dump that pairs with it, no later than the optional bound in $2.
+# prune_old_backups keeps that one out of the retention window.
 #
 # Without the exemption a run of pg_dumpall failures walks every complete set
 # out of retention: each failed cycle still produces a valid dump (discarding
@@ -932,7 +1026,7 @@ dump_listing_arrays() {
 # dumps, but nothing that restores onto a fresh cluster. Holding one complete
 # set back costs at most one extra dump plus a few KB of SQL.
 newest_complete_ts() {
-    local dir="$1"
+    local dir="$1" bound="${2:-}"
     local globals ts best=""
     for globals in "$dir"/globals-*.sql; do
         [ -f "$globals" ] || continue
@@ -944,6 +1038,9 @@ newest_complete_ts() {
         if [[ "${globals##*/}" =~ ^globals-([0-9]{8}_[0-9]{6})\.sql$ ]]; then
             ts="${BASH_REMATCH[1]}"
         else
+            continue
+        fi
+        if [ -n "$bound" ] && [ "$ts" \> "$bound" ]; then
             continue
         fi
         find "$dir" -maxdepth 1 -name "*_${ts}.dump" -type f | grep -q . || continue
@@ -979,18 +1076,27 @@ backup_period_key() {
 # that hold a backup count, so neither a stopped service nor a wrong clock
 # ages out history that nothing newer has replaced. `protect` is the newest
 # complete set, kept by the caller outside RK_TS: it stands for its own
-# period, so only a newer entry in that period is kept beside it.
+# period, so only a newer entry in that period is kept beside it. `good` names
+# the last dump known to hold the catalog; the newest entry at or before it is
+# always kept, unless `protect` already stands for it. "At or before" covers a
+# tier without that exact dump: weekly/, or offsite after upload was off.
 mark_retained() {
-    local period="$1" keep="$2" protect="${3:-}"
+    local period="$1" keep="$2" protect="${3:-}" good="${4:-}"
     local protect_key=""
     if [ -n "$protect" ]; then
         backup_period_key "$period" "$protect"
         protect_key="$PERIOD_KEY"
     fi
     RK_KEEP=()
-    local _i last="" seen=0
+    local _i last="" seen=0 good_found=0
     for ((_i = ${#RK_TS[@]} - 1; _i >= 0; _i--)); do
         RK_KEEP[_i]=0
+        if [ -n "$good" ] && [ "$good_found" -eq 0 ] && ! [ "${RK_TS[$_i]}" \> "$good" ]; then
+            good_found=1
+            if [ -z "$protect" ] || [ "$protect" \> "$good" ] || [ "${RK_TS[$_i]}" \> "$protect" ]; then
+                RK_KEEP[_i]=1
+            fi
+        fi
         backup_period_key "$period" "${RK_TS[$_i]}"
         if [ "$PERIOD_KEY" = "$protect_key" ] && [ "${RK_TS[$_i]}" \< "$protect" ]; then
             continue
@@ -1009,6 +1115,7 @@ prune_old_backups() {
     local dir="$1"
     local keep="$2"
     local period="$3"
+    local good="${4:-}"
 
     dump_listing_arrays "$dir"
     [ "${#DL_TS[@]}" -gt 0 ] || return 0
@@ -1019,6 +1126,11 @@ prune_old_backups() {
     # So a directory holds at most `keep` + 1 dumps.
     local protect
     protect="$(newest_complete_ts "$dir")"
+    # Prefer a complete set for the marked dump too, when this tier has one.
+    if [ -n "$good" ]; then
+        good="$(newest_complete_ts "$dir" "$good")"
+        good="${good:-${4:-}}"
+    fi
 
     # Filter DL_TS/DL_PATH by array index, never by grepping a
     # "<ts>\t<path>" text line: $protect is compared against a validated,
@@ -1036,7 +1148,7 @@ prune_old_backups() {
     [ "${#cand_ts[@]}" -gt 0 ] || return 0
 
     RK_TS=("${cand_ts[@]}")
-    mark_retained "$period" "$keep" "$protect"
+    mark_retained "$period" "$keep" "$protect" "$good"
     local to_remove=0
     for ((_i = 0; _i < ${#cand_ts[@]}; _i++)); do
         if [ "${RK_KEEP[$_i]}" -eq 0 ]; then

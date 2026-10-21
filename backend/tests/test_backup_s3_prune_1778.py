@@ -23,6 +23,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.repo_paths import repo_root
 
 REPO_ROOT = repo_root(__file__)
@@ -188,6 +190,9 @@ echo '-- fake globals dump'
 exit 0
 """
 
+# Answers the catalog records check with an empty catalog: no marker moves.
+_PSQL_EMPTY_CATALOG_STUB = "#!/bin/sh\necho '0|0|'\n"
+
 # The same portable shim that scripts/tests/test-backup-restore-roundtrip.sh
 # uses to force a
 # Sunday cycle without depending on the day the test happens to run — only
@@ -210,6 +215,7 @@ def _run(
     rm_fail_pattern: str = "",
     with_credentials: bool = True,
     ls_names: list[str] | None = None,
+    good: str = "",
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -243,7 +249,7 @@ def _run(
         'log() { echo "$@" >&2; }\n'
         f"{creds}"
         f"{_extract_prune_s3_prefix()}\n"
-        f'prune_s3_prefix "daily" "{keep}" day\n'
+        f'prune_s3_prefix "daily" "{keep}" day "{good}"\n'
     )
     result = subprocess.run(
         ["bash", "-c", harness],
@@ -444,6 +450,42 @@ class TestPruneS3Prefix:
         assert (
             "s3://test-bucket/backups/daily/globals-20260803_020000.sql" not in deleted
         )
+
+    def test_keeps_the_last_dump_with_records_and_its_companions(self, tmp_path: Path):
+        listing = "\n".join(
+            [
+                "geolens_20261019_020001.dump",
+                "globals-20261019_020001.sql",
+                "staging-20261019_020001.tar.gz",
+                "geolens_20261019_102717.dump",
+                "globals-20261019_102717.sql",
+            ]
+        )
+        result, deleted = _run(
+            tmp_path, keep="1", ls_listing=listing, good="20261019_020001"
+        )
+        assert result.returncode == 0, result.stderr
+        assert deleted == []
+
+    def test_prefers_a_complete_set_before_the_marked_dump(self, tmp_path: Path):
+        listing = "\n".join(
+            [
+                "geolens_20261004_020000.dump",
+                "globals-20261004_020000.sql",
+                "geolens_20261011_020000.dump",
+                "geolens_20261018_020000.dump",
+                "globals-20261018_020000.sql",
+                "geolens_20261025_020000.dump",
+                "globals-20261025_020000.sql",
+            ]
+        )
+        result, deleted = _run(
+            tmp_path, keep="1", ls_listing=listing, good="20261012_020000"
+        )
+        assert result.returncode == 0, result.stderr
+        assert deleted == [
+            "s3://test-bucket/backups/daily/geolens_20261011_020000.dump"
+        ]
 
     def test_empty_prefix_does_not_abort_under_set_e(self, tmp_path: Path):
         """The prefix has zero objects (fresh install, or weekly/ before the
@@ -721,7 +763,7 @@ class TestPruneS3Prefix:
 
 
 def _run_full_cycle(
-    tmp_path: Path, rm_exit: int = 0
+    tmp_path: Path, rm_exit: int = 0, local_marker: str = ""
 ) -> tuple[subprocess.CompletedProcess, Path]:
     """Runs the REAL run_backup() end to end (extracted from
     scripts/backup-entrypoint.sh, same technique as _run above), stubbing
@@ -734,6 +776,9 @@ def _run_full_cycle(
     bin_dir.mkdir()
     backup_dir = tmp_path / "backups"
     staging_dir = tmp_path / "no-such-staging-mount"  # never created: skips cleanly
+    if local_marker:
+        backup_dir.mkdir()
+        (backup_dir / ".last-good-dump").write_text(f"{local_marker}\n")
 
     ls_file = tmp_path / "ls_output.txt"
     ls_file.write_text(_ls_json(_LS_LISTING))
@@ -745,6 +790,7 @@ def _run_full_cycle(
         ("pg_dump", _PG_DUMP_STUB),
         ("pg_restore", _PG_RESTORE_STUB),
         ("pg_dumpall", _PG_DUMPALL_STUB),
+        ("psql", _PSQL_EMPTY_CATALOG_STUB),
     ):
         stub = bin_dir / name
         stub.write_text(content)
@@ -801,6 +847,17 @@ class TestRunBackupS3PruneFailureMarksCycleFailed:
         # stdout, not stderr.
         assert "could not delete" in result.stdout
 
+    @pytest.mark.parametrize(
+        ("marker", "kept"), [("20260801_120000", True), ("", False)]
+    )
+    def test_offsite_keeps_the_newest_dump_before_a_local_only_marker(
+        self, tmp_path: Path, marker: str, kept: bool
+    ):
+        result, _ = _run_full_cycle(tmp_path, local_marker=marker)
+        assert result.returncode == 0, result.stderr
+        deleted = (tmp_path / "deleted.txt").read_bytes().split(b"\0")
+        assert bool([d for d in deleted if b"20260801_020000" in d]) is not kept
+
     def test_successful_cycle_still_touches_last_success(self, tmp_path: Path):
         """Positive control: the fix must not make an otherwise-healthy
         cycle report unhealthy."""
@@ -831,6 +888,7 @@ def _run_weekly_copy_failure_cycle(
         ("pg_dump", _PG_DUMP_STUB),
         ("pg_restore", _PG_RESTORE_STUB),
         ("pg_dumpall", _PG_DUMPALL_STUB),
+        ("psql", _PSQL_EMPTY_CATALOG_STUB),
     ):
         stub = bin_dir / name
         stub.write_text(content)
@@ -929,6 +987,7 @@ def _run_weekly_staging_globals_upload_cycle(
         ("pg_dump", _PG_DUMP_STUB),
         ("pg_restore", _PG_RESTORE_STUB),
         ("pg_dumpall", _PG_DUMPALL_STUB),
+        ("psql", _PSQL_EMPTY_CATALOG_STUB),
         ("aws", _AWS_STUB),
     ):
         stub = bin_dir / name

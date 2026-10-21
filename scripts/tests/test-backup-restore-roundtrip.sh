@@ -89,6 +89,7 @@ DST_DB="geolens_bkp_dst_${SUFFIX}"
 SNAP_DB="geolens_bkp_snap_${SUFFIX}"   # managed-mode "provider snapshot" DB
 PROVIDER_DB="geolens_bkp_provider_${SUFFIX}"
 PROVIDER_FAIL_DB="geolens_bkp_provider_fail_${SUFFIX}"
+LOSS_DB="geolens_bkp_loss_${SUFFIX}"
 RUNTIME_ROLE="geolens_bkp_app_${SUFFIX}"
 RUNTIME_ROLE="${RUNTIME_ROLE//[^a-zA-Z0-9_]/_}"
 RUNTIME_PASSWORD="ci-runtime-role-test-password-947-padding"
@@ -144,7 +145,8 @@ cleanup() {
     fi
     # Terminate any lingering connections, then drop ALL throwaway DBs.
     for db in \
-        "$SRC_DB" "$DST_DB" "$SNAP_DB" "$PROVIDER_DB" "$PROVIDER_FAIL_DB"; do
+        "$SRC_DB" "$DST_DB" "$SNAP_DB" "$PROVIDER_DB" "$PROVIDER_FAIL_DB" \
+        "$LOSS_DB"; do
         psql_admin -tAc \
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
             >/dev/null 2>&1
@@ -1812,6 +1814,75 @@ if [ -n "$MID_WEEKLY_DUMP" ]; then
 else
     fail "the midnight-crossing cycle produced no weekly dump, so the pairing was not exercised"
 fi
+
+# A restart over a lost database volume dumps an empty database, the newest
+# set of the day. Retention 1 makes every older dump of the day a pruning
+# candidate, so only the last-good protection can keep the real one.
+LOSS_BACKUPS="${WORKDIR}/loss-backups"
+LOSS_LOG="${WORKDIR}/cycle-loss.log"
+mkdir -p "$LOSS_BACKUPS"
+loss_cycle() {
+    env BACKUP_RETENTION_DAILY=1 BACKUP_RETENTION_WEEKLY=1 \
+        BACKUP_DIR="$LOSS_BACKUPS" STAGING_DIR="$2" \
+        POSTGRES_HOST="$PGHOST" PGPORT="$PGPORT" \
+        POSTGRES_USER="$PGUSER" POSTGRES_PASSWORD="$PGPASSWORD" \
+        POSTGRES_DB="$LOSS_DB" BACKUP_S3_ENABLED=false \
+        bash "${REPO_ROOT}/scripts/backup-entrypoint.sh" --run-backup > "$LOSS_LOG" 2>&1 \
+        || { cat "$LOSS_LOG" >&2; fail "cycle over the $1 database exited non-zero"; }
+}
+loss_db_sql() {
+    psql -X -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$LOSS_DB" \
+        -v ON_ERROR_STOP=1 -q -c "$1" >/dev/null
+}
+loss_dump_ts() {
+    find "${LOSS_BACKUPS}/daily" -name '*.dump' -type f \
+        | sed -nE 's/^.*_([0-9]{8}_[0-9]{6})\.dump$/\1/p' | sort | tail -1
+}
+
+createdb -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$LOSS_DB"
+LOSS_RECORDS_DDL="CREATE SCHEMA catalog; CREATE TABLE catalog.records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL);"
+loss_db_sql "${LOSS_RECORDS_DDL} INSERT INTO catalog.records (name) SELECT 'kept' FROM generate_series(1, 10);"
+loss_cycle populated "$CYCLE_STAGING"
+GOOD_TS="$(loss_dump_ts)"
+[ -n "$GOOD_TS" ] || fail "the populated cycle produced no dump"
+[ -f "${LOSS_BACKUPS}/daily/staging-${GOOD_TS}.tar.gz" ] \
+    || fail "the populated cycle produced no staging archive to protect"
+
+# The database comes back with no schema, the upload volume with no files.
+dropdb -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$LOSS_DB"
+createdb -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$LOSS_DB"
+sleep 1
+loss_cycle empty "${WORKDIR}/loss-empty-staging"
+# Migrations ran, so the schema exists, but it holds no records yet.
+loss_db_sql "$LOSS_RECORDS_DDL"
+sleep 1
+loss_cycle "freshly initialised" "${WORKDIR}/loss-empty-staging"
+EMPTY_TS="$(loss_dump_ts)"
+[ "$EMPTY_TS" != "$GOOD_TS" ] || fail "the empty-database cycles produced no dump of their own"
+
+grep -q "has 0 catalog records.*retention keeps ${GOOD_TS}" "$LOSS_LOG" \
+    || fail "the empty-database cycle never logged why it kept the older dump"
+# A first upload into the re-created database is not a restore.
+loss_db_sql "INSERT INTO catalog.records (name) VALUES ('first upload');"
+sleep 1
+loss_cycle "re-created" "${WORKDIR}/loss-empty-staging"
+for artifact in "${LOSS_DB}_${GOOD_TS}.dump" "globals-${GOOD_TS}.sql" "staging-${GOOD_TS}.tar.gz"; do
+    [ -f "${LOSS_BACKUPS}/daily/${artifact}" ] \
+        || fail "${artifact} was pruned by cycles over an emptied database"
+done
+grep -q "has 1 catalog records, 0 of the 10 sampled from ${GOOD_TS}" "$LOSS_LOG" \
+    || fail "the re-created-database cycle never logged how many marked records remain"
+
+# Restoring the good dump brings its records back, so the protection moves to
+# the new dump and retention prunes the old set as usual.
+pg_restore -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$LOSS_DB" --clean --if-exists \
+    --no-owner "${LOSS_BACKUPS}/daily/${LOSS_DB}_${GOOD_TS}.dump" \
+    || fail "could not restore the good dump into the re-created database"
+sleep 1
+loss_cycle restored "$CYCLE_STAGING"
+[ ! -f "${LOSS_BACKUPS}/daily/${LOSS_DB}_${GOOD_TS}.dump" ] \
+    || fail "the old good dump outlived a newer dump of the restored database"
+echo "      lost-database restart OK — the last dump with catalog records and its companions survived."
 echo ""
 
 echo "=== PASS: backup+restore round-trip verified (bundled + managed modes) ==="

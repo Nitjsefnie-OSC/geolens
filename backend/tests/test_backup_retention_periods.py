@@ -44,12 +44,15 @@ def _extract_function(name: str) -> str:
     return match.group(0)
 
 
-def _prune(directory: Path, keep: int, period: str) -> subprocess.CompletedProcess:
+def _prune(
+    directory: Path, keep: int, period: str, good: str = ""
+) -> subprocess.CompletedProcess:
     harness = "\n".join(
         ["set -euo pipefail", *(_extract_function(n) for n in _RETENTION_FUNCTIONS)]
     )
     harness += (
-        f'\nprune_old_backups "$1" "{keep}" {period}\nprune_orphaned_companions "$1"\n'
+        f'\nprune_old_backups "$1" "{keep}" {period} "{good}"\n'
+        'prune_orphaned_companions "$1"\n'
     )
     result = subprocess.run(
         ["bash", "-c", harness, "_", str(directory)],
@@ -163,6 +166,62 @@ class TestDailyRetention:
         assert "geolens_20260201_020000.dump" not in remaining
         assert len([n for n in remaining if n.endswith(".dump")]) == 8
 
+    def test_last_dump_with_records_survives_newer_runs_on_its_day(
+        self, tmp_path: Path
+    ):
+        daily = tmp_path / "daily"
+        good_set = [
+            "geolens_20261019_020001.dump",
+            "globals-20261019_020001.sql",
+            "staging-20261019_020001.tar.gz",
+        ]
+        _seed(daily, good_set)
+        _seed(daily, ["geolens_20261019_102717.dump", "globals-20261019_102717.sql"])
+        _prune(daily, keep=1, period="day", good="20261019_020001")
+        assert _names(daily) == {
+            *good_set,
+            "geolens_20261019_102717.dump",
+            "globals-20261019_102717.sql",
+        }
+
+    def test_last_dump_with_records_takes_its_own_slot(self, tmp_path: Path):
+        daily = tmp_path / "daily"
+        _seed(
+            daily,
+            [
+                "geolens_20261009_020000.dump",
+                "globals-20261009_020000.sql",
+                "geolens_20261010_020000.dump",
+                "geolens_20261011_020000.dump",
+            ],
+        )
+        _prune(daily, keep=1, period="day", good="20261011_020000")
+        assert _names(daily) == {
+            "geolens_20261009_020000.dump",
+            "globals-20261009_020000.sql",
+            "geolens_20261011_020000.dump",
+        }
+
+    def test_a_marker_the_protected_set_covers_keeps_nothing_extra(
+        self, tmp_path: Path
+    ):
+        daily = tmp_path / "daily"
+        for day in (9, 10, 11):
+            _seed(
+                daily,
+                [
+                    f"geolens_202610{day:02d}_020000.dump",
+                    f"globals-202610{day:02d}_020000.sql",
+                ],
+            )
+        _seed(daily, ["geolens_20261012_020000.dump"])
+        _prune(daily, keep=1, period="day", good="20261011_020000")
+        assert _names(daily) == {
+            "geolens_20261011_020000.dump",
+            "globals-20261011_020000.sql",
+            "geolens_20261012_020000.dump",
+        }
+
     def test_files_retention_did_not_write_are_left_alone(self, tmp_path: Path):
         daily = tmp_path / "daily"
         foreign = ["notes.txt", "manual.dump", "before-upgrade.sql", "geolens.dump.bak"]
@@ -173,6 +232,30 @@ class TestDailyRetention:
 
 
 class TestWeeklyRetention:
+    def test_prefers_a_complete_set_before_the_marked_daily_dump(self, tmp_path: Path):
+        weekly = tmp_path / "weekly"
+        complete = [
+            f"{kind}{d}_020000.{ext}"
+            for d in ("20261004", "20261018", "20261025")
+            for kind, ext in (("geolens_", "dump"), ("globals-", "sql"))
+        ]
+        _seed(weekly, [*complete, "geolens_20261011_020000.dump"])
+        _prune(weekly, keep=1, period="week", good="20261012_020000")
+        assert _names(weekly) == set(complete)
+
+    def test_keeps_the_last_weekly_set_before_the_marked_daily_dump(
+        self, tmp_path: Path
+    ):
+        weekly = tmp_path / "weekly"
+        names = [
+            f"{kind}{d}_020000.{ext}"
+            for d in ("20261004", "20261011", "20261018")
+            for kind, ext in (("geolens_", "dump"), ("globals-", "sql"))
+        ]
+        _seed(weekly, names)
+        _prune(weekly, keep=1, period="week", good="20261007_020000")
+        assert _names(weekly) == set(names)
+
     def test_runs_on_two_sundays_keep_two_weeklies(self, tmp_path: Path):
         weekly = tmp_path / "weekly"
         _seed(
@@ -251,6 +334,21 @@ esac
 exit 0
 """
 
+# Answers the records check with $PSQL_STUB_ROW ("count|present|sampled ids")
+# and saves its arguments; an unset row fails the query.
+_PSQL_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$PSQL_STUB_ARGS"
+[ -n "${PSQL_STUB_ROW+set}" ] || exit 2
+echo "$PSQL_STUB_ROW"
+"""
+
+_ID_A, _ID_B, _ID_C = (f"{n}0000000-0000-4000-8000-000000000000" for n in "abc")
+
+_MARKER_MV_FAILS_STUB = """#!/bin/sh
+case "$*" in *last-good-dump*) exit 1;; esac
+exec /bin/mv "$@"
+"""
+
 _REFUSING_LN_STUB = "#!/bin/sh\necho 'ln: Operation not permitted' >&2\nexit 1\n"
 
 
@@ -260,6 +358,9 @@ def _cycle(
     s3_enabled: bool = False,
     cp_exit: int = 0,
     refuse_links: bool = False,
+    globals_fail: bool = False,
+    marker_publish_fails: bool = False,
+    psql_row: str | None = f"1|0|{_ID_A}",
 ) -> tuple[subprocess.CompletedProcess, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -269,7 +370,12 @@ def _cycle(
         "pg_dumpall": _PG_DUMPALL_STUB,
         "date": _SUNDAY_DATE_STUB,
         "aws": _AWS_STUB,
+        "psql": _PSQL_STUB,
     }
+    if globals_fail:
+        stubs["pg_dumpall"] = "#!/bin/sh\nexit 1\n"
+    if marker_publish_fails:
+        stubs["mv"] = _MARKER_MV_FAILS_STUB
     if refuse_links:
         stubs["ln"] = _REFUSING_LN_STUB
     for name, content in stubs.items():
@@ -304,6 +410,8 @@ def _cycle(
             "S3_ACCESS_KEY_ID": "test-key",
             "S3_SECRET_ACCESS_KEY": "test-secret",
             "AWS_STUB_CP_EXIT": str(cp_exit),
+            "PSQL_STUB_ARGS": str(tmp_path / "psql-args"),
+            **({} if psql_row is None else {"PSQL_STUB_ROW": psql_row}),
         },
     )
     return result, backup_dir
@@ -359,6 +467,103 @@ class TestOffsiteMarker:
         assert result.returncode == 0, result.stdout + result.stderr
         assert (backup_dir / ".last-success").is_file()
         assert not (backup_dir / ".last-offsite-success").exists()
+
+
+def _seed_earlier_good_set(backup_dir: Path, ids: str) -> tuple[str, set[str]]:
+    ts = time.strftime("%Y%m%d") + "_000000"
+    names = {f"geolens_{ts}.dump", f"globals-{ts}.sql", f"staging-{ts}.tar.gz"}
+    _seed(backup_dir / "daily", sorted(names))
+    (backup_dir / ".last-good-dump").write_text(f"{ts} {ids}".strip() + "\n")
+    return ts, names
+
+
+class TestLastDumpWithRecords:
+    @pytest.mark.parametrize(
+        ("marked_ids", "psql_row"),
+        [
+            (f"{_ID_A} {_ID_B}", "0|0|"),
+            (f"{_ID_A} {_ID_B}", f"5|0|{_ID_C}"),
+            (_ID_A, f"1|0|{_ID_C}"),
+            ("", "0|0|"),
+        ],
+        ids=["empty", "new-records-only", "one-record-catalog", "old-marker"],
+    )
+    def test_the_days_good_set_survives(
+        self, tmp_path: Path, marked_ids: str, psql_row: str | None
+    ):
+        good_ts, good_set = _seed_earlier_good_set(tmp_path / "backups", marked_ids)
+        marker_before = (tmp_path / "backups" / ".last-good-dump").read_text()
+        result, backup_dir = _cycle(tmp_path, psql_row=psql_row)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert good_set <= _names(backup_dir / "daily")
+        assert (backup_dir / ".last-good-dump").read_text() == marker_before
+        assert f"retention keeps {good_ts}" in result.stderr
+
+    def test_with_no_marker_an_empty_catalog_keeps_the_prior_set(self, tmp_path: Path):
+        good_ts, good_set = _seed_earlier_good_set(tmp_path / "backups", "")
+        (tmp_path / "backups" / ".last-good-dump").unlink()
+        result, backup_dir = _cycle(tmp_path, psql_row="0|0|")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert good_set <= _names(backup_dir / "daily")
+        # Persisted, so the next empty cycle can't pick this cycle's dump.
+        assert (backup_dir / ".last-good-dump").read_text() == f"{good_ts}\n"
+
+    def test_a_failed_check_fails_the_cycle_and_keeps_the_marker(self, tmp_path: Path):
+        good_ts, good_set = _seed_earlier_good_set(tmp_path / "backups", _ID_A)
+        marker_before = (tmp_path / "backups" / ".last-good-dump").read_text()
+        result, backup_dir = _cycle(tmp_path, psql_row=None)
+        assert result.returncode != 0
+        assert not (backup_dir / ".last-success").exists()
+        assert good_set <= _names(backup_dir / "daily")
+        assert (backup_dir / ".last-good-dump").read_text() == marker_before
+        assert f"retention keeps {good_ts}" in result.stderr
+
+    def test_a_failed_marker_write_fails_the_cycle(self, tmp_path: Path):
+        result, backup_dir = _cycle(tmp_path, marker_publish_fails=True)
+        assert result.returncode != 0
+        assert not (backup_dir / ".last-success").exists()
+        assert "could not record" in result.stdout
+
+    def test_the_check_gets_the_marked_ids_and_logs_how_many_remain(
+        self, tmp_path: Path
+    ):
+        good_ts, _ = _seed_earlier_good_set(tmp_path / "backups", f"{_ID_A} {_ID_B}")
+        result, _ = _cycle(tmp_path, psql_row=f"5|0|{_ID_C}")
+        args = (tmp_path / "psql-args").read_text().splitlines()
+        assert f"ids={{{_ID_A},{_ID_B}}}" in args
+        assert f"5 catalog records, 0 of the 2 sampled from {good_ts}" in result.stderr
+
+    @pytest.mark.parametrize(
+        "failure",
+        [{"globals_fail": True}, {"s3_enabled": True, "cp_exit": 1}],
+        ids=["globals", "offsite-upload"],
+    )
+    def test_a_failed_cycle_does_not_take_over(self, tmp_path: Path, failure: dict):
+        good_ts, good_set = _seed_earlier_good_set(tmp_path / "backups", _ID_A)
+        marker_before = (tmp_path / "backups" / ".last-good-dump").read_text()
+        result, backup_dir = _cycle(
+            tmp_path, psql_row=f"2|1|{_ID_A} {_ID_B}", **failure
+        )
+        assert result.returncode != 0
+        assert good_set <= _names(backup_dir / "daily")
+        assert (backup_dir / ".last-good-dump").read_text() == marker_before
+        assert f"retention keeps {good_ts} rather than" in result.stdout
+
+    @pytest.mark.parametrize(
+        ("marked_ids", "psql_row"),
+        [(f"{_ID_A} {_ID_B}", f"3|1|{_ID_A} {_ID_C}"), ("", f"1|0|{_ID_C}")],
+        ids=["half-remain", "old-marker"],
+    )
+    def test_a_database_with_the_marked_records_takes_over(
+        self, tmp_path: Path, marked_ids: str, psql_row: str
+    ):
+        _, good_set = _seed_earlier_good_set(tmp_path / "backups", marked_ids)
+        result, backup_dir = _cycle(tmp_path, psql_row=psql_row)
+        assert result.returncode == 0, result.stdout + result.stderr
+        new_ts, *sample = (backup_dir / ".last-good-dump").read_text().split()
+        assert " ".join(sample) == psql_row.split("|")[2]
+        assert f"geolens_{new_ts}.dump" in _names(backup_dir / "daily")
+        assert not good_set & _names(backup_dir / "daily")
 
 
 def _healthcheck_command(compose_file: str) -> str:
