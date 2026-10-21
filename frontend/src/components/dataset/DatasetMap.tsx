@@ -1,4 +1,4 @@
-import { memo, useMemo, useEffect, useRef, useCallback, useState, type RefObject } from 'react';
+import { lazy, memo, Suspense, useMemo, useEffect, useRef, useCallback, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Map as MapGL, Source, Layer, NavigationControl } from '@vis.gl/react-maplibre';
 import { useTheme } from '@/components/theme-provider';
@@ -53,6 +53,10 @@ import { reportTileTokenRemint } from '@/lib/report';
 // Wires maplibre v6's worker URL. Side-effect import, kept out of
 // main.tsx so map-vendor stays out of the eager entry graph.
 import '@/lib/maplibre-worker';
+
+const EMPTY_FEATURES = { type: 'FeatureCollection' as const, features: [] };
+
+const Dataset3DOverlay = lazy(() => import('@/components/dataset/viewer3d/Dataset3DOverlay'));
 
 /** System columns excluded from the attribute form */
 const SYSTEM_COLUMNS = new Set(['gid', 'geom', 'geom_4326']);
@@ -131,6 +135,8 @@ interface DatasetMapProps {
   containerRef?: RefObject<HTMLDivElement | null>;
   canEdit?: boolean;
   recordType?: string;
+  /** The 3D Tiles tileset to draw over the map, when the viewer can draw it. */
+  tilesetUrl?: string | null;
   rasterTileUrl?: string | null;
   isDem?: boolean;
   /** ISO timestamp or version string appended to tile URLs to bust browser cache after mutations */
@@ -158,6 +164,7 @@ export const DatasetMap = memo(function DatasetMap({
   containerRef,
   canEdit = false,
   recordType,
+  tilesetUrl = null,
   rasterTileUrl,
   isDem,
   tileVersion,
@@ -1074,7 +1081,7 @@ export const DatasetMap = memo(function DatasetMap({
     setPendingGeometry(null);
   }, []);
 
-  if (!hasBbox && !tableName) {
+  if (!hasBbox && !tableName && !tilesetUrl) {
     return (
       <div className="flex items-center justify-center h-[500px] bg-muted rounded-md text-muted-foreground text-sm">
         {t('page.noSpatialExtent')}
@@ -1137,6 +1144,20 @@ export const DatasetMap = memo(function DatasetMap({
         onError={logUnhandledMapError}
       >
         <NavigationControl position="top-right" />
+
+        {tilesetUrl && mapInstance && datasetId && (
+          <Suspense fallback={null}>
+            <Dataset3DOverlay datasetId={datasetId} tilesetUrl={tilesetUrl} fitToTileset={!hasBbox} />
+          </Suspense>
+        )}
+
+        {/* An extentless tileset has no outline to hang the required credit line on. */}
+        {!bboxGeojson && tilesetUrl && bboxAttribution && (
+          <Source id="bbox-source" type="geojson" data={EMPTY_FEATURES} attribution={bboxAttribution}>
+            {/* MapLibre lists a source's attribution only while a layer uses it. */}
+            <Layer id="bbox-attribution" type="line" paint={{ 'line-opacity': 0 }} />
+          </Source>
+        )}
 
         {/* Bbox overlay for spatial context */}
         {bboxGeojson && (
