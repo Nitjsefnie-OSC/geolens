@@ -23,6 +23,10 @@ and releases use semantic versioning.
   request, with the held refresh run for a replacement under review. Ids that
   don't exist and jobs you may not read both come back as `not_found`. API
   keys limited to read-only can call it.
+- `GET /capabilities/` describes the server for desktop and script clients:
+  version, sign-in methods, basemaps, workflow statuses and rate limits, plus
+  upload limits and the caller's permissions and API key scope when the request
+  carries credentials.
 
 ## [1.26.0] - 2026-10-18
 
