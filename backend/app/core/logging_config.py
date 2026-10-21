@@ -166,6 +166,20 @@ _TOKEN_VALUE_RE = re.compile(
 )
 
 
+# A GeoLens API key carries the glk_ prefix (auth/service.py API_KEY_PREFIX),
+# so a pasted one is recognisable in any string, whatever field it sits in.
+_API_KEY_VALUE_RE = re.compile(r"glk_[A-Za-z0-9_-]{20,}")
+
+
+def _redact_api_keys(value: str) -> str:
+    return _API_KEY_VALUE_RE.sub("glk_[REDACTED]", value) if "glk_" in value else value
+
+
+# A renderer writes these as their repr, which carries their text verbatim
+# (an exception's message, raw header bytes), so the repr is scrubbed instead.
+_RENDERED_AS_REPR = (BaseException, bytes, bytearray)
+
+
 def _redact_token_value_repr(value: str) -> str:
     """Redact a `'token': '...'` (dict-repr) or `token='...'` (kwarg) pair."""
 
@@ -245,6 +259,7 @@ def _scrub_text(value: str) -> str:
     value = URL_LIKE_RE.sub(_redact_url_match, value)
     value = _QUERY_TAIL_RE.sub(_redact_query_tail_match, value)
     value = _redact_token_value_repr(value)
+    value = _redact_api_keys(value)
     return scrub_registered_credentials(value)
 
 
@@ -270,6 +285,9 @@ def _redact_sensitive_fields(
     line, Procrastinate's keyword-rendered task_kwargs). `event` is scrubbed
     here by pattern and shape instead.
 
+    Any other flat string field, and every field name, is checked for a
+    ``glk_`` API key, which is recognisable by shape wherever it sits.
+
     `exception` gets the identical scrub when present as
     a string. `format_exc_info` runs BEFORE this processor (see
     `setup_logging`) so `exception` is already a plain string by then.
@@ -277,13 +295,21 @@ def _redact_sensitive_fields(
     dev's rich-based renderer turns it into text after this processor.
     """
     for key in list(event_dict.keys()):
+        if isinstance(key, str) and "glk_" in key:
+            renamed = _redact_api_keys(key)
+            event_dict[renamed] = event_dict.pop(key)
+            key = renamed
         if key.lower() in _SENSITIVE_FIELDS:
             event_dict[key] = "[REDACTED]"
             continue
         value = event_dict[key]
         if key in _NEVER_WALKED_FIELDS:
             continue
-        if _is_walkable(value):
+        if isinstance(value, str):
+            event_dict[key] = _redact_api_keys(value)
+        elif isinstance(value, _RENDERED_AS_REPR):
+            event_dict[key] = _scrub_text(repr(value))
+        elif _is_walkable(value):
             # A container in `extra` is third-party
             # input all the way down; a lazy Mapping whose `.items()` raises
             # would take the exception out through the chain and cost the
@@ -338,9 +364,10 @@ def redact_nested(value: Any, _depth: int = 0) -> Any:
     Depth is capped since a caller-supplied payload need not be JSON-derived;
     a self-referencing structure would otherwise not terminate.
 
-    ``frozenset``, ``deque`` and dataclass instances are walked; anything
-    else is returned as-is. A dataclass yields field name to redacted value
-    via ``dataclasses.fields``.
+    ``frozenset``, ``deque`` and dataclass instances are walked, and an
+    exception or byte string becomes its scrubbed repr; anything else is
+    returned as-is. A dataclass yields field name to redacted value via
+    ``dataclasses.fields``.
     """
     if _depth >= _MAX_REDACT_DEPTH:
         return "[TRUNCATED]"
@@ -350,6 +377,8 @@ def redact_nested(value: Any, _depth: int = 0) -> Any:
         return _redact_items(value.items(), _depth)
     if isinstance(value, _ITERABLE_CONTAINERS):
         return [redact_nested(item, _depth + 1) for item in value]
+    if isinstance(value, _RENDERED_AS_REPR):
+        return _scrub_text(repr(value))
     if _is_dataclass_instance(value):
         return _redact_items(
             [
@@ -361,10 +390,19 @@ def redact_nested(value: Any, _depth: int = 0) -> Any:
     return value
 
 
+def _safe_key(key: Any) -> Any:
+    """A mapping key a renderer can write without exposing or choking on it."""
+    if isinstance(key, str):
+        return _redact_api_keys(key)
+    if key is None or isinstance(key, (bool, int, float)):
+        return key
+    return _scrub_text(repr(key))
+
+
 def _redact_items(items: Any, _depth: int) -> dict:
     """Key-denylist plus a recursive walk, for anything with named members."""
     return {
-        key: (
+        _safe_key(key): (
             "[REDACTED]"
             if str(key).lower() in _SENSITIVE_FIELDS
             else redact_nested(val, _depth + 1)
@@ -397,6 +435,15 @@ def apply_http_logger_levels(root_level: int | str) -> None:
     level = max(logging.WARNING, root_level)
     for _log in HTTP_CLIENT_LOGGERS:
         logging.getLogger(_log).setLevel(level)
+
+
+def _redact_rendered_line(_logger: Any, _method_name: str, line: Any) -> Any:
+    """Scrub glk_ API keys from the line the renderer produced.
+
+    The field redactor sees values, not what the renderer makes of them: an
+    object's repr, a custom serializer's output, a mapping key's text.
+    """
+    return _redact_api_keys(line) if isinstance(line, str) else line
 
 
 def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
@@ -461,6 +508,7 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             log_renderer,
+            _redact_rendered_line,
         ],
     )
 
