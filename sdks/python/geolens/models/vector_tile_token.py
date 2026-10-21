@@ -7,7 +7,8 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 
-from typing import Literal, cast
+from typing import cast
+from typing import Literal
 
 
 T = TypeVar("T", bound="VectorTileToken")
@@ -22,6 +23,8 @@ class VectorTileToken:
         exp (int):
         scope (str):
         expires_in (int):
+        tile_url_template (None | str): Signed vector tile URL template, relative to the API root, with `{z}`, `{x}` and
+            `{y}` left for the client to fill in. Null for a dataset with no geometry, which has no tiles to request.
     """
 
     kind: Literal["vector"]
@@ -29,6 +32,7 @@ class VectorTileToken:
     exp: int
     scope: str
     expires_in: int
+    tile_url_template: None | str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +46,9 @@ class VectorTileToken:
 
         expires_in = self.expires_in
 
+        tile_url_template: None | str
+        tile_url_template = self.tile_url_template
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -51,6 +58,7 @@ class VectorTileToken:
                 "exp": exp,
                 "scope": scope,
                 "expires_in": expires_in,
+                "tile_url_template": tile_url_template,
             }
         )
 
@@ -71,12 +79,20 @@ class VectorTileToken:
 
         expires_in = d.pop("expires_in")
 
+        def _parse_tile_url_template(data: object) -> None | str:
+            if data is None:
+                return data
+            return cast(None | str, data)
+
+        tile_url_template = _parse_tile_url_template(d.pop("tile_url_template"))
+
         vector_tile_token = cls(
             kind=kind,
             sig=sig,
             exp=exp,
             scope=scope,
             expires_in=expires_in,
+            tile_url_template=tile_url_template,
         )
 
         vector_tile_token.additional_properties = d

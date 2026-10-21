@@ -62,6 +62,26 @@ def tile_template_query(
     )
 
 
+def vector_tile_template(
+    table_name: str,
+    tile_cache_version: int | None,
+    publication_version: int | None,
+    signature: dict[str, str | int] | None = None,
+) -> str:
+    """The vector tile URL template, relative to the API root.
+
+    ``signature`` is the ``sig``, ``exp`` and ``scope`` a private dataset's
+    tiles are requested with.
+    """
+    # The vector tile route reads the content version as ``_v``, not the
+    # raster cache's ``v``, to learn that its metadata snapshot is stale.
+    versions = tile_template_params(tile_cache_version, publication_version)
+    if "v" in versions:
+        versions["_v"] = versions.pop("v")
+    params = {**(signature or {}), **versions}
+    return f"/tiles/data.{table_name}/{{z}}/{{x}}/{{y}}.pbf?{urlencode(params)}"
+
+
 # The vector tile routes a stored distribution row can name. A raster row is
 # never stored: ``published_distributions`` synthesizes that entry per request.
 _STORED_TILE_TEMPLATE_PREFIXES = ("/tiles/data.", "/tiles/clusters/data.")

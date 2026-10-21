@@ -296,6 +296,98 @@ async def test_get_dataset_collection_metadata(
     assert "application/json" in resp.headers["content-type"]
 
 
+def _tiles_links(data: dict) -> list[dict]:
+    return [link for link in data["links"] if link["rel"] == "tiles"]
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_init_tile_pool_for_tests")
+async def test_vector_collection_links_its_vector_tile_template(
+    client: AsyncClient, public_dataset: Dataset
+):
+    """A vector collection advertises a templated MVT link on the public API URL."""
+    data = (await client.get(f"/collections/{public_dataset.id}")).json()
+    (link,) = _tiles_links(data)
+    assert link["type"] == "application/vnd.mapbox-vector-tile"
+    assert link["templated"] is True
+    assert link["href"].startswith("http")
+    assert (
+        f"/tiles/data.{public_dataset.table_name}/{{z}}/{{x}}/{{y}}.pbf" in link["href"]
+    )
+    assert f"_v={public_dataset.tile_cache_version}" in link["href"]
+
+    # The template is the real tile route: filled in, it serves the dataset.
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(link["href"])
+    path = parts.path.removeprefix("/api").format(z=0, x=0, y=0)
+    tile = await client.get(f"{path}?{parts.query}")
+    assert tile.status_code in (200, 204)
+
+
+@pytest.mark.anyio
+async def test_a_table_without_geometry_advertises_no_vector_tiles(
+    client: AsyncClient, test_db_session
+):
+    admin_id = await get_user_id(test_db_session, "admin")
+    dataset = await _create_test_table_and_dataset(
+        test_db_session, created_by=admin_id, visibility="public"
+    )
+    try:
+        await test_db_session.execute(
+            text("UPDATE catalog.datasets SET geometry_type = NULL WHERE id = :id"),
+            {"id": dataset.id},
+        )
+        await test_db_session.commit()
+        data = (await client.get(f"/collections/{dataset.id}")).json()
+        assert _tiles_links(data) == []
+    finally:
+        await _cleanup_table(test_db_session, dataset.table_name)
+
+
+@pytest.mark.anyio
+async def test_private_vector_collection_is_hidden_from_anonymous_callers(
+    client: AsyncClient, private_dataset: Dataset, admin_auth_header: dict
+):
+    assert (await client.get(f"/collections/{private_dataset.id}")).status_code == 404
+    data = (
+        await client.get(
+            f"/collections/{private_dataset.id}", headers=admin_auth_header
+        )
+    ).json()
+    assert len(_tiles_links(data)) == 1
+
+
+@pytest.mark.anyio
+async def test_raster_collection_keeps_only_its_raster_tiles_link(
+    client: AsyncClient, raster_dataset: Dataset
+):
+    data = (await client.get(f"/collections/{raster_dataset.id}")).json()
+    (link,) = _tiles_links(data)
+    assert link["type"] == "image/png"
+    assert "templated" not in link
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_init_tile_pool_for_tests")
+async def test_vector_tile_token_carries_a_working_signed_template(
+    client: AsyncClient, private_dataset: Dataset, admin_auth_header: dict
+):
+    resp = await client.get(
+        f"/tiles/token/{private_dataset.id}/", headers=admin_auth_header
+    )
+    assert resp.status_code == 200, resp.text
+    token = resp.json()
+    template = token["tile_url_template"]
+    assert template.startswith(
+        f"/tiles/data.{private_dataset.table_name}/{{z}}/{{x}}/{{y}}.pbf?"
+    )
+    assert f"sig={token['sig']}" in template
+    # Signed, so an anonymous client can read the private dataset with it.
+    tile = await client.get(template.format(z=0, x=0, y=0))
+    assert tile.status_code in (200, 204)
+
+
 @pytest.mark.anyio
 async def test_collection_not_found(client: AsyncClient):
     """GET /collections/{nonexistent_uuid} returns 404."""
@@ -822,3 +914,25 @@ async def test_the_single_feature_route_refuses_another_crs_too(
     url = f"/collections/{public_dataset.id}/items/{feature_id}"
     assert (await client.get(url, params={"crs": "EPSG:3857"})).status_code == 400
     assert (await client.get(url, params={"crs": "[OGC:CRS84]"})).status_code == 200
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_init_tile_pool_for_tests")
+async def test_a_geometry_less_dataset_gets_a_token_without_a_tile_template(
+    client: AsyncClient, test_db_session
+):
+    admin_id = await get_user_id(test_db_session, "admin")
+    dataset = await _create_test_table_and_dataset(
+        test_db_session, created_by=admin_id, visibility="public"
+    )
+    try:
+        await test_db_session.execute(
+            text("UPDATE catalog.datasets SET geometry_type = NULL WHERE id = :id"),
+            {"id": dataset.id},
+        )
+        await test_db_session.commit()
+        resp = await client.get(f"/tiles/token/{dataset.id}/")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["tile_url_template"] is None
+    finally:
+        await _cleanup_table(test_db_session, dataset.table_name)
