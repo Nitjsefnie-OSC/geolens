@@ -39,6 +39,11 @@ and releases use semantic versioning.
   URIs or `[OGC:CRS84]`). They were ignored before, so `crs=EPSG:3857` returned
   CRS84 coordinates without saying so. `filter-crs` accepts the same spellings.
 
+### Fixed
+
+- Editing a category colour in the map builder no longer resets the layer's catch-all colour to
+  grey. A fallback colour set elsewhere, such as in imported style JSON, is kept.
+
 ## [1.26.0] - 2026-10-18
 
 ### Added

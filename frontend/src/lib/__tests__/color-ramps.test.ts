@@ -4,6 +4,7 @@ import {
   colorClassificationIsOrphaned,
   reconcileColorClassification,
   buildCategoricalExpression,
+  categoricalFallbackOf,
   buildGraduatedSizeExpression,
   getSizeProperty,
   getColorProperty,
@@ -445,5 +446,36 @@ describe('reconcileColorClassification', () => {
   it('collapses to null when the claim was all the config had', () => {
     const claimOnly = { mode: 'categorical', categories: [{ value: 'a', color: '#111' }] } as StyleConfig;
     expect(reconcileColorClassification(claimOnly, {}, 'Polygon')).toBeNull();
+  });
+});
+
+describe('categoricalFallbackOf', () => {
+  it('reads back the fallback buildCategoricalExpression wrote', () => {
+    const expression = buildCategoricalExpression('kind', [['a', '#111111']], '#abcdef');
+    expect(categoricalFallbackOf(expression)).toBe('#abcdef');
+    expect(categoricalFallbackOf(['match', ['get', 'kind'], 'a', '#111111', '#fedcba'])).toBe('#fedcba');
+  });
+
+  it('prefers the nested match catch-all over a different null colour', () => {
+    const guarded = ['case', ['==', ['get', 'kind'], null], '#000000', ['match', ['get', 'kind'], 'a', '#111111', '#fedcba']];
+    expect(categoricalFallbackOf(guarded)).toBe('#fedcba');
+  });
+
+  it('does not take a nested match from a hand-authored case', () => {
+    const match = ['match', ['get', 'kind'], 'a', '#111111', '#fedcba'];
+    expect(categoricalFallbackOf(['case', ['>', ['get', 'n'], 3], '#ff0000', match])).toBeNull();
+    expect(
+      categoricalFallbackOf(['case', ['==', ['get', 'kind'], null], '#000000', ['has', 'x'], '#222222', match]),
+    ).toBeNull();
+  });
+
+  it('reads the final arm of a general case expression', () => {
+    expect(categoricalFallbackOf(['case', ['>', ['get', 'n'], 3], '#ff0000', '#cccccc'])).toBe('#cccccc');
+  });
+
+  it('returns null for a paint that is not a categorical expression', () => {
+    expect(categoricalFallbackOf('#3b82f6')).toBeNull();
+    expect(categoricalFallbackOf(undefined)).toBeNull();
+    expect(categoricalFallbackOf(['step', ['get', 'n'], '#000000', 5, '#ffffff'])).toBeNull();
   });
 });
