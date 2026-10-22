@@ -55,8 +55,8 @@ and releases use semantic versioning.
   `scope: "publish"` on `POST /auth/api-keys` and `POST /admin/api-keys`. A
   publish key can read, upload and import, apply manifests, edit dataset
   metadata, create and import maps, and replace an uploaded dataset's data.
-  A replacement keeps one previous version, as a reupload in the app does, so
-  a second replacement in a row leaves only the first one's data to restore.
+  A replacement keeps the data it replaces as a previous version, as a
+  reupload in the app does, up to the instance's limit on kept versions.
   It can't update an existing map (`PUT /maps/{id}`; a republish creates a new
   map), delete anything, write features, reach admin or key routes, or replace
   a raster dataset or one bound to a service, STAC item or table, and it acts
@@ -81,6 +81,24 @@ and releases use semantic versioning.
   columns that could not be matched. Re-uploading a file fills it in.
 - The web app serves the license notices for the code it bundles at
   `/third-party-licenses.txt`, linked from the footer as **Third-party licenses**.
+- A dataset now keeps its last three previous versions instead of one. An
+  administrator sets the number under Settings, Storage
+  (`previous_versions_kept`, 1 to 50). Lowering it drops the oldest versions at
+  each dataset's next replacement or restore. The dataset detail lists them in
+  `previous_versions`, newest first. `POST
+  /datasets/{id}/previous-versions/{version_number}/restore` restores any of
+  them, and `DELETE /datasets/{id}/previous-versions/{version_number}` deletes
+  one. The admin stats report their size in `previous_versions_bytes`, and
+  `total_storage_bytes` now counts them. Three kept versions take up to three
+  times a replaced dataset's size; set the limit to 1 to keep the earlier
+  behaviour.
+
+### Deprecated
+
+- `POST /datasets/{id}/previous-version/restore`, `DELETE
+  /datasets/{id}/previous-version` and the dataset detail's `previous_version`
+  field act on the newest kept version only. They keep working through the next
+  minor release; use the `previous-versions` routes and field instead.
 
 ### Fixed
 
