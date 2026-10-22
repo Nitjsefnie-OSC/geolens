@@ -146,7 +146,7 @@ async def test_unknown_scope_is_rejected(client: AsyncClient):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("scope", ["full", "read_only"])
+@pytest.mark.parametrize("scope", ["full", "read_only", "publish"])
 async def test_scope_appears_in_the_audit_event(
     client: AsyncClient, test_db_session, scope
 ):

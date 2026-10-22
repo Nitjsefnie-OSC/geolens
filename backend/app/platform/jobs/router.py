@@ -27,6 +27,7 @@ from app.modules.auth.dependencies import (
 )
 from app.processing.ingest.schemas import UploadResponse
 from app.processing.ingest.service import queue_ingest_job
+from app.platform.request_credential import is_publish_key, refuse_publish_key
 from app.platform.extensions import get_permission_extension
 from app.platform.jobs.ledger import Outcome, cancel, retry
 from app.platform.jobs.models import (
@@ -155,8 +156,15 @@ async def _may_read_job(
     *,
     log_denial: bool = True,
 ) -> bool:
-    """Owners always read their job; anyone else follows the permission policy."""
-    return job.created_by == user.id or await _can_access_another_users_job(
+    """Owners always read their job; anyone else follows the permission policy.
+
+    A publish key reads only its owner's jobs, whatever its owner may read.
+    """
+    if job.created_by == user.id:
+        return True
+    if is_publish_key(db):
+        return False
+    return await _can_access_another_users_job(
         request, db, user, job, log_denial=log_denial
     )
 
@@ -427,6 +435,8 @@ async def get_job_status(
             detail="Job not found",
         )
 
+    if job.created_by != user.id:
+        refuse_publish_key(db, "A publish key can read only its owner's jobs")
     if not await _may_read_job(request, db, user, job):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -799,9 +809,10 @@ async def get_job_status_by_dataset(
     # The gate above is a VISIBILITY check; it says nothing about whose job
     # row this is. The creator keeps the full payload (the import flow polls
     # this route); everyone else goes through the provenance predicate
-    # ``list_dataset_refresh_runs`` applies to this text.
-    include_detail = job.created_by == user.id or can_view_dataset_provenance(
-        record, user, user_roles
+    # ``list_dataset_refresh_runs`` applies to this text, except a publish key,
+    # which reads only its owner's jobs in full.
+    include_detail = job.created_by == user.id or (
+        not is_publish_key(db) and can_view_dataset_provenance(record, user, user_roles)
     )
     return await _job_to_status_response(job, include_detail=include_detail)
 
@@ -835,6 +846,18 @@ async def retry_job(
             detail="Job not found",
         )
 
+    if job.created_by != user.id:
+        refuse_publish_key(db, "A publish key can retry only its owner's jobs")
+    metadata = job.user_metadata or {}
+    # Asked for by another credential: a publish key's own jobs never make
+    # anything public or change an existing dataset's visibility. A job aimed
+    # at an existing dataset names it in its metadata, since retry clears the
+    # column.
+    targets_dataset = metadata.get("dataset_id") or metadata.get("reupload")
+    if metadata.get("visibility") == "public" or (
+        targets_dataset and "visibility" in metadata
+    ):
+        refuse_publish_key(db, "A publish key can't retry a job that sets visibility")
     # Owners always retain access. Cross-user retries additionally require the
     # effective manage_users capability through PermissionExtension.
     if job.created_by != user.id and not await _can_access_another_users_job(
@@ -1010,6 +1033,8 @@ async def cancel_job(
             detail="Job not found",
         )
 
+    if job.created_by != user.id:
+        refuse_publish_key(db, "A publish key can cancel only its owner's jobs")
     if not await _may_cancel_job(request, db, user, job):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

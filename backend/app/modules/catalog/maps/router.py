@@ -90,6 +90,7 @@ from app.modules.embed_tokens.service import (
     revoke_embed_tokens_by_map,
     revoke_embed_tokens_for_dropped_datasets,
 )
+from app.platform.request_credential import refuse_publish_key
 from app.platform.binary_response import binary_response
 from app.platform.storage.titiler_url import (
     resolve_current_storage_key as _map_asset_storage_key,
@@ -470,12 +471,13 @@ async def update_map_endpoint(
     await check_map_ownership(map_obj, user, db)
     await _readable_terrain(db, user, body.terrain_config, map_obj.terrain_config)
 
-    # Auto-revoke share tokens when visibility moves away from public
+    # Auto-revoke share tokens when visibility moves away from public. Layer
+    # writers hold the map while they revoke tokens; taking it first keeps the
+    # two from waiting on each other, and the visibility read under it is current.
     if body.visibility is not None and body.visibility != MapVisibility.public:
-        if map_obj.visibility == "public":
-            # Layer writers hold the map while they revoke tokens; taking it
-            # first keeps the two from waiting on each other.
-            await lock_map_layers(db, map_id)
+        await lock_map_layers(db, map_id)
+        current = await db.scalar(select(Map.visibility).where(Map.id == map_id))
+        if current == "public":
             await revoke_share_token_by_map(db, map_id)
             # Embed tokens must be revoked too, or they keep serving tiles
             # for a now-private map.
@@ -487,10 +489,7 @@ async def update_map_endpoint(
 
     # Hard block: prevent publishing maps with non-public datasets. A request
     # that also replaces the layers is checked on the layers it leaves.
-    if (
-        body.visibility == MapVisibility.public
-        and "layers" not in body.model_fields_set
-    ):
+    if body.visibility == MapVisibility.public and body.layers is None:
         non_public = await validate_public_visibility(db, map_id, user)
         if non_public:
             raise HTTPException(
@@ -646,7 +645,7 @@ async def update_map_endpoint(
             details=details,
         )
 
-    if "layers" in kwargs:
+    if body.layers is not None:
         await _reject_non_public_datasets(db, map_obj, user)
         # Replacing the layer set can drop a dataset an embed token is
         # scoped to; revoke orphaned tokens so they stop serving its tiles.
@@ -995,6 +994,8 @@ async def upload_thumbnail(
             detail="Map not found",
         )
     await check_map_ownership(map_obj, user, db)
+    if map_obj.thumbnail_uri:
+        refuse_publish_key(db, "A publish key can't replace a map's thumbnail")
 
     if not data_uri.startswith("data:image/"):
         raise HTTPException(
@@ -1064,6 +1065,8 @@ async def upload_thumbnail(
         # the PUT would let a stalled backend block every other writer.
         locked = await lock_map_for_asset_write(db, map_id)
         previous_key = locked.thumbnail_uri
+        if previous_key:
+            refuse_publish_key(db, "A publish key can't replace a map's thumbnail")
 
         await _record_image_capture(db, map_id, thumbnail_uri=storage_key)
         # Commit is the boundary, marked before it —
@@ -1156,6 +1159,8 @@ async def upload_og_image(
             detail="Map not found",
         )
     await check_map_ownership(map_obj, user, db)
+    if map_obj.og_image_uri:
+        refuse_publish_key(db, "A publish key can't replace a map's preview image")
 
     if not data_uri.startswith("data:image/"):
         raise HTTPException(
@@ -1216,6 +1221,8 @@ async def upload_og_image(
         # Same row lock and ordering as the thumbnail PUT above.
         locked = await lock_map_for_asset_write(db, map_id)
         previous_key = locked.og_image_uri
+        if previous_key:
+            refuse_publish_key(db, "A publish key can't replace a map's preview image")
 
         await _record_image_capture(db, map_id, og_image_uri=storage_key)
         # Commit is the boundary, marked before it —

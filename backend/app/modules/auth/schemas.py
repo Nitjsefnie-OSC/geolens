@@ -249,12 +249,15 @@ class ApiKeyCreateRequest(BaseModel):
             "for a non-expiring key; expired keys stop authenticating."
         ),
     )
-    scope: Literal["full", "read_only"] = Field(
+    scope: Literal["full", "read_only", "publish"] = Field(
         default="full",
         description=(
             "Privilege scope. 'full' impersonates the owner completely. "
             "'read_only' authenticates GET, HEAD and "
-            "OPTIONS requests only; any other method is refused with 403."
+            "OPTIONS requests only; any other method is refused with 403. "
+            "'publish' also allows uploads, manifest apply, dataset metadata "
+            "edits and new maps, but no map update, delete, feature write, "
+            "public visibility, admin or key route."
         ),
     )
 
@@ -295,9 +298,12 @@ class DatasetApiKeyCreateRequest(BaseModel):
 
 
 _SCOPE_DESCRIPTION = (
-    "Privilege scope: 'full', 'read_only', 'dataset_write' (reads and writes "
-    "the features of the dataset in dataset_id, and nothing else), or "
-    "'dataset_append' (only creates features in that dataset)"
+    "Privilege scope: 'full', 'read_only', 'publish' (reads, uploads, manifest "
+    "apply, dataset metadata edits and new maps, but no map updates, deletes, "
+    "feature writes or public visibility), "
+    "'dataset_write' (reads and writes the features of the dataset in "
+    "dataset_id, and nothing else), or 'dataset_append' (only creates features "
+    "in that dataset)"
 )
 _DATASET_ID_DESCRIPTION = (
     "The dataset a 'dataset_write' or 'dataset_append' key is bound to; null "

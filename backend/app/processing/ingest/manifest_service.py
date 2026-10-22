@@ -27,6 +27,7 @@ from app.core.geo import unknown_srid_refusal
 from app.core.db.tenant_session import defer_async_with_tenant
 from app.core.identity import Identity, IdentitySnapshot
 from app.core.persistent_config import UPLOAD_MAX_SIZE_MB, get_allowed_extensions_list
+from app.platform.dataset_origin import classify_origin
 from app.platform.extensions import get_catalog_port, get_processing_port
 from app.platform.extensions.entitlement import enforce_limit
 from app.platform.jobs.defer_guard import (
@@ -37,6 +38,7 @@ from app.platform.jobs.defer_guard import (
 from app.platform.jobs.sweep import JOB_TIMEOUT_SECONDS
 from app.platform.catalog_locks import CatalogLockConflict
 from app.platform.refresh.service import DatasetBusyError, create_pending_run
+from app.platform.request_credential import is_publish_key, refuse_publish_key
 
 from app.platform.jobs import ledger
 from app.platform.jobs.models import (
@@ -684,6 +686,13 @@ async def _admit_refresh_run(
         raise DatasetBusyError(str(exc)) from exc
     except HTTPException as exc:
         raise WriteAccessRevoked from exc
+    # Rechecked under the lock: the binding may have changed while the source
+    # was being staged.
+    await db.refresh(dataset, attribute_names=["source_format"])
+    try:
+        _refuse_publish_key_remote_origin(db, dataset)
+    except HTTPException as exc:
+        raise ManifestSourceError(exc.detail["message"]) from exc
     if raw_source and "admin" not in await get_processing_port().get_user_roles(
         db, user
     ):
@@ -753,6 +762,18 @@ def _validate_existing_dataset_update(
         )
 
 
+def _refuse_publish_key_remote_origin(db: AsyncSession, existing_dataset) -> None:
+    # The update replaces the source binding, and a restore can bring back only
+    # an upload's or a drawn layer's.
+    origin = classify_origin(
+        existing_dataset.source_format, existing_dataset.record.record_type
+    )
+    if origin not in ("upload", "created"):
+        refuse_publish_key(
+            db, "A publish key can't replace a dataset bound to a remote origin"
+        )
+
+
 async def _reserve_entry(
     db: AsyncSession,
     dataset: ManifestDataset,
@@ -784,6 +805,10 @@ async def _reserve_entry(
     if dataset_id is not None:
         metadata["reupload"] = True
         metadata["dataset_id"] = str(dataset_id)
+        if is_publish_key(db):
+            # The worker applies it later, over whatever the dataset's
+            # visibility is by then, so a publish key's update keeps it.
+            metadata.pop("visibility", None)
         metadata[ADMITTED_CAPABILITY_METADATA_KEY] = UPLOAD
         from app.modules.catalog.authorization import admitted_public_visibility
 
@@ -1168,6 +1193,7 @@ async def _reserve_or_settle_entry(
         # Run after authorization (to avoid leaking another user's dataset
         # type) but before dry-run reporting, staging, or queue creation.
         _validate_existing_dataset_update(existing_dataset, prepared)
+        _refuse_publish_key_remote_origin(db, existing_dataset)
         update_dataset_id = existing_dataset.id
 
     if request.dry_run:

@@ -25,8 +25,10 @@ from app.platform.extensions import get_identity_extension, get_permission_exten
 from app.platform.request_credential import (
     DATASET_KEY_SCOPE_ROUTES,
     ApiKeyCredential,
+    api_key_scope_refusal,
     mark_header_api_key_evaluated,
     record_api_key,
+    refuse_publish_key,
 )
 
 oauth2_scheme_optional = OAuth2PasswordBearer(
@@ -131,6 +133,74 @@ _READ_ONLY_KEY_EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+# A publish key may do what a read_only key may, plus these exact (METHOD,
+# route template) pairs: writes that add something or that the catalog can
+# undo (a republish keeps the previous version). Every delete, feature write,
+# map update, admin and key route stays out, since none of them can be undone.
+# Same matching rules and spelling as the read_only exemptions above; only the
+# spellings each route registers are listed.
+_PUBLISH_KEY_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/tiles/tokens/"),
+        ("POST", "/tiles/tokens"),
+        ("POST", "/ingest/upload"),
+        ("POST", "/ingest/upload/presigned"),
+        ("POST", "/ingest/upload/presigned/{job_id}/complete"),
+        ("POST", "/ingest/preview/{job_id}"),
+        ("POST", "/ingest/commit/{job_id}"),
+        ("POST", "/ingest/commit-fan-out/{job_id}"),
+        ("POST", "/ingest/manifest/apply"),
+        ("POST", "/jobs/{job_id}/cancel"),
+        ("POST", "/jobs/{job_id}/retry"),
+        ("PATCH", "/datasets/{dataset_id}"),
+        ("PATCH", "/datasets/{dataset_id}/attributes/{attribute_id}/"),
+        ("PATCH", "/datasets/{dataset_id}/attributes/{attribute_id}"),
+        ("POST", "/records/{record_id}/keywords/"),
+        ("POST", "/records/{record_id}/keywords"),
+        ("POST", "/catalog/collections/{collection_id}/datasets/"),
+        ("POST", "/catalog/collections/{collection_id}/datasets"),
+        ("POST", "/datasets/{dataset_id}/refresh"),
+        ("POST", "/datasets/{dataset_id}/previous-version/restore"),
+        ("POST", "/datasets/{dataset_id}/reupload"),
+        ("POST", "/datasets/{dataset_id}/reupload/presigned"),
+        ("POST", "/datasets/{dataset_id}/reupload/presigned/{job_id}/complete"),
+        ("POST", "/datasets/{dataset_id}/reupload/{job_id}/preview"),
+        ("POST", "/datasets/{dataset_id}/reupload/{job_id}/commit"),
+        ("POST", "/maps/"),
+        ("POST", "/maps"),
+        ("POST", "/maps/import"),
+        ("PUT", "/maps/{map_id}/thumbnail/"),
+        ("PUT", "/maps/{map_id}/thumbnail"),
+        ("PUT", "/maps/{map_id}/og-image/"),
+        ("PUT", "/maps/{map_id}/og-image"),
+        ("POST", "/maps/{map_id}/share/"),
+        ("POST", "/maps/{map_id}/share"),
+    }
+)
+
+
+# Admin-only reads outside ``/admin/``, which a publish key is refused like
+# every admin route.
+_PUBLISH_KEY_REFUSED_READS: frozenset[str] = frozenset(
+    {
+        "/settings/all",
+        "/settings/all/",
+        "/settings/enterprise-tabs",
+        "/settings/enterprise-tabs/",
+        "/settings/api-key-status",
+        "/settings/api-key-status/",
+        "/settings/notifications/status",
+        "/settings/notifications/status/",
+        "/settings/oauth-providers",
+        "/settings/oauth-providers/",
+        "/config-ops/export",
+        "/config-ops/export/",
+        "/ingest/discover",
+        "/ingest/discover/",
+    }
+)
+
+
 def _route_template(request: Request) -> str:
     """The matched route's path template, or a generic placeholder.
 
@@ -167,6 +237,44 @@ def _read_only_key_may_call(
     if value is None:
         return True
     return value.strip().lower() in _FALSEY_QUERY_VALUES
+
+
+def _publish_key_may_call(
+    method: str,
+    route_template: str,
+    query_params: Mapping[str, str] | None = None,
+) -> bool:
+    if (
+        route_template.startswith("/admin/")
+        or "/api-keys" in route_template
+        or route_template in _PUBLISH_KEY_REFUSED_READS
+    ):
+        return False
+    return (method, route_template) in _PUBLISH_KEY_ROUTES or _read_only_key_may_call(
+        method, route_template, query_params
+    )
+
+
+_PUBLISH_REFUSAL = (
+    "This API key has the publish scope, which can't delete datasets or maps, "
+    "update a map, write features or reach admin and key routes"
+)
+# A route needing one of these is an admin route, wherever it is mounted, so a
+# publish key is refused it.
+_ADMIN_CAPABILITIES = frozenset({"manage_settings", "manage_users", "manage_tenants"})
+
+# Each restricted scope's rule and the ``detail`` its 403 carries. The
+# read-only detail stays the bare string clients already match. A full key may
+# call anything and a dataset key that strays resolves as no key, so any other
+# scope without a rule here is refused everything.
+_SCOPE_RULES = {
+    "read_only": (_read_only_key_may_call, "This API key is read-only"),
+    "publish": (
+        _publish_key_may_call,
+        {"code": "api_key_scope", "message": _PUBLISH_REFUSAL},
+    ),
+}
+_UNRESTRICTED_SCOPES = frozenset({"full", *DATASET_KEY_SCOPE_ROUTES})
 
 
 def _dataset_key_may_call(
@@ -367,19 +475,21 @@ async def _resolve_api_key(request: Request, db: AsyncSession) -> User | None:
     # to the anonymous/JWT path as a confusing 401. Runs AFTER the last_used_at
     # bump so a read-only key hammering writes still shows activity.
     route_template = _route_template(request)
-    if api_key_obj.scope == "read_only" and not _read_only_key_may_call(
-        request.method, route_template, request.query_params
+    rule = _SCOPE_RULES.get(api_key_obj.scope)
+    if api_key_obj.scope not in _UNRESTRICTED_SCOPES and (
+        rule is None
+        or not rule[0](request.method, route_template, request.query_params)
     ):
         log.warning(
             "api_key_scope_denied",
             user_id=str(user.id),
+            scope=api_key_obj.scope,
             method=request.method,
             path=route_template,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This API key is read-only",
-        )
+        if rule is None:
+            raise api_key_scope_refusal("This API key's scope is not recognized")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=rule[1])
     record_api_key(
         db,
         ApiKeyCredential(
@@ -780,6 +890,9 @@ def require_permission(*capabilities: str):
         else:
             matrix = await get_effective_permissions(db)
             request.state._effective_permissions = matrix
+
+        if _ADMIN_CAPABILITIES.intersection(capabilities):
+            refuse_publish_key(db, _PUBLISH_REFUSAL)
 
         permission_ext = get_permission_extension()
 

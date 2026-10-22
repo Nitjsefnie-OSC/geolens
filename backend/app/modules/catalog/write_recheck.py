@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.identity import Identity, IdentityRole, IdentitySnapshot
 from app.modules.auth.permissions import admitted_capabilities, user_standing_columns
 from app.platform.extensions import get_permission_extension
+from app.platform.request_credential import api_key_scope_refusal, is_publish_key
 
 
 @dataclass
@@ -90,9 +91,14 @@ async def recheck_admitted_writer(
     # A flush here would write ahead of the caller's lock order.
     with db.no_autoflush:
         row = (await db.execute(statement)).one_or_none()
+    judged = row
+    if row is not None and is_publish_key(db):
+        # A publish key acts only on its owner's own objects, as the guard
+        # judged it; the admitted capabilities below keep the real roles.
+        judged = _Committed(row, roles=[r for r in row.roles if r != "admin"])
     # Not the caller object: its loaded roles predate any change since the guard.
-    admitted.user = _committed_identity(admitted.user_id, row)
-    await enforce(admitted.user, row)
+    admitted.user = _committed_identity(admitted.user_id, judged)
+    await enforce(admitted.user, judged)
     await _recheck_capabilities(db, admitted, set(row.roles))
     if not await public_visibility_still_allowed(
         db, admitted_public_visibility(db, admitted.user_id), set(row.roles)
@@ -246,3 +252,45 @@ async def recheck_record_write_access(db: AsyncSession, record_id: uuid.UUID) ->
     await recheck_admitted_writer(
         db, ("record", record_id), (Record.created_by,), Record.id == record_id, enforce
     )
+
+
+_VISIBILITY_ORDER = ("private", "restricted", "internal", "public")
+
+
+async def refuse_publish_key_widening(
+    db: AsyncSession,
+    record_id: uuid.UUID,
+    *,
+    visibility: str | None,
+    record_status: str | None,
+) -> None:
+    """Refuse a publish key a metadata change that widens a record's visibility
+    or opens it to anonymous readers.
+
+    A publish key may keep a record's visibility or narrow it. It may publish
+    an internal or restricted draft, but not a public one, since publishing is
+    what opens a public record to anonymous readers. Call holding the record
+    row, so the values compared are the committed ones.
+    """
+    if not is_publish_key(db):
+        return
+    from app.modules.catalog.datasets.domain.models import Record
+
+    with db.no_autoflush:
+        now = (
+            await db.execute(
+                select(Record.visibility, Record.record_status).where(
+                    Record.id == record_id
+                )
+            )
+        ).one()
+    if visibility is not None and _VISIBILITY_ORDER.index(
+        visibility
+    ) > _VISIBILITY_ORDER.index(now.visibility):
+        raise api_key_scope_refusal("A publish key can't widen a dataset's visibility")
+    if (
+        (visibility or now.visibility) == "public"
+        and record_status == "published"
+        and now.record_status != "published"
+    ):
+        raise api_key_scope_refusal("A publish key can't publish a public dataset")

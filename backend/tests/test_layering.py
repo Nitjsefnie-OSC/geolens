@@ -1268,7 +1268,7 @@ _OPEN_CORE_SIZE_CAPS: dict[str, int] = {
     "backend/app/modules/catalog/maps/style_import.py": 605,
     "backend/app/modules/catalog/maps/style_sanitizers.py": 151,
     "backend/app/modules/catalog/maps/router_assets.py": 161,
-    "backend/app/modules/catalog/maps/router_sharing.py": 454,
+    "backend/app/modules/catalog/maps/router_sharing.py": 466,
     "backend/app/modules/catalog/search/query_params.py": 205,
     "backend/app/modules/catalog/search/router_saved.py": 104,
     "backend/app/modules/admin/router_operations.py": 330,
@@ -1282,7 +1282,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Manifest reservation, staging, run admission and fenced settlement share one
     # apply workflow, including the settlement of a contended or refused admission
     # and the records of an admin's raw seed source and restricted public intent.
-    "backend/app/processing/ingest/manifest_service.py": 1266,
+    "backend/app/processing/ingest/manifest_service.py": 1292,
     # Endpoint parsing, SSRF checks and credential forwarding share one security
     # boundary.
     "backend/app/platform/service_endpoints.py": 1354,
@@ -1336,7 +1336,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Refresh strategies share access, admission and dispatch rules at this API
     # boundary, including task-capability selection and accepting a held run
     # by the door it came through, which records the capability it admitted under.
-    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1349,
+    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1364,
     # Config planning, signed dry runs, application and the embedding column
     # rebuild an applied width needs share one import workflow.
     "backend/app/platform/config_ops/service.py": 1465,
@@ -1345,7 +1345,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/platform/jobs/sweep.py": 1802,
     # Refresh admission, claim fencing, terminal transitions and the job-scoped
     # abandoned-run sweep stay domain-neutral.
-    "backend/app/platform/refresh/service.py": 1157,
+    "backend/app/platform/refresh/service.py": 1192,
     # Central settings and boot-validation debt; split by configuration domain before
     # raising.
     "backend/app/core/config.py": 1442,
@@ -1357,7 +1357,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/processing/embeddings/backfill.py": 909,
     # Reupload preview, compatibility, the file and service review, and staged
     # commit share an endpoint lifecycle and the capability its jobs record.
-    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1653,
+    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1670,
     # VRT creation and regeneration share publication, member and submitter
     # re-authorization and its refusal, owed-object records and superseded-object
     # cleanup.
@@ -1380,7 +1380,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/modules/admin/service.py": 1014,
     # Ingest admission, staging, job settlement and table registration share one
     # orchestration boundary.
-    "backend/app/processing/ingest/service.py": 1556,
+    "backend/app/processing/ingest/service.py": 1559,
     # The PostGIS strategy: geometry and gid repair, the snapshot measurement and
     # its catalog writes.
     "backend/app/processing/ingest/tasks_postgis_refresh.py": 695,
@@ -1390,7 +1390,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # lifecycle.
     "backend/app/processing/analysis/tasks.py": 1427,
     # Map endpoints share response assembly, visibility and ownership checks.
-    "backend/app/modules/catalog/maps/router.py": 1515,
+    "backend/app/modules/catalog/maps/router.py": 1522,
     # Feature writes, single and batch, share the dataset guards, the database
     # error mapping and the catalog refresh; create also carries idempotent
     # repeats and the dry run.
@@ -1426,7 +1426,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/modules/catalog/features/service.py": 1639,
     # Dataset visibility, and the VRT member counts and extents each requester
     # may see, share the permission extension's one filter.
-    "backend/app/modules/catalog/authorization.py": 1172,
+    "backend/app/modules/catalog/authorization.py": 1186,
 }
 
 

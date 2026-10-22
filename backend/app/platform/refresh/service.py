@@ -26,9 +26,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.failure_reason import FixedReason, redact_failure_reason
+from app.platform.dataset_origin import classify_origin
 from app.platform.jobs import ledger
 from app.platform.jobs.ledger import Outcome, hold
 from app.platform.refresh.models import DatasetRefreshRun
+from app.platform.request_credential import api_key_scope_refusal, is_publish_key
 
 logger = structlog.get_logger(__name__)
 
@@ -319,6 +321,36 @@ class DatasetBusyError(Exception):
     """
 
 
+async def _refuse_publish_key_irreversible_run(
+    session: AsyncSession, dataset_id: uuid.UUID
+) -> None:
+    """Refuse a publish key a run whose result no previous version could undo.
+
+    Every data-replacing door admits its run here. A raster replace keeps no
+    previous version, and a restore can bring back only an upload's or a drawn
+    layer's source binding, not a service's, STAC item's or table's.
+    """
+    if not is_publish_key(session):
+        return
+    row = (
+        await session.execute(
+            text(
+                "SELECT d.source_format, r.record_type FROM catalog.datasets d "
+                "JOIN catalog.records r ON r.id = d.record_id WHERE d.id = :id"
+            ),
+            {"id": dataset_id},
+        )
+    ).one_or_none()
+    if row is None:
+        return
+    origin = classify_origin(row.source_format, row.record_type)
+    if row.record_type == "raster_dataset" or origin not in ("upload", "created"):
+        raise api_key_scope_refusal(
+            "A publish key can't replace this dataset's data: no previous "
+            "version could restore it"
+        )
+
+
 async def create_pending_run(
     session: AsyncSession,
     *,
@@ -472,6 +504,9 @@ async def create_pending_run(
         async with session.begin_nested():
             session.add(run)
             await session.flush()
+            # After the insert: it can wait on another run that rebinds the
+            # dataset, so only a read after it sees the binding this run replaces.
+            await _refuse_publish_key_irreversible_run(session, dataset_id)
     except IntegrityError as exc:
         if _ACTIVE_RUN_INDEX not in str(getattr(exc, "orig", exc)):
             raise

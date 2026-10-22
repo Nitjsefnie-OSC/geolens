@@ -48,7 +48,12 @@ from app.modules.catalog.write_recheck import (
     recheck_dataset_write_access,
 )
 from app.platform.catalog_locks import lock_catalog_rows
-from app.platform.request_credential import DATASET_KEY_SCOPES, api_key_credential
+from app.platform.request_credential import (
+    DATASET_KEY_SCOPES,
+    api_key_credential,
+    is_publish_key,
+    refuse_publish_key,
+)
 from app.platform.extensions import (
     DefaultPermissionExtension,
     RecordAudienceQuery,
@@ -101,8 +106,14 @@ async def get_user_roles(db: AsyncSession, user: Identity) -> set[str]:
     than re-exports because ``test_permission_chokepoints_use_extension``
     reads this file's ``async def get_user_roles`` as a block boundary, and
     callers that patch ``catalog.authorization.get_user_roles`` need a real def.
+
+    A publish key acts only on its owner's own objects, so a request it
+    authenticates is judged without the owner's admin role.
     """
-    return await _get_user_roles(db, user)
+    roles = await _get_user_roles(db, user)
+    if is_publish_key(db):
+        roles.discard("admin")
+    return roles
 
 
 async def check_dataset_access_or_anonymous(
@@ -738,7 +749,9 @@ async def check_public_visibility_allowed(
     (dataset metadata PATCH, ingest paths, STAC import, manifest apply, map
     update). When ON, a non-admin requesting `public` gets a 403; every
     other value passes through, and existing public content is unaffected:
-    the gate fires only when a mutation REQUESTS public.
+    the gate fires only when a mutation REQUESTS public. A publish key is
+    refused every request for public, whatever the setting and even for
+    content already public: that takes a signed-in user or a full key.
 
     Pass ``user_roles`` when already resolved to skip a lookup. Returns the
     resolved (or caller-provided) roles, or ``None`` when no lookup happened.
@@ -748,6 +761,7 @@ async def check_public_visibility_allowed(
     forget_public_visibility(db, user.id)
     if visibility != "public":
         return user_roles
+    refuse_publish_key(db, "A publish key can't make anything public")
 
     # Local import to avoid an import cycle, as above.
     from app.core.persistent_config import RESTRICT_PUBLIC_VISIBILITY
