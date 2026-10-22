@@ -5,9 +5,11 @@ Hand-maintained. Shared by ``geolens arcgis inventory`` and the commands that
 build on it. Egress contract: a ``PortalClient`` sends requests only to the
 portal root it was built with, never to the services an item points at and
 never to GeoLens; redirects are refused so a credential can't follow one to
-another host. A command that also needs GeoLens reaches it only through the
-SDK client for the configured instance, so it contacts two hosts: the portal
-and GeoLens. Tokens and passwords stay in memory, and every error message is
+another host. The one exception is a file download, which may take a single
+redirect to https on the portal's own host or ArcGIS storage (``arcgis.com``
+and its subdomains) and sends no credential there. A command that also needs
+GeoLens reaches it only through the SDK client for the configured instance,
+so it contacts the portal, its ArcGIS storage and GeoLens. Tokens and passwords stay in memory, and every error message is
 redacted when it is built.
 """
 
@@ -28,8 +30,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote, quote_plus, unquote_plus, urlencode, urlsplit
+from urllib.parse import quote, quote_plus, unquote_plus, urlencode, urljoin, urlsplit
 
 # AGOL and Enterprise 10.5.1+ read the token from this header. Not
 # `Authorization`, which a web tier in front of Enterprise may consume.
@@ -38,10 +41,15 @@ MIN_REQUEST_INTERVAL = 0.1
 SOCKET_TIMEOUT = 10.0
 REQUEST_DEADLINE = 30.0
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+# A data file can be large; the whole transfer, not one read, gets this long.
+DOWNLOAD_DEADLINE = 3600.0
+_ENVELOPE_PROBE_BYTES = 64
+_ENVELOPE_START = re.compile(rb'\s*\{\s*"error"\s*:')
 GET_ATTEMPTS = 3
 MAX_RETRY_AFTER = 60.0
 TOKEN_EXPIRATION_MINUTES = 60
 
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
 _TOKEN_REQUIRED = 499
 _TOKEN_INVALID = 498
@@ -382,6 +390,7 @@ class PortalClient:
         self._clock = clock
         self._on_request = on_request
         self._form_token = False
+        self._download_end = 0.0
         self._referer: str | None = None
         self._sign_in: tuple[str, str] | None = None
         self._lock = threading.Lock()
@@ -524,6 +533,262 @@ class PortalClient:
         self._sign_in = (username, password)
         return token
 
+    def download(self, path: str, dest: Path, max_bytes: int | None) -> int:
+        """GET ``/sharing/rest/<path>`` into the file *dest*, returning its size.
+
+        For item data, which is a file rather than JSON. The body is streamed
+        and counted, never held in memory, and a body over *max_bytes* raises
+        ``PortalError`` of kind ``too_large`` after at most one chunk past the
+        limit. Redirects are refused and a token is handled as in ``get_json``;
+        a 200 carrying an error envelope raises as it does there.
+        """
+        # The whole transfer, retries and a token renewal included, shares one
+        # deadline.
+        self._download_end = self._clock() + DOWNLOAD_DEADLINE
+        token = self.token
+        try:
+            return self._download_sent(path, dest, max_bytes)
+        except PortalError as exc:
+            rejected = exc.http_status in (_TOKEN_INVALID, _TOKEN_REQUIRED)
+            if not rejected or not self._renew_token(token):
+                raise
+        return self._download_sent(path, dest, max_bytes)
+
+    def _download_sent(self, path: str, dest: Path, max_bytes: int | None) -> int:
+        sent_as_form = self._form_token
+        try:
+            return self._download_attempts(path, dest, max_bytes)
+        except PortalError as exc:
+            if exc.http_status != _TOKEN_REQUIRED or not self.token or sent_as_form:
+                raise
+        self._form_token = True
+        return self._download_attempts(path, dest, max_bytes)
+
+    def _download_attempts(self, path: str, dest: Path, max_bytes: int | None) -> int:
+        url = f"{self.root}/sharing/rest/{path}"
+        headers = {"Referer": self._referer} if self._referer else {}
+        body = None
+        if self.token and self._form_token:
+            body = urlencode({"token": self.token}).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        elif self.token:
+            headers[ESRI_AUTHORIZATION_HEADER] = f"Bearer {self.token}"
+        for attempt in range(1, GET_ATTEMPTS + 1):
+            self._wait_turn()
+            if self._on_request:
+                self._on_request("POST" if body else "GET", urlsplit(url).path)
+            request = urllib.request.Request(
+                url, data=body, headers=headers, method="POST" if body else "GET"
+            )
+            try:
+                return self._download_once(request, path, dest, max_bytes)
+            except PortalError as exc:
+                if not exc.retryable or attempt == GET_ATTEMPTS:
+                    raise
+                delay = exc.retry_after
+                self._sleep(delay if delay is not None else 0.5 * 2 ** (attempt - 1))
+        raise AssertionError("unreachable")
+
+    def _download_once(
+        self,
+        request: urllib.request.Request,
+        path: str,
+        dest: Path,
+        max_bytes: int | None,
+        *,
+        may_redirect: bool = True,
+    ) -> int:
+        deadline = self._download_end
+        redirect: tuple[int, str | None] | None = None
+        watchdog = _Watchdog()
+        request.watchdog = watchdog
+        timer = threading.Timer(max(0.0, deadline - self._clock()), watchdog.fire)
+        timer.daemon = True
+        timer.start()
+        try:
+            with self._opener.open(request, timeout=SOCKET_TIMEOUT) as response:
+                size = self._stream(response, path, dest, max_bytes, deadline)
+        except urllib.error.HTTPError as exc:
+            if not (may_redirect and exc.code in _REDIRECT_STATUSES):
+                raise self._http_error(exc, path) from None
+            redirect = (exc.code, exc.headers.get("Location"))
+            exc.close()
+        except PortalError:
+            raise
+        except Exception as exc:  # broad: a shut socket can surface as any I/O error
+            if watchdog.fired:
+                raise self._error(
+                    f"{path} took longer than {DOWNLOAD_DEADLINE:g} s",
+                    kind="network",
+                    retryable=True,
+                ) from None
+            if isinstance(
+                exc, urllib.error.URLError | OSError | http.client.HTTPException
+            ):
+                # The redirected hop's URL carries a credential, which an
+                # exception's text may repeat.
+                reason = (
+                    (getattr(exc, "reason", None) or exc) if may_redirect else "failed"
+                )
+                raise self._error(
+                    f"network error on {path}: {reason}", kind="network", retryable=True
+                ) from None
+            raise
+        finally:
+            timer.cancel()
+            watchdog.release()
+        if redirect is not None:
+            return self._follow_download(
+                request.full_url, path, redirect, dest, max_bytes
+            )
+        if watchdog.fired:
+            raise self._error(
+                f"{path} took longer than {DOWNLOAD_DEADLINE:g} s",
+                kind="network",
+                retryable=True,
+            )
+        return size
+
+    def _redirect_target(
+        self, base: str, location: str | None
+    ) -> tuple[str, str, bool]:
+        """The absolute redirect target, its host, and whether a download may
+        follow it: https to the portal's own origin or to ArcGIS storage on
+        the default port, with no userinfo. A malformed target is refused."""
+        try:
+            target = urljoin(base, location) if location else ""
+            parts = urlsplit(target)
+            host = (parts.hostname or "").lower()
+            port = parts.port
+            portal = urlsplit(self.root)
+            portal_host, portal_port = (portal.hostname or "").lower(), portal.port
+        except ValueError:
+            return "", "", False
+        own = host == portal_host and port in (None, 443, portal_port)
+        storage = port in (None, 443) and (
+            host == "arcgis.com"
+            or (host.endswith(".arcgis.com") and len(host) > len(".arcgis.com"))
+        )
+        clean = all(" " < c < "\x7f" for c in target)
+        allowed = (
+            clean
+            and parts.scheme == "https"
+            and not parts.username
+            and (own or storage)
+        )
+        return target, host, allowed
+
+    def _follow_download(
+        self,
+        base: str,
+        path: str,
+        redirect: tuple[int, str | None],
+        dest: Path,
+        max_bytes: int | None,
+    ) -> int:
+        """The one redirect a file download may take: to https on the portal's
+        own host or ArcGIS storage, sent with no credential of any kind.
+
+        The target's query is a pre-signed credential, so only its host and
+        path are ever named in a message or logged.
+        """
+        status, location = redirect
+        target, host, allowed = self._redirect_target(base, location)
+        if not allowed:
+            where = host or "an unreadable address"
+            raise self._error(
+                f"{path} answered with a redirect (HTTP {status}) to {where}, "
+                "which is neither the portal nor its ArcGIS storage over https; "
+                "redirects elsewhere are refused so the credential stays on the "
+                "portal origin.",
+                kind="redirect",
+                http_status=status,
+            )
+        parts = urlsplit(target)
+        shown = f"{host}{parts.path}"
+        self._wait_turn()
+        if self._on_request:
+            self._on_request("GET", parts.path)
+        request = urllib.request.Request(target, method="GET")
+        return self._download_once(request, shown, dest, max_bytes, may_redirect=False)
+
+    def _stream(
+        self,
+        response: Any,
+        path: str,
+        dest: Path,
+        max_bytes: int | None,
+        deadline: float,
+    ) -> int:
+        length = response.headers.get("Content-Length")
+        if max_bytes is not None and length and length.isdigit():
+            if int(length) > max_bytes:
+                raise self._error(f"{path} is {int(length)} bytes", kind="too_large")
+        total = 0
+        first = True
+        try:
+            out = dest.open("wb")
+        except OSError as exc:
+            raise self._local_error(exc) from None
+        with out:
+            while True:
+                if self._clock() > deadline:
+                    raise self._error(
+                        f"{path} took longer than {DOWNLOAD_DEADLINE:g} s",
+                        kind="network",
+                        retryable=True,
+                    )
+                chunk = response.read1(64 * 1024)
+                if first:
+                    first = False
+                    # A short first read can't tell an error envelope from
+                    # data, so read until the prefix is long enough to.
+                    while chunk and len(chunk) < _ENVELOPE_PROBE_BYTES:
+                        more = response.read1(64 * 1024)
+                        if not more:
+                            break
+                        chunk += more
+                    if _ENVELOPE_START.match(chunk):
+                        chunk += response.read(MAX_RESPONSE_BYTES)
+                        self._raise_envelope(path, chunk)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise self._error(
+                        f"{path} is over {max_bytes} bytes", kind="too_large"
+                    )
+                try:
+                    out.write(chunk)
+                except OSError as exc:
+                    raise self._local_error(exc) from None
+        if length and length.isdigit() and total != int(length):
+            raise self._error(
+                f"{path} ended after {total} of {int(length)} bytes",
+                kind="network",
+                retryable=True,
+            )
+        return total
+
+    def _local_error(self, exc: OSError) -> PortalError:
+        """A failure writing the download to disk: not a network problem, so
+        it is never retried."""
+        return self._error(
+            f"can't write the download: {exc.strerror or type(exc).__name__}",
+            kind="local",
+        )
+
+    def _raise_envelope(self, path: str, raw: bytes) -> None:
+        """Raise the error a 200 body carries; a body that only looks like one
+        is left to be saved."""
+        try:
+            data = json.loads(raw)
+        except (ValueError, RecursionError):
+            return
+        code = _envelope_code(data) if isinstance(data, dict) else None
+        if code is not None:
+            raise self._envelope_error(path, data, code)
+
     def _read(self, url: str, query: dict[str, Any], array_ok: bool) -> Any:
         headers = {"Referer": self._referer} if self._referer else {}
         if self.token and self._form_token:
@@ -629,32 +894,35 @@ class PortalClient:
             with self._opener.open(request, timeout=SOCKET_TIMEOUT) as response:
                 return self._read_capped(response, path, deadline)
         except urllib.error.HTTPError as exc:
-            status = exc.code
-            exc.close()
-            if 300 <= status < 400:
-                raise self._error(
-                    f"{path} answered with a redirect (HTTP {status}). Redirects "
-                    "are refused so the credential stays on the portal origin; "
-                    "pass the final portal URL with --portal-url.",
-                    kind="redirect",
-                    http_status=status,
-                ) from None
-            if status in (401, _TOKEN_INVALID, _TOKEN_REQUIRED):
-                kind = "auth"
-            else:
-                kind = "server" if status >= 500 else "refused"
-            raise self._error(
-                f"HTTP {status} from {path}",
-                kind=kind,
-                http_status=status,
-                retryable=status in _RETRYABLE_STATUSES,
-                retry_after=_retry_after(exc.headers),
-            ) from None
+            raise self._http_error(exc, path) from None
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             reason = getattr(exc, "reason", None) or exc
             raise self._error(
                 f"network error on {path}: {reason}", kind="network", retryable=True
             ) from None
+
+    def _http_error(self, exc: urllib.error.HTTPError, path: str) -> PortalError:
+        status = exc.code
+        exc.close()
+        if 300 <= status < 400:
+            return self._error(
+                f"{path} answered with a redirect (HTTP {status}). Redirects "
+                "are refused so the credential stays on the portal origin; "
+                "pass the final portal URL with --portal-url.",
+                kind="redirect",
+                http_status=status,
+            )
+        if status in (401, _TOKEN_INVALID, _TOKEN_REQUIRED):
+            kind = "auth"
+        else:
+            kind = "server" if status >= 500 else "refused"
+        return self._error(
+            f"HTTP {status} from {path}",
+            kind=kind,
+            http_status=status,
+            retryable=status in _RETRYABLE_STATUSES,
+            retry_after=_retry_after(exc.headers),
+        )
 
     def _read_capped(self, response: Any, path: str, deadline: float) -> bytes:
         length = response.headers.get("Content-Length")
