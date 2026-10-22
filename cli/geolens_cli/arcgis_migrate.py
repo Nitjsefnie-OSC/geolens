@@ -34,6 +34,7 @@ from ._sdk_helpers import (
     EXIT_SERVER,
     EXIT_USAGE,
 )
+from .arcgis_item_metadata import apply_item_metadata
 from .arcgis_migrate_layers import import_layers
 from .arcgis_migrate_session import (
     GeoLens,
@@ -446,6 +447,7 @@ def _migrate_one(
         result = handler(ctx, item, entry)
         entry.notes = [state.clean(note) for note in result.notes]
         state.save()
+        apply_item_metadata(ctx, item, entry)
         # Even to the operator: a run that failed part way may have handed
         # some of the item's objects to another owner already.
         transfer(ctx.geolens, entry, owner)
@@ -515,6 +517,9 @@ def _report(
             "notes": list(state.items[item["id"]].notes)
             if item["id"] in state.items
             else [],
+            "error": state.items[item["id"]].error
+            if item["id"] in state.items
+            else None,
         }
         for item in to_run
     ]
@@ -544,6 +549,8 @@ def _report(
             fmt.info(f"  {row['id']} {row['action']}{owner}: {row['status']}")
             for note in row["notes"]:
                 fmt.info(f"    {note}")
+            if row["error"]:
+                fmt.warn(f"    {row['error']}")
         for line in owners.reassigned:
             fmt.warn(f"owner fell back to --unmapped-owner for {line}")
         for line in owners.warnings:
