@@ -3,6 +3,7 @@
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from app.core import config as config_module
 from app.core.config import MIN_SIGNABLE_JOB_LIFETIME_SECONDS, Settings
@@ -392,6 +393,35 @@ class TestProcrastinateConninfo:
             )
         )
         assert "host=/var/run/postgresql" in s.procrastinate_conninfo
+
+    @pytest.mark.parametrize(
+        "override", [None, "postgresql://u:p@pooler:6432/db"], ids=["composed", "url"]
+    )
+    def test_external_pooler_sends_no_startup_options(self, override):
+        # PgBouncer refuses the options startup parameter. The value is set but
+        # empty, so libpq doesn't fill it from PGOPTIONS either.
+        s = _make_settings(database_url_override=override, db_use_external_pooler=True)
+        assert conninfo_to_dict(s.procrastinate_conninfo)["options"] == ""
+
+    @pytest.mark.parametrize("pooler", [False, True], ids=["direct", "pooler"])
+    def test_caller_options_with_quote_and_backslash_round_trip(self, pooler):
+        s = _make_settings(
+            database_url_override=(
+                "postgresql://u:p@host/db?options=-c%20application_name%3Dit%27s%5Cx"
+            ),
+            db_use_external_pooler=pooler,
+        )
+        options = conninfo_to_dict(s.procrastinate_conninfo)["options"]
+        assert options.startswith("-c application_name=it's\\x")
+
+    def test_external_pooler_keeps_caller_options(self):
+        s = _make_settings(
+            database_url_override=(
+                "postgresql://u:p@host/db?options=-c%20statement_timeout%3D5000"
+            ),
+            db_use_external_pooler=True,
+        )
+        assert "options='-c statement_timeout=5000'" in s.procrastinate_conninfo
 
 
 class TestOgrConnectionString:
