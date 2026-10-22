@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import heapq
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,7 @@ from .arcgis_migrate_export import (
     export_item,
     write_index,
 )
+from .arcgis_migrate_report import build_run_report, write_run_report
 from .arcgis_migrate_files import FILE_TYPES, import_file
 from .arcgis_migrate_layers import import_layers
 from .arcgis_migrate_session import (
@@ -521,10 +522,12 @@ def run_items(
 def _report(
     fmt: _output.Formatter,
     opts: MigrateOptions,
+    plan: Mapping[str, Any],
     state: MigrationState,
     to_run: list[Mapping[str, Any]],
     owners: Owners,
     summary: RunSummary,
+    redact: Redactor,
 ) -> int:
     rows = [
         {
@@ -545,7 +548,27 @@ def _report(
         for item in to_run
     ]
     counts = Counter(entry.status for entry in state.items.values())
-    failed = [r["id"] for r in rows if r["status"] == FAILED]
+    # Every failed item of the plan counts, also one this run left out
+    # (--no-retry, --only), so the exit code agrees with the report.
+    failed = [
+        item["id"] for item in plan["items"] if state.status(item["id"]) == FAILED
+    ]
+    report_files: tuple[Path, Path] | None = None
+    if not opts.dry_run:
+        try:
+            report_files = write_run_report(
+                state.path.parent,
+                build_run_report(
+                    plan,
+                    state,
+                    runnable=HANDLERS,
+                    owner_changes=owners.changed,
+                    stopped=summary.stopped,
+                ),
+                redact,
+            )
+        except OSError as exc:
+            fmt.warn(f"couldn't write the report: {exc.strerror or exc}")
     payload = {
         "plan": str(opts.plan_path),
         "state": None if opts.dry_run else str(state.path),
@@ -559,6 +582,7 @@ def _report(
         "not_available": summary.unavailable,
         "waiting": summary.waiting,
         "stopped": summary.stopped,
+        "report": [str(p) for p in report_files] if report_files else None,
     }
     if fmt.json_mode:
         fmt.json(payload)
@@ -571,7 +595,8 @@ def _report(
             for note in row["notes"]:
                 fmt.info(f"    {note}")
             if row["error"]:
-                fmt.warn(f"    {row['error']}")
+                # An error, not a warning: --quiet must not hide a failed item.
+                fmt.error(f"{row['id']}: {row['error']}")
         for line in owners.reassigned:
             fmt.warn(f"owner fell back to --unmapped-owner for {line}")
         for line in owners.warnings:
@@ -597,6 +622,12 @@ def _report(
             fmt.error(f"stopped: {summary.stopped}")
         if not opts.dry_run:
             fmt.info(f"State: {state.path}")
+            if report_files:
+                fmt.info(f"Report: {report_files[1]}")
+            if failed:
+                fmt.error(
+                    f"{len(failed)} item(s) failed; see {report_files[1] if report_files else state.path}"
+                )
     left = summary.unavailable or summary.waiting or summary.stopped
     return EXIT_GENERIC if failed or left else EXIT_OK
 
@@ -729,6 +760,28 @@ def _check_hosts(hosts: list[str]) -> None:
             )
 
 
+def _write_partial_report(
+    plan: Mapping[str, Any],
+    state: MigrationState,
+    redact: Redactor,
+    stopped: str,
+    owner_changes: Sequence[Mapping[str, str]] = (),
+) -> None:
+    """The report of a run that ended early, so it is not left stale."""
+    state.save()
+    write_run_report(
+        state.path.parent,
+        build_run_report(
+            plan,
+            state,
+            runnable=HANDLERS,
+            owner_changes=owner_changes,
+            stopped=stopped,
+        ),
+        redact,
+    )
+
+
 def _run(
     fmt: _output.Formatter,
     opts: MigrateOptions,
@@ -777,7 +830,14 @@ def _run(
             if item["action"] != _plan.SKIP and item["action"] not in HANDLERS
         ]
         return _report(
-            fmt, opts, state, to_run, owners, RunSummary(unavailable=unavailable)
+            fmt,
+            opts,
+            plan,
+            state,
+            to_run,
+            owners,
+            RunSummary(unavailable=unavailable),
+            redact,
         )
     auth = None
     if portal is not None:
@@ -805,11 +865,26 @@ def _run(
         portal_root=plan["portal"]["url"].rstrip("/"),
         redact=redact,
     )
+    # Any way out of the loop but a normal return leaves the report to the
+    # finally block, so it is never stale.
+    stopped: str | None = "stopped by an unexpected error"
     try:
         summary = run_items(ctx, plan, state, to_run, owners.by_item)
+        stopped = None
     except KeyboardInterrupt:
+        stopped = "interrupted"
         fmt.error(
             f"interrupted; rerun with the same state file ({state.path}) to resume"
         )
         return EXIT_INTERRUPTED
-    return _report(fmt, opts, state, to_run, owners, summary)
+    except typer.Exit:
+        stopped = "stopped by a failed request"
+        raise
+    finally:
+        if stopped is not None:
+            try:
+                _write_partial_report(plan, state, redact, stopped, owners.changed)
+            except OSError as exc:
+                # Not allowed to replace the exit outcome this run is leaving by.
+                fmt.warn(f"couldn't write the report: {exc.strerror or exc}")
+    return _report(fmt, opts, plan, state, to_run, owners, summary, redact)
