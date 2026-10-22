@@ -6,6 +6,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { SettingSourceBadge } from './SettingSourceBadge';
 import { SettingsFormActions } from './SettingsFormActions';
 import { findSetting } from './utils';
+import { useCatalogStats } from '@/hooks/use-admin';
+import { usePermissions } from '@/hooks/use-permissions';
+import { formatBytes } from '@/lib/format';
 import { useSettingsForm, type ResetHandler } from './useSettingsForm';
 import type { SettingItem } from '@/api/settings';
 
@@ -32,6 +35,7 @@ const FIELDS = [
   { key: 'tile_cache_ttl', defaultValue: 300 },
   { key: 'max_storage_bytes_per_user', defaultValue: 0 },
   { key: 'max_datasets_per_user', defaultValue: 0 },
+  { key: 'previous_versions_kept', defaultValue: 3 },
 ] as const;
 
 const GIB = 1024 ** 3;
@@ -60,11 +64,19 @@ function storageBytes(quantity: string, unit: StorageUnit): number | null {
 export function SettingsStorageTab({ settings, envOnly, onSave, onReset: submitReset, isSaving, settingsUpdatedAt, saveFailed, onDirtyChange }: TabProps) {
   const { t } = useTranslation('admin');
   const { values, setters, dirty, hasDirty, discard, onReset } = useSettingsForm(settings, FIELDS, isSaving, settingsUpdatedAt, saveFailed, submitReset);
+  // The stats route needs manage_users, which a settings-only operator may lack.
+  // A revoked permission leaves earlier stats in the query cache, so the render
+  // checks it too.
+  const { can } = usePermissions();
+  const canReadStats = can('manage_users');
+  const { data: stats } = useCatalogStats({ enabled: canReadStats });
   const storedBytes = values.max_storage_bytes_per_user as number;
   const [storageUnit, setStorageUnit] = useState<StorageUnit>(() => storedBytes && storedBytes % GIB !== 0 ? 'bytes' : 'gib');
   const [storageQuantity, setStorageQuantity] = useState(() => displayStorage(storedBytes, storageUnit));
   const editedBytes = useRef(storedBytes);
   const quantityBytes = storageBytes(storageQuantity, storageUnit);
+  const keptVersions = values.previous_versions_kept as number;
+  const keptVersionsValid = Number.isInteger(keptVersions) && keptVersions >= 1 && keptVersions <= 50;
 
   useEffect(() => {
     if (storedBytes !== editedBytes.current) {
@@ -152,6 +164,33 @@ export function SettingsStorageTab({ settings, envOnly, onSave, onReset: submitR
         />
       </div>
 
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Label htmlFor="previous-versions-kept">{t('settings.uploads.previousVersionsKept')}</Label>
+          <SettingSourceBadge source={findSetting(settings, 'previous_versions_kept')?.source ?? 'default'} settingKey="previous_versions_kept" onReset={onReset} />
+        </div>
+        <p id="previous-versions-help" className="text-sm text-muted-foreground">{t('settings.uploads.previousVersionsKeptDescription')}</p>
+        <Input
+          id="previous-versions-kept"
+          type="number"
+          min={1}
+          max={50}
+          step={1}
+          value={values.previous_versions_kept as number}
+          onChange={(e) => setters.previous_versions_kept(Number(e.target.value))}
+          aria-invalid={!keptVersionsValid}
+          aria-describedby={keptVersionsValid ? 'previous-versions-help' : 'previous-versions-error'}
+          disabled={envOnly}
+          className="w-32"
+        />
+        {!keptVersionsValid && <p id="previous-versions-error" className="text-sm text-destructive">{t('settings.uploads.invalidPreviousVersionsKept')}</p>}
+        {canReadStats && stats && (
+          <p className="text-sm text-muted-foreground">
+            {t('settings.uploads.previousVersionsStorage', { size: formatBytes(stats.previous_versions_bytes) })}
+          </p>
+        )}
+      </div>
+
       {/* Per-user quotas — global caps applied to every user (enforced at ingest).
           Grouped so they read as limits, not more global upload config. */}
       <div className="space-y-4 border rounded-md p-4" role="group" aria-labelledby="per-user-limits-heading">
@@ -211,7 +250,7 @@ export function SettingsStorageTab({ settings, envOnly, onSave, onReset: submitR
         </div>
       </div>
 
-      <SettingsFormActions dirty={dirty} hasDirty={hasDirty} envOnly={envOnly || quantityBytes === null} isSaving={isSaving} onSave={onSave} onDiscard={discardChanges} onDirtyChange={onDirtyChange} />
+      <SettingsFormActions dirty={dirty} hasDirty={hasDirty} envOnly={envOnly || quantityBytes === null || !keptVersionsValid} isSaving={isSaving} onSave={onSave} onDiscard={discardChanges} onDirtyChange={onDirtyChange} />
     </div>
   );
 }

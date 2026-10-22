@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useDatasetVersions, type DatasetRefreshWatch } from '@/components/dataset/hooks/use-dataset';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { formatDate } from '@/lib/format';
+import { formatBytes, formatDate } from '@/lib/format';
 import { useDrawingStore } from '@/stores/drawing-store';
 import { GitBranch, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -29,8 +29,12 @@ export function VersionHistory({ datasetId, dataset, canEdit = false, watch }: V
   const restoreBlocked = hasSelectedFeature || Boolean(watch?.isBusy);
   const [restoreTarget, setRestoreTarget] = useState<number | null>(null);
   const { data, isLoading, isError } = useDatasetVersions(datasetId);
+  const kept = useMemo(
+    () => new Map((dataset.previous_versions ?? []).map((v) => [v.version_number, v])),
+    [dataset.previous_versions],
+  );
 
-  const { versions, originalUnrecorded } = useMemo(() => {
+  const { versions, originalUnrecorded, keptOnly } = useMemo(() => {
     const fetched = data?.versions ?? [];
     const hasVersion1 = fetched.some((v) => v.version_number === 1);
     // Version 1 is synthesized only when the whole history is loaded, so a
@@ -58,9 +62,32 @@ export function VersionHistory({ datasetId, dataset, canEdit = false, watch }: V
             },
           ];
 
+    // A kept version can be older than the page of history fetched here, and it
+    // stays restorable, so it gets a row of its own.
+    const listed = new Set(allVersions.map((v) => v.version_number));
+    const keptOnly = new Set<number>();
+    for (const keptVersion of dataset.previous_versions ?? []) {
+      if (listed.has(keptVersion.version_number)) continue;
+      keptOnly.add(keptVersion.version_number);
+      allVersions.push({
+        id: `kept-${keptVersion.version_number}`,
+        dataset_id: datasetId,
+        version_number: keptVersion.version_number,
+        source_filename: null,
+        source_format: null,
+        feature_count: keptVersion.feature_count ?? null,
+        srid: null,
+        geometry_type: null,
+        file_hash: null,
+        uploaded_by: null,
+        uploaded_at: keptVersion.retained_at ?? '',
+      });
+    }
+
     return {
       versions: allVersions.sort((a, b) => b.version_number - a.version_number),
       originalUnrecorded: !hasVersion1 && wholeHistory && unrecorded,
+      keptOnly,
     };
   }, [data, datasetId, dataset]);
 
@@ -102,10 +129,8 @@ export function VersionHistory({ datasetId, dataset, canEdit = false, watch }: V
                 metaParts.push(t('versionHistory.srid', { value: version.srid }));
               }
 
-              const canRestore =
-                canEdit &&
-                !isCurrent &&
-                dataset.previous_version?.version_number === version.version_number;
+              const keptCopy = kept.get(version.version_number);
+              const canRestore = canEdit && keptCopy !== undefined;
 
               return (
                 <div
@@ -128,13 +153,20 @@ export function VersionHistory({ datasetId, dataset, canEdit = false, watch }: V
                       </Badge>
                     )}
                   </p>
-                  <p className="text-xs text-muted-foreground">
-                    {formatDate(version.uploaded_at)} &middot;{' '}
-                    {version.source_filename ?? t('versionHistory.unknownFile')}
-                  </p>
+                  {!keptOnly.has(version.version_number) && (
+                    <p className="text-xs text-muted-foreground">
+                      {formatDate(version.uploaded_at)} &middot;{' '}
+                      {version.source_filename ?? t('versionHistory.unknownFile')}
+                    </p>
+                  )}
                   {metaParts.length > 0 && (
                     <p className="text-xs text-muted-foreground">
                       {metaParts.join(' \u00B7 ')}
+                    </p>
+                  )}
+                  {keptCopy && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('versionHistory.kept', { size: formatBytes(keptCopy.size_bytes) })}
                     </p>
                   )}
                   {originalUnrecorded && version.version_number === 1 && (
@@ -149,6 +181,7 @@ export function VersionHistory({ datasetId, dataset, canEdit = false, watch }: V
                       className="mt-1"
                       disabled={restoreBlocked}
                       onClick={() => setRestoreTarget(version.version_number)}
+                      aria-label={t('versionHistory.restoreVersion', { number: version.version_number })}
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
                       {t('versionHistory.restore')}
