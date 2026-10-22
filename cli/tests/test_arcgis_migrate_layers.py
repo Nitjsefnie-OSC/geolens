@@ -53,6 +53,8 @@ class FakeImport:
         self.committed: set[str] = set()
         self.summaries: dict[str, str] = {}
         self.keywords: dict[str, list[str]] = {}
+        self.fields: dict[str, dict[str, str]] = {}
+        self.other_keywords: dict[str, list[dict]] = {}
         fake.routes[PROBE] = self.probe
         fake.routes[PREVIEW] = self.preview
 
@@ -108,6 +110,9 @@ class FakeImport:
             body = seen.json()
             if "summary" in body:
                 self.summaries[dataset] = body["summary"]
+            self.fields.setdefault(dataset, {}).update(
+                {k: v for k, v in body.items() if k != "summary"}
+            )
             return self.dataset(dataset, body.get("owner_id", OPERATOR))
 
         def keyword(seen):
@@ -131,9 +136,28 @@ class FakeImport:
             dataset, OPERATOR
         )
         self.fake.routes[f"POST /records/{dataset}/keywords/"] = keyword
+        self.fake.routes[f"GET /records/{dataset}/keywords/"] = lambda s: {
+            "keywords": [
+                {
+                    "id": _uuid("4e", word),
+                    "record_id": dataset,
+                    "keyword": word,
+                    "vocabulary_uri": None,
+                    "keyword_type": "theme",
+                    "inherited": False,
+                }
+                for word in self.keywords.get(dataset, [])
+            ]
+            + self.other_keywords.get(dataset, []),
+            "total": len(self.keywords.get(dataset, [])),
+        }
 
     def dataset(self, dataset: str, owner: str) -> dict:
-        return {**_dataset(dataset, owner), "summary": self.summaries.get(dataset)}
+        return {
+            **_dataset(dataset, owner),
+            "summary": self.summaries.get(dataset),
+            **self.fields.get(dataset, {}),
+        }
 
     def commit(self, seen):
         refused = self._refused(seen)
@@ -1130,7 +1154,9 @@ def test_item_metadata_is_written_onto_the_datasets(runner, tmp_path, geolens):
     assert service.keywords[dataset_id("Parcels")] == ["parcels", "cadastre"]
     entry = _state(plan_file)["items"][A2]
     assert entry["record_ids"] == [dataset_id("Parcels")]
-    assert entry["metadata_hash"]
+    assert entry["metadata_baseline"][dataset_id("Parcels")]["summary"].startswith(
+        "Tax parcels"
+    )
 
 
 def test_a_summary_edited_in_geolens_is_kept_on_rerun(runner, tmp_path, geolens):
@@ -1170,7 +1196,9 @@ def test_a_failed_metadata_write_fails_the_item_and_a_rerun_redoes_only_it(
     assert entry["dataset_ids"] == [dataset_id("Parcels")]
     # The summary was written before the keyword failed; a rerun has to be
     # able to tell it from an edit.
-    assert entry["metadata_hash"]
+    assert entry["metadata_baseline"][dataset_id("Parcels")]["summary"].startswith(
+        "Tax parcels"
+    )
 
     geolens.routes[PREVIEW] = preview
     service._serve_dataset(dataset_id("Parcels"))
@@ -1179,3 +1207,194 @@ def test_a_failed_metadata_write_fails_the_item_and_a_rerun_redoes_only_it(
     assert result.exit_code == 0, result.output
     assert service.previews == 1
     assert service.keywords[dataset_id("Parcels")] == ["parcels", "cadastre"]
+
+
+def _rerun_as_pending(runner, plan_file):
+    state_path = plan_file.parent / "arcgis-migration-state.json"
+    state = json.loads(state_path.read_text())
+    state["items"][A2]["status"] = "pending"
+    state_path.write_text(json.dumps(state))
+    return _migrate(runner, plan_file, "--only", A2)
+
+
+def test_a_rerun_keeps_every_metadata_edit_made_in_geolens(runner, tmp_path, geolens):
+    plan_file = _write_plan(
+        tmp_path, rows={A2: ITEM_TEXT}, portal={"name": "Example County"}
+    )
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    _migrate(runner, plan_file, "--only", A2)
+    parcels = dataset_id("Parcels")
+    service.summaries[parcels] = ""
+    service.fields[parcels].update(
+        {"license": "Internal use only", "source_organization": "Planning"}
+    )
+    service.keywords[parcels].remove("cadastre")
+    geolens.seen.clear()
+
+    result, _ = _rerun_as_pending(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    assert [
+        s for s in geolens.seen if s.method == "PATCH" and "summary" in s.json()
+    ] == []
+    assert service.summaries[parcels] == ""
+    assert service.fields[parcels]["license"] == "Internal use only"
+    assert service.fields[parcels]["source_organization"] == "Planning"
+    assert service.keywords[parcels] == ["parcels"]
+    notes = _state(plan_file)["items"][A2]["notes"]
+    assert any("summary" in n for n in notes)
+    assert any("license" in n for n in notes)
+    assert any("source organization" in n for n in notes)
+    assert any("'cadastre'" in n for n in notes)
+    assert not any("attribution" in n for n in notes)
+
+
+def test_a_rerun_still_writes_fields_nobody_edited(runner, tmp_path, geolens):
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    _migrate(runner, plan_file, "--only", A2)
+    parcels = dataset_id("Parcels")
+    service.fields[parcels]["license"] = "CC BY 4.0"
+    service.keywords[parcels].append("added by a person")
+
+    result, _ = _rerun_as_pending(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    assert service.keywords[parcels] == ["parcels", "cadastre", "added by a person"]
+    assert _state(plan_file)["items"][A2]["notes"] == []
+
+
+def test_a_mixed_case_tag_is_not_reported_as_removed_on_rerun(
+    runner, tmp_path, geolens
+):
+    rows = {A2: {**ITEM_TEXT, "tags": ["Roads", "roads"]}}
+    plan_file = _write_plan(tmp_path, rows=rows)
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    _migrate(runner, plan_file, "--only", A2)
+    assert service.keywords[dataset_id("Parcels")] == ["roads"]
+
+    result, _ = _rerun_as_pending(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    assert _state(plan_file)["items"][A2]["notes"] == []
+
+
+def test_the_same_text_under_another_keyword_type_does_not_count_as_present(
+    runner, tmp_path, geolens
+):
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    parcels = dataset_id("Parcels")
+    preview = service.preview
+
+    def preview_with_a_place_keyword(seen):
+        reply = preview(seen)
+        service.other_keywords[parcels] = [
+            {
+                "id": _uuid("4f", "parcels"),
+                "record_id": parcels,
+                "keyword": "parcels",
+                "vocabulary_uri": None,
+                "keyword_type": "place",
+                "inherited": False,
+            }
+        ]
+        return reply
+
+    geolens.routes[PREVIEW] = preview_with_a_place_keyword
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.keywords[parcels] == ["parcels", "cadastre"]
+
+
+def test_an_edit_that_matches_the_source_keeps_the_old_baseline(
+    runner, tmp_path, geolens
+):
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    _migrate(runner, plan_file, "--only", A2)
+    parcels = dataset_id("Parcels")
+    state_path = plan_file.parent / "arcgis-migration-state.json"
+    state = json.loads(state_path.read_text())
+    # The migration once wrote another license; a person has since set the
+    # value the source now holds.
+    state["items"][A2]["metadata_baseline"][parcels]["license"] = "Older license"
+    state_path.write_text(json.dumps(state))
+    assert service.fields[parcels]["license"] == "CC BY 4.0"
+
+    result, _ = _rerun_as_pending(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    baseline = _state(plan_file)["items"][A2]["metadata_baseline"][parcels]
+    assert baseline["license"] == "Older license"
+
+
+def test_a_keyword_the_record_holds_as_inherited_is_present_not_removed(
+    runner, tmp_path, geolens
+):
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    parcels = dataset_id("Parcels")
+    preview = service.preview
+
+    def preview_with_an_inherited_keyword(seen):
+        reply = preview(seen)
+        service.other_keywords[parcels] = [
+            {
+                "id": _uuid("4f", "parcels"),
+                "record_id": parcels,
+                "keyword": "parcels",
+                "vocabulary_uri": None,
+                "keyword_type": "theme",
+                "inherited": True,
+            }
+        ]
+        return reply
+
+    geolens.routes[PREVIEW] = preview_with_an_inherited_keyword
+    _migrate(runner, plan_file, "--only", A2)
+    assert service.keywords[parcels] == ["cadastre"]
+
+    result, _ = _rerun_as_pending(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    assert _state(plan_file)["items"][A2]["notes"] == []
+
+
+def test_a_keyword_written_before_a_failure_is_remembered(runner, tmp_path, geolens):
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    parcels = dataset_id("Parcels")
+    preview = service.preview
+    keyword_route = f"POST /records/{parcels}/keywords/"
+
+    def preview_then_break_the_second_keyword(seen):
+        reply = preview(seen)
+        working = geolens.routes[keyword_route]
+
+        def first_only(seen):
+            if seen.json()["keyword"] == "cadastre":
+                return (500, _problem(500, "database unavailable"))
+            return working(seen)
+
+        geolens.routes[keyword_route] = first_only
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_the_second_keyword
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 1
+    assert service.keywords[parcels] == ["parcels"]
+    assert _state(plan_file)["items"][A2]["metadata_baseline"][parcels]["keywords"] == [
+        "parcels"
+    ]
+
+    service.keywords[parcels].remove("parcels")
+    geolens.routes[PREVIEW] = preview
+    service._serve_dataset(parcels)
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.keywords[parcels] == ["cadastre"]
+    assert any("'parcels'" in n for n in _state(plan_file)["items"][A2]["notes"])
