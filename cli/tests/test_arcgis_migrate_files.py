@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import tempfile
 from pathlib import Path
@@ -1000,14 +1001,14 @@ def test_a_disk_error_is_reported_once_and_not_retried(
     runner, tmp_path, geolens, portal, monkeypatch
 ):
     files = FakeFiles(geolens)
-    real_open = Path.open
+    real_open = os.open
 
-    def failing(self, mode="r", *args, **kwargs):
-        if self.name.endswith(".csv") and "w" in mode:
+    def failing(path, flags, mode=0o777, **kwargs):
+        if str(path).endswith(".csv"):
             raise OSError(28, "No space left on device")
-        return real_open(self, mode, *args, **kwargs)
+        return real_open(path, flags, mode, **kwargs)
 
-    monkeypatch.setattr(Path, "open", failing)
+    monkeypatch.setattr("geolens_cli.arcgis_portal.os.open", failing)
     plan_file = _plan(tmp_path)
 
     result, _ = _migrate(runner, plan_file, "--only", D3)
@@ -1038,3 +1039,22 @@ def test_retries_share_one_download_deadline(
     assert result.exit_code == 1
     assert len(seen) == 3 and len(set(seen)) == 1
     assert not files.uploads
+
+
+def test_a_download_over_an_existing_world_readable_file_ends_private(tmp_path):
+    import stat
+
+    from geolens_cli.arcgis_portal import PortalClient, Redactor
+
+    portal_fake = FakePortal({"content/items/x/data": CSV})
+    client = PortalClient(
+        PORTAL, opener=portal_fake, redact=Redactor(), sleep=lambda seconds: None
+    )
+    dest = tmp_path / "data.csv"
+    dest.write_text("old")
+    dest.chmod(0o644)
+
+    client.download("content/items/x/data", dest, None)
+
+    assert dest.read_bytes() == CSV
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
