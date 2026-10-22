@@ -56,6 +56,8 @@ class MercatorClipDetail(BaseModel):
     # degenerates under ST_Transform (e.g. EPSG:4807 collapses it to a line);
     # counts are 0/0 then. Defaults False so older warnings validate.
     clip_skipped: bool = False
+    # Defaults False so older warnings keep the check-your-source wording.
+    polar_only: bool = False
 
     model_config = ConfigDict(extra="forbid")
 

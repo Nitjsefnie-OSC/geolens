@@ -222,8 +222,8 @@ async def clip_to_mercator_bounds(
     measure left to lose.
 
     Returns the clip accounting (``dropped_features``,
-    ``clipped_features``) so the caller can surface loss at the point it
-    happens. Returns None when the table has no registered ``geom``
+    ``clipped_features``, ``polar_only``) so the caller can surface loss at
+    the point it happens. Returns None when the table has no registered ``geom``
     metadata. Raises ``ValueError`` when a measured feature crosses the
     envelope; the ingest task's failure handling turns this into a job
     failure naming the count.
@@ -310,19 +310,32 @@ async def clip_to_mercator_bounds(
         clipped = f"{force_dims}({clipped})"
 
     # Count what the clip destroyed in the same statement that destroys it.
-    # Rows that were already empty are excluded from the WHERE so they cannot
-    # inflate the counts.
+    # Rows that were already empty are excluded so they cannot inflate the
+    # counts. `oob` is read from the geometry before the update: coordinates past
+    # longitude ±180° or latitude ±90° are not polar data. Other CRSs are not
+    # classified, so they never claim polar-only.
+    out_of_range = (
+        "ST_XMin(geom) < -180 OR ST_XMax(geom) > 180 "
+        "OR ST_YMin(geom) < -90 OR ST_YMax(geom) > 90"
+        if src_srid == 4326
+        else "true"
+    )
+    tref = _qtable(table_name, schema=schema)
     counts = (
         await session.execute(
             text(
-                f"WITH clip AS ("
-                f"  UPDATE {_qtable(table_name, schema=schema)} SET geom = {clipped} "
+                f"WITH cand AS ("
+                f"  SELECT ctid AS row_id, ({out_of_range}) AS oob FROM {tref} "
                 f"  WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) "
-                f"    AND NOT ST_CoveredBy(geom, {envelope}) "
-                f"  RETURNING geom AS new_geom"
+                f"    AND NOT ST_CoveredBy(geom, {envelope})"
+                f"), clip AS ("
+                f"  UPDATE {tref} AS t SET geom = {clipped} FROM cand "
+                f"  WHERE t.ctid = cand.row_id "
+                f"  RETURNING t.geom AS new_geom, cand.oob"
                 f") SELECT "
                 f"count(*) FILTER (WHERE new_geom IS NULL OR ST_IsEmpty(new_geom)), "
-                f"count(*) FILTER (WHERE new_geom IS NOT NULL AND NOT ST_IsEmpty(new_geom)) "
+                f"count(*) FILTER (WHERE new_geom IS NOT NULL AND NOT ST_IsEmpty(new_geom)), "
+                f"count(*) > 0 AND NOT COALESCE(bool_or(oob), false) "
                 f"FROM clip"
             )
         )
@@ -340,8 +353,11 @@ async def clip_to_mercator_bounds(
         )
     # No internal commit: the caller (_finalize_ingest) owns the phase-2
     # commit boundary, so a downstream failure rolls back this clip atomically.
-    return {
+    counts_out: "MercatorClipCounts" = {
         "shifted_longitudes": shifted,
         "dropped_features": dropped_features,
         "clipped_features": clipped_features,
     }
+    if counts is not None and counts[2]:
+        counts_out["polar_only"] = True
+    return counts_out
