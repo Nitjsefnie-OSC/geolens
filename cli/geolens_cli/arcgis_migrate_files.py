@@ -54,6 +54,8 @@ DEFAULT_LIMIT_MB = 500
 JOB_KEY = "file"
 # State keys of a fan-out's layers carry this prefix, so a layer can't collide
 # with JOB_KEY whatever its name.
+# Upload-job states in which a fan-out is known to have queued no child.
+_CHILDLESS = frozenset({"cancelled", "failed"})
 LAYER_PREFIX = "layer:"
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _TOKEN_STATUSES = (498, 499)
@@ -197,6 +199,14 @@ def _fan_out(
     from geolens.models.fan_out_layer_request import FanOutLayerRequest
 
     titles = {name: _title(base, name) for name in layers}
+    # Recorded before the request goes out: if its answer is lost, a rerun
+    # knows this job was fanned out and does not upload the file again.
+    entry.fan_out = {
+        "job": str(job_id),
+        "layers": layers,
+        "titles": [titles[name] for name in layers],
+    }
+    ctx.save()
     request = FanOutCommitRequest(
         layers=[FanOutLayerRequest(layer_name=n, title=titles[n]) for n in layers]
     )
@@ -218,12 +228,62 @@ def _fan_out(
                 f"layer not imported, {layer.layer_name}: {layer.error or layer.status}"
             )
     ctx.save()
-    _wait_for_layers(ctx, entry, base)
+    unknown = _wait_for_layers(ctx, entry, base)
     if not entry.layer_datasets:
+        if not unknown:
+            # Every outcome is known and none imported, so a rerun uploads
+            # afresh. A job GeoLens no longer has leaves the outcome unknown,
+            # so the record stays and the rerun does not upload again.
+            entry.fan_out = None
+            ctx.save()
         raise ItemFailed(f"{base}: {'; '.join(entry.notes)}")
     for name, dataset in entry.layer_datasets.items():
         _apply_target(ctx, dataset, _commit_body(titles[_layer_name(name)], visibility))
     return list(entry.notes)
+
+
+def _resume_fan_out(
+    ctx: MigrationContext, entry: ItemState, base: str, visibility: str
+) -> ItemResult | None:
+    """Carry on a fan-out an earlier run sent but never saw the answer to.
+
+    GeoLens refuses a second fan-out of a job it already fanned out, and the
+    child jobs can only be learned from the answer. A job still pending was
+    never accepted and is sent again; any other state means the layers were
+    queued, so the item fails, without uploading the file again, naming the
+    datasets to look for. A job that ended cancelled or failed queued none, so
+    the item is imported afresh (None).
+    """
+    from geolens.api.admin import get_job_status_jobs_job_id_get as get_job
+
+    job_id = UUID(entry.fan_out["job"])
+    layers = list(entry.fan_out["layers"])
+    try:
+        status = str(ctx.geolens.call(get_job.sync_detailed, job_id=job_id).status)
+    except GeoLensError as exc:
+        if exc.status != 404:
+            raise ItemFailed(f"{base}: {exc}") from None
+        status = "gone"
+    if status == "pending":
+        failed = _fan_out(ctx, job_id, layers, base, visibility, entry)
+        return ItemResult(
+            notes=[f"the file holds {len(layers)} layers, one dataset each", *failed]
+        )
+    if status in _CHILDLESS:
+        # The job ended without queuing a child (cancelled, expired, or the
+        # dispatch was interrupted), so no dataset exists: import afresh.
+        entry.fan_out = None
+        ctx.save()
+        return None
+    # The titles as sent, not rebuilt from a plan that may have been edited.
+    sent = entry.fan_out.get("titles") or [_title(base, name) for name in layers]
+    titles = ", ".join(repr(title) for title in sent)
+    raise ItemFailed(
+        f"{base}: the layers were sent to GeoLens but the answer was lost, so "
+        f"their datasets can't be linked (the upload job is {status}). Look for "
+        f'datasets titled {titles}; delete them and remove "fan_out" from this '
+        "item in the state file to import again, or set the item to skip."
+    )
 
 
 def _layer_key(name: str) -> str:
@@ -234,19 +294,45 @@ def _layer_name(key: str) -> str:
     return key.removeprefix(LAYER_PREFIX)
 
 
-def _wait_for_layers(ctx: MigrationContext, entry: ItemState, base: str) -> None:
+def _wait_for_layers(ctx: MigrationContext, entry: ItemState, base: str) -> int:
     """Wait for the fan-out jobs an earlier call queued and pin their datasets.
-    A job that ended without a dataset becomes a note on the item."""
-    for name in [n for n in entry.layer_jobs if n.startswith(LAYER_PREFIX)]:
+    A job that ended without a dataset becomes a note on the item.
+
+    Returns how many jobs GeoLens no longer had, whose outcome is unknown, and
+    remembers that in the fan-out record. When the last job ends and every
+    outcome is known to be a failure with no dataset, the record is cleared in
+    the same save that drops that job's pin, so a rerun imports afresh.
+    """
+    unknown = 0
+    names = [n for n in entry.layer_jobs if n.startswith(LAYER_PREFIX)]
+    for position, name in enumerate(names):
         try:
             entry.layer_datasets[name] = _wait_for_dataset(
                 ctx, UUID(entry.layer_jobs[name]), _title(base, _layer_name(name))
             )
         except _JobEnded as exc:
             entry.notes.append(f"layer not imported, {exc}")
+        except GeoLensError as exc:
+            if exc.status != 404:
+                raise ItemFailed(f"{_layer_name(name)}: {exc}") from None
+            # GeoLens no longer has the job: note the layer and go on, so the
+            # siblings are not held up by it on every rerun.
+            unknown += 1
+            if entry.fan_out is not None:
+                entry.fan_out["unknown"] = True
+            entry.notes.append(
+                f"layer not imported, {_layer_name(name)}: its import job is gone"
+            )
         del entry.layer_jobs[name]
         entry.dataset_ids = list(dict.fromkeys(entry.layer_datasets.values()))
+        if (
+            position == len(names) - 1
+            and not entry.layer_datasets
+            and not (entry.fan_out or {}).get("unknown")
+        ):
+            entry.fan_out = None
         ctx.save()
+    return unknown
 
 
 def _upload_fresh(
@@ -313,6 +399,11 @@ def import_file(
         # Notes from the run that imported the layers, such as a layer that
         # failed to queue, must survive this resume.
         return ItemResult(notes=list(entry.notes))
+
+    if entry.fan_out:
+        resumed = _resume_fan_out(ctx, entry, base, visibility)
+        if resumed is not None:
+            return resumed
 
     recorded = entry.layer_jobs.get(JOB_KEY)
     if recorded:

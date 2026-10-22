@@ -42,6 +42,8 @@ class FakeFiles:
         self.uploads: list[bytes] = []
         self.commits: dict[str, dict] = {}
         self.fan_outs: list[dict] = []
+        self.fanned: set[str] = set()
+        self.job_status: dict[str, str] = {}
         self.upload_refusal: tuple | None = None
         self.helper = layers.FakeImport(fake, [])
         fake.routes[UPLOAD] = self.upload
@@ -87,6 +89,7 @@ class FakeFiles:
 
     def fan_out(self, job: str, seen):
         self.fan_outs.append(seen.json())
+        self.fanned.add(job)
         results = []
         for layer in seen.json()["layers"]:
             name = layer["layer_name"]
@@ -107,7 +110,16 @@ class FakeFiles:
         return (202, {"fan_out_id": job, "results": results})
 
     def job(self, job: str) -> dict:
-        return self.helper.job(job, job, None)
+        reply = self.helper.job(job, job, None)
+        if self.layer_names:
+            # The upload job of a multi-layer file is only ever fanned out.
+            reply.update(
+                status=self.job_status.get(
+                    job, "fanned_out" if job in self.fanned else "pending"
+                ),
+                dataset_id=None,
+            )
+        return reply
 
 
 def _limit_settings(megabytes: int) -> dict:
@@ -1058,3 +1070,263 @@ def test_a_download_over_an_existing_world_readable_file_ends_private(tmp_path):
 
     assert dest.read_bytes() == CSV
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+
+
+def _lose_the_fan_out_answer(files: FakeFiles, *, accepted: bool) -> None:
+    """The server takes (or refuses) the fan-out, but the client never gets the
+    reply."""
+    fan_out = files.fan_out
+
+    def lost(job, seen):
+        if accepted:
+            fan_out(job, seen)
+        return (502, _problem(502, "gateway lost the answer"))
+
+    files.fan_out = lost
+
+
+def test_a_lost_fan_out_answer_does_not_upload_the_file_again(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    _lose_the_fan_out_answer(files, accepted=True)
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][D3]["fan_out"]["layers"] == ["Roads", "Parcels"]
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert len(files.uploads) == 1
+    error = _state(plan_file)["items"][D3]["error"]
+    assert "answer was lost" in error and "'Inspections - Roads'" in error
+
+
+def test_a_fan_out_the_server_never_accepted_is_sent_again_without_a_new_upload(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    real = files.fan_out
+    _lose_the_fan_out_answer(files, accepted=False)
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1
+
+    files.fan_out = real
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert len(files.uploads) == 1
+    entry = _state(plan_file)["items"][D3]
+    assert entry["dataset_ids"] == [dataset_id("Roads"), dataset_id("Parcels")]
+
+
+def test_a_purged_child_job_is_noted_and_its_siblings_still_finish(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    state = _state(plan_file)
+    entry = state["items"][D3]
+    roads, parcels = _uuid("0e", "Roads"), _uuid("0e", "Parcels")
+    entry.update(
+        status="failed",
+        layer_datasets={},
+        dataset_ids=[],
+        fan_out=None,
+        layer_jobs={"layer:Roads": roads, "layer:Parcels": parcels},
+        notes=[],
+    )
+    (plan_file.parent / "arcgis-migration-state.json").write_text(json.dumps(state))
+    geolens.routes[f"GET /jobs/{roads}"] = (404, _problem(404, "Job not found"))
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    entry = _state(plan_file)["items"][D3]
+    assert entry["dataset_ids"] == [dataset_id("Parcels")]
+    assert entry["layer_jobs"] == {}
+    assert any("Roads: its import job is gone" in n for n in entry["notes"])
+    assert len(files.uploads) == 1
+
+
+def test_a_fan_out_whose_layers_all_failed_is_uploaded_afresh_on_rerun(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    fan_out = files.fan_out
+
+    def nothing_queued(job, seen):
+        status, body = fan_out(job, seen)
+        for result in body["results"]:
+            result.update(status="failed", new_job_id=None, error="bad layer")
+        return status, body
+
+    files.fan_out = nothing_queued
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][D3]["fan_out"] is None
+
+    files.fan_out = fan_out
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert len(files.uploads) == 2
+
+
+@pytest.mark.parametrize("ended", ["cancelled", "failed"])
+def test_a_fan_out_whose_upload_job_ended_without_children_is_uploaded_afresh(
+    runner, tmp_path, geolens, portal, ended
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    real = files.fan_out
+    _lose_the_fan_out_answer(files, accepted=False)
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1
+    [parent] = [
+        s.url.rsplit("/", 1)[-1] for s in geolens.seen if "/commit-fan-out/" in s.url
+    ][:1]
+    files.job_status[parent] = ended
+    files.fan_out = real
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert len(files.uploads) == 2
+    entry = _state(plan_file)["items"][D3]
+    assert entry["dataset_ids"] == [dataset_id("Roads"), dataset_id("Parcels")]
+
+
+def _seed_child_jobs(plan_file: Path, **jobs: str) -> None:
+    state = _state(plan_file)
+    entry = state["items"][D3]
+    entry.update(
+        status="failed",
+        layer_datasets={},
+        dataset_ids=[],
+        layer_jobs={f"layer:{name}": job for name, job in jobs.items()},
+        notes=[],
+    )
+    (plan_file.parent / "arcgis-migration-state.json").write_text(json.dumps(state))
+
+
+def test_children_whose_jobs_are_all_gone_keep_the_fan_out_record(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    roads, parcels = _uuid("0e", "Roads"), _uuid("0e", "Parcels")
+    _seed_child_jobs(plan_file, Roads=roads, Parcels=parcels)
+    for job in (roads, parcels):
+        geolens.routes[f"GET /jobs/{job}"] = (404, _problem(404, "Job not found"))
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][D3]["fan_out"] is not None
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1 and len(files.uploads) == 1
+
+
+def test_children_that_all_failed_on_a_later_run_clear_the_fan_out_record(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    roads, parcels = _uuid("0e", "Roads"), _uuid("0e", "Parcels")
+    _seed_child_jobs(plan_file, Roads=roads, Parcels=parcels)
+    for job, name in ((roads, "Roads"), (parcels, "Parcels")):
+        geolens.routes[f"GET /jobs/{job}"] = files.helper.job(job, name, "boom")
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    # The failed children are known, so the same run imports the file afresh.
+    assert result.exit_code == 0, result.output
+    assert len(files.uploads) == 2
+    entry = _state(plan_file)["items"][D3]
+    assert entry["dataset_ids"] == [dataset_id("Roads"), dataset_id("Parcels")]
+
+
+def test_the_fan_out_record_is_cleared_in_the_save_that_drops_the_last_failed_child(
+    runner, tmp_path, geolens, portal, monkeypatch
+):
+    from geolens_cli.arcgis_migrate_state import MigrationState
+
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    roads = _uuid("0e", "Roads")
+    state = _state(plan_file)
+    state["items"][D3].update(
+        status="failed",
+        layer_datasets={},
+        dataset_ids=[],
+        layer_jobs={"layer:Roads": roads},
+        notes=[],
+    )
+    state_path = plan_file.parent / "arcgis-migration-state.json"
+    state_path.write_text(json.dumps(state))
+    geolens.routes[f"GET /jobs/{roads}"] = files.helper.job(roads, "Roads", "boom")
+    real_save = MigrationState.save
+    snapshots = []
+
+    def save_then_stop(self):
+        real_save(self)
+        snapshots.append(json.loads(state_path.read_text())["items"][D3])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(MigrationState, "save", save_then_stop)
+
+    _migrate(runner, plan_file, "--only", D3)
+
+    [first, *_] = snapshots
+    assert first["layer_jobs"] == {} and first["fan_out"] is None
+
+
+def test_an_unknown_child_outcome_survives_the_last_known_failure(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    roads, parcels = _uuid("0e", "Roads"), _uuid("0e", "Parcels")
+    _seed_child_jobs(plan_file, Roads=roads, Parcels=parcels)
+    geolens.routes[f"GET /jobs/{roads}"] = (404, _problem(404, "Job not found"))
+    geolens.routes[f"GET /jobs/{parcels}"] = files.helper.job(
+        parcels, "Parcels", "boom"
+    )
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][D3]["fan_out"]["unknown"] is True
+    assert len(files.uploads) == 1
+
+
+def test_the_lost_answer_message_names_the_titles_that_were_sent(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens, layer_names=["Roads", "Parcels"])
+    _lose_the_fan_out_answer(files, accepted=True)
+    plan_file = _plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    plan = json.loads(plan_file.read_text())
+    for item in plan["items"]:
+        if item["id"] == D3:
+            item["target"]["title"] = "Renamed in the plan"
+    plan_file.write_text(json.dumps(plan))
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    error = _state(plan_file)["items"][D3]["error"]
+    assert (
+        "'Inspections - Roads'" in error
+        and "'Renamed in the plan - Roads'" not in error
+    )
