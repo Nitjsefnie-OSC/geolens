@@ -1386,3 +1386,161 @@ def test_a_failed_parent_counts_as_childless_only_after_the_grace(
     _migrate(runner, plan_file, "--only", D3)
 
     assert len(files.uploads) == uploads
+
+
+def _write_state(plan_file: Path, **fields) -> None:
+    plan = json.loads(plan_file.read_text())
+    (plan_file.parent / "arcgis-migration-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "portal_url": plan["portal"]["url"],
+                "geolens_instance": layers.GEOLENS_INSTANCE,
+                "items": {D3: {"status": "failed", **fields}},
+            }
+        )
+    )
+
+
+def test_a_private_file_that_resumes_without_a_download_needs_no_credential(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens)
+    plan_file = _plan(tmp_path, public=False)
+    dataset = dataset_id("Inspections")
+    files.helper._serve_dataset(dataset)
+    _write_state(plan_file, layer_datasets={"file": dataset}, dataset_ids=[dataset])
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert not portal.requests_to(item_data_path(D3)) and not files.uploads
+
+
+def test_a_private_file_that_must_be_downloaded_still_asks_for_a_credential(
+    runner, tmp_path, geolens, portal
+):
+    FakeFiles(geolens)
+    plan_file = _plan(tmp_path, public=False)
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 2
+    assert "not public" in result.output
+
+
+def test_a_resumed_file_whose_job_is_gone_stops_for_a_credential_when_the_portal_wants_one(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens)
+    plan_file = _plan(tmp_path, public=False)
+    gone = _uuid("0f", "99")
+    geolens.routes[f"POST /ingest/preview/{gone}"] = (
+        404,
+        _problem(404, "Job not found"),
+    )
+    portal.routes[item_data_path(D3)] = lambda seen: (
+        CSV
+        if "x-esri-authorization" in seen.headers
+        else (499, {"error": {"code": 499}})
+    )
+    _write_state(plan_file, pending_upload=gone)
+
+    result, payload = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert "fresh token" in payload["stopped"]
+    assert not files.uploads
+    # The pending job was tried first (the resume branch), then found gone.
+    assert [s for s in geolens.seen if s.url.endswith(f"/ingest/preview/{gone}")]
+
+
+def test_a_failed_preview_is_retried_on_the_same_upload(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens)
+    real = files.preview
+    broken = {"on": True}
+
+    def flaky(job):
+        if broken["on"]:
+            return (500, _problem(500, "ogrinfo failed"))
+        return real(job)
+
+    files.preview = flaky
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][D3]["pending_upload"]
+
+    broken["on"] = False
+    portal.seen.clear()
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert len(files.uploads) == 1
+    assert not portal.requests_to(item_data_path(D3))
+    assert _state(plan_file)["items"][D3]["pending_upload"] is None
+
+
+def test_a_pending_upload_the_server_dropped_is_uploaded_afresh(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens)
+    plan_file = _plan(tmp_path)
+    gone = _uuid("0f", "98")
+    geolens.routes[f"POST /ingest/preview/{gone}"] = (
+        404,
+        _problem(404, "Job not found"),
+    )
+    _write_state(plan_file, pending_upload=gone)
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    # The dropped job is previewed first (404), and only then is the file
+    # uploaded afresh.
+    previews = [s.url for s in geolens.seen if "/ingest/preview/" in s.url]
+    assert previews[0].endswith(f"/ingest/preview/{gone}") and len(previews) == 2
+    assert len(files.uploads) == 1
+
+
+@pytest.mark.parametrize("ended", ["cancelled", "failed"])
+def test_a_pending_upload_the_sweep_ended_is_uploaded_afresh(
+    runner, tmp_path, geolens, portal, ended
+):
+    files = FakeFiles(geolens)
+    plan_file = _plan(tmp_path)
+    stale = _uuid("0f", "97")
+    geolens.routes[f"POST /ingest/preview/{stale}"] = (
+        400,
+        _problem(400, f"Job already processed (status='{ended}')"),
+    )
+    _write_state(plan_file, pending_upload=stale)
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    previews = [s.url for s in geolens.seen if "/ingest/preview/" in s.url]
+    assert previews[0].endswith(f"/ingest/preview/{stale}") and len(previews) == 2
+    assert len(files.uploads) == 1
+    assert _state(plan_file)["items"][D3]["pending_upload"] is None
+
+
+def test_a_preview_error_that_is_not_about_the_job_state_still_fails_the_item(
+    runner, tmp_path, geolens, portal
+):
+    files = FakeFiles(geolens)
+    plan_file = _plan(tmp_path)
+    broken = _uuid("0f", "96")
+    geolens.routes[f"POST /ingest/preview/{broken}"] = (
+        400,
+        _problem(400, "Unsupported file type"),
+    )
+    _write_state(plan_file, pending_upload=broken)
+
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert not files.uploads
+    assert _state(plan_file)["items"][D3]["pending_upload"] == broken
