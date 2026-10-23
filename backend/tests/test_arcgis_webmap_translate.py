@@ -301,6 +301,21 @@ class TestUniqueValueRenderer:
         values = [c["value"] for c in layer.style_config["categories"]]
         assert values == [7, *big]
 
+    def test_decimal_values_of_a_float_field_become_numbers(self) -> None:
+        texts = ["0.1", "2.5", "0.30000000000000004", "0.1000000000000000001"]
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "RATE",
+            "uniqueValueInfos": [{"value": v, "symbol": _fill()} for v in texts],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "RATE", "type": "esriFieldTypeDouble"}
+        ]
+        layer = _translate(webmap).layers[0]
+        values = [c["value"] for c in layer.style_config["categories"]]
+        assert values == [0.1, 2.5, 0.30000000000000004, "0.1000000000000000001"]
+
     def test_oid_values_are_stored_as_numbers(self) -> None:
         renderer = {
             "type": "uniqueValue",

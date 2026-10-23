@@ -286,8 +286,10 @@ def _typed_value(value: Any, field_kind: str | None) -> str | int | float:
         return value
     if field_kind == "integer":
         return int(exact) if exact == int(exact) and abs(exact) < 2**53 else value
-    number = float(exact) if exact.is_finite() else None
-    if number is None or Decimal(number) != exact:
+    if not exact.is_finite():
+        return value
+    number = float(exact)
+    if Decimal(repr(number)) != exact:
         return value
     return int(number) if number.is_integer() else number
 
