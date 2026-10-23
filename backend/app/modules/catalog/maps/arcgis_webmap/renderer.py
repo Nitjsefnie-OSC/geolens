@@ -7,8 +7,8 @@ Everything else keeps a default paint and is recorded in the loss report.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.modules.catalog.maps.arcgis_webmap.keys import (
@@ -269,18 +269,26 @@ def _report_class_differences(
         )
 
 
-def _typed_value(value: Any, numeric: bool) -> str | int | float:
-    """A category value as the column stores it; ArcGIS writes numbers as strings."""
+def _typed_value(value: Any, field_kind: str | None) -> str | int | float:
+    """A category value as the column stores it; ArcGIS writes numbers as strings.
+
+    A number is used only when it survives the round trip, so values past 2**53
+    stay distinct strings.
+    """
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return str(value)
-    if isinstance(value, str) and numeric:
-        try:
-            number = float(value)
-        except ValueError:
-            return value
-        if math.isfinite(number):
-            return int(number) if number.is_integer() and "." not in value else number
-    return value
+    if not isinstance(value, str) or field_kind is None:
+        return value
+    try:
+        exact = Decimal(value)
+    except InvalidOperation:
+        return value
+    if field_kind == "integer":
+        return int(exact) if exact == int(exact) and abs(exact) < 2**53 else value
+    number = float(exact) if exact.is_finite() else None
+    if number is None or Decimal(number) != exact:
+        return value
+    return int(number) if number.is_integer() else number
 
 
 def _categorical(
@@ -288,7 +296,7 @@ def _categorical(
     path: str,
     loss: LossReport,
     hint: str | None,
-    numeric_fields: frozenset[str] = frozenset(),
+    numeric_fields: dict[str, str] | None = None,
 ) -> Styled:
     field_name = r.get("field1")
     infos = _l(r.get("uniqueValueInfos"))
@@ -331,7 +339,7 @@ def _categorical(
         label = info.get("label")
         categories.append(
             {
-                "value": _typed_value(value, field_name in numeric_fields),
+                "value": _typed_value(value, (numeric_fields or {}).get(field_name)),
                 "label": label if isinstance(label, str) and label else key,
                 "color": _class_color(sym),
             }
@@ -541,7 +549,7 @@ def translate_renderer(
     path: str,
     loss: LossReport,
     geometry_type: Any = None,
-    numeric_fields: frozenset[str] = frozenset(),
+    numeric_fields: dict[str, str] | None = None,
 ) -> Styled:
     """Paint and style for a layer's renderer; empty when GeoLens defaults apply."""
     hint = geometry_kind(geometry_type)

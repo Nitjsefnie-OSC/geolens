@@ -280,11 +280,26 @@ class TestUniqueValueRenderer:
         }
         webmap = _with_renderer(renderer)
         webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
-            {"name": "CODE", "type": "esriFieldTypeInteger"}
+            {"name": "CODE", "type": "esriFieldTypeDouble"}
         ]
         layer = _translate(webmap).layers[0]
         assert [c["value"] for c in layer.style_config["categories"]] == [1, 2.5]
         assert layer.paint["fill-color"][3][2:6] == ["1", "#ff0000", "2.5", "#0000ff"]
+
+    def test_integers_past_2_53_stay_distinct_strings(self) -> None:
+        big = ["9007199254740992", "9007199254740993"]
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "ID",
+            "uniqueValueInfos": [{"value": v, "symbol": _fill()} for v in ["7", *big]],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "ID", "type": "esriFieldTypeBigInteger"}
+        ]
+        layer = _translate(webmap).layers[0]
+        values = [c["value"] for c in layer.style_config["categories"]]
+        assert values == [7, *big]
 
     def test_duplicate_values_are_reported(self) -> None:
         renderer = self._renderer()
