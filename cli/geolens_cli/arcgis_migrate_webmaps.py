@@ -113,8 +113,10 @@ def import_map(
 ) -> ItemResult:
     """Create the GeoLens map for a Web Map item; a map the state already
     holds is kept rather than imported again."""
-    if entry.map_id and entry.layer_ids:
-        return ItemResult(status=EXISTS)
+    if entry.map_id:
+        if entry.pending_loss is not None:
+            return _finish_loss(ctx, item["id"], entry)
+        return ItemResult(status=EXISTS, notes=list(entry.notes))
     if not _ITEM_ID.fullmatch(item["id"]):
         raise ItemFailed("the item id is not an ArcGIS item id")
 
@@ -158,15 +160,23 @@ def import_map(
     entry.layer_ids = {
         k: str(v) for k, v in result.layer_ids.additional_properties.items()
     }
+    # Kept in the state until the loss report file is written, so a failed
+    # write is finished on the rerun instead of dropping the losses.
+    entry.pending_loss = {
+        "loss_report": result.loss_report.to_dict(),
+        "unmatched_layers": [layer.to_dict() for layer in result.unmatched_layers],
+    }
     ctx.save()
-    return _result(ctx, item["id"], entry, result)
+    return _finish_loss(ctx, item["id"], entry)
 
 
-def _result(
-    ctx: MigrationContext, item_id: str, entry: ItemState, result: Any
-) -> ItemResult:
+def _finish_loss(ctx: MigrationContext, item_id: str, entry: ItemState) -> ItemResult:
+    payload = entry.pending_loss or {}
     notes: list[str] = []
-    unmatched = [layer.title or layer.layer_id for layer in result.unmatched_layers]
+    unmatched = [
+        layer.get("title") or layer.get("layer_id")
+        for layer in payload.get("unmatched_layers", [])
+    ]
     if unmatched:
         shown = ", ".join(unmatched[:_MAX_NOTE_LAYERS])
         more = len(unmatched) - _MAX_NOTE_LAYERS
@@ -174,18 +184,11 @@ def _result(
             f"{len(unmatched)} layer(s) not imported: {shown}"
             + (f" and {more} more" if more > 0 else "")
         )
-    lost = result.loss_report.items
+    lost = payload.get("loss_report", {}).get("items", [])
     if lost:
         notes.append(f"{len(lost)} part(s) of the web map were not carried over")
     if lost or unmatched:
-        entry.loss_report_path = _write_loss(
-            ctx,
-            item_id,
-            {
-                "loss_report": result.loss_report.to_dict(),
-                "unmatched_layers": [
-                    layer.to_dict() for layer in result.unmatched_layers
-                ],
-            },
-        )
+        entry.loss_report_path = _write_loss(ctx, item_id, payload)
+    entry.pending_loss = None
+    ctx.save()
     return ItemResult(status=DONE, notes=notes)

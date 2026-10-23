@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from geolens_cli import arcgis_migrate as migrate
+from geolens_cli import arcgis_migrate_webmaps as webmaps
 from geolens_cli.arcgis_migrate_state import ItemState
 from geolens_cli.arcgis_migrate_webmaps import match_datasets
 
@@ -220,3 +221,57 @@ def test_layers_match_the_dataset_of_their_service_layer():
         "f": "ds-file",
         "inner": "ds-0",
     }
+
+
+def test_a_map_without_layers_is_not_imported_again_on_retry(
+    runner, plan_file, geolens
+):
+    _services(geolens)
+    response = _response()
+    response["layer_ids"] = {}
+    geolens.routes[IMPORT] = (201, response)
+    patch = "PATCH /maps/" + MAP_ID
+    ok = geolens.routes[patch]
+    geolens.routes[patch] = (500, _problem(500, "boom"))
+
+    first, _ = _run(runner, plan_file)
+    geolens.routes[patch] = ok
+    second, _ = _run(runner, plan_file)
+
+    assert first.exit_code == 1 and second.exit_code == 0, second.output
+    assert len(_sent(geolens)) == 1
+    assert _state(plan_file)["items"][B1]["map_id"] == MAP_ID
+
+
+def test_a_failed_loss_report_write_is_finished_on_retry(
+    runner, plan_file, geolens, monkeypatch
+):
+    _services(geolens)
+    unmatched = [
+        {
+            "layer_id": "roads_2",
+            "title": "County roads",
+            "url": "u",
+            "reason": "no_match",
+        }
+    ]
+    geolens.routes[IMPORT] = (201, _response(lost=1, unmatched=unmatched))
+    real = webmaps._report.write_private
+
+    def broken(path, data):
+        if webmaps.LOSS_DIRNAME in str(path):
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(webmaps._report, "write_private", broken)
+    first, _ = _run(runner, plan_file)
+    monkeypatch.setattr(webmaps._report, "write_private", real)
+    second, _ = _run(runner, plan_file)
+
+    assert first.exit_code == 1 and second.exit_code == 0, second.output
+    assert len(_sent(geolens)) == 1
+    entry = _state(plan_file)["items"][B1]
+    assert entry["loss_report_path"] == f"webmap-loss/{B1}.json"
+    assert entry["pending_loss"] is None
+    assert any("County roads" in note for note in entry["notes"])
+    assert (plan_file.parent / entry["loss_report_path"]).exists()
