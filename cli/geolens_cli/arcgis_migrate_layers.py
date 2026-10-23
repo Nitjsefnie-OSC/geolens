@@ -405,7 +405,7 @@ def import_layers(
     wanted, notes = importable_layers(probe)
     entry.attachments = attachment_flags(wanted)
     if not wanted:
-        # Done rather than skipped, so a rerun doesn't probe it again.
+        # Done rather than skipped: a rerun's probe reports a layer added later.
         return ItemResult(notes=[*notes, "the service has no layer to import"])
 
     base = item["target"]["title"] or item["title"]

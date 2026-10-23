@@ -48,7 +48,6 @@ from .arcgis_migrate_files import FILE_TYPES, import_file
 from .arcgis_migrate_layers import import_layers
 from .arcgis_migrate_refresh import (
     Refresher,
-    bring_up_to_date,
     changed_in_geolens,
     get_dataset,
     record_last_update,
@@ -693,7 +692,7 @@ def refresh_finished(
         entry = state.items[item["id"]]
         summary.refreshed.append(item["id"])
         try:
-            reasons = bring_up_to_date(ctx, item, entry, REFRESHERS[item["action"]])
+            reasons = REFRESHERS[item["action"]](ctx, item, entry)
         except StopRun as exc:
             entry.stale = [state.clean(str(exc))]
             summary.stopped = entry.stale[0]

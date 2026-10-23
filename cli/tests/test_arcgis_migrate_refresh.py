@@ -510,6 +510,23 @@ def test_a_layer_added_to_a_migrated_service_is_reported_and_blocks_cutover(
     assert payload["cutover"]["refused"] == ["unfinished-items"]
 
 
+def test_a_layer_added_to_a_service_that_had_none_to_import_blocks_cutover(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,))
+    service = FakeImport(geolens, [_layer(0, "Imagery", "Raster Layer")])
+    _migrate(runner, plan_file)
+    service.layers.append(_layer(1, "Roads", has_attachments=False))
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    assert payload["not_up_to_date"][A2] == [
+        "layer Roads was added to the service in the portal and isn't migrated"
+    ]
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+
+
 def test_no_token_goes_out_when_the_stored_source_cant_be_read(
     runner, plan_file, geolens
 ):

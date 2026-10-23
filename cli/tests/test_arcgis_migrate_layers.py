@@ -372,7 +372,7 @@ def test_group_and_raster_layers_are_skipped_with_a_note(runner, plan_file, geol
     assert payload["items"][0]["notes"] == notes
 
 
-def test_a_service_with_nothing_to_import_is_done_and_not_probed_again(
+def test_a_service_with_nothing_to_import_is_done_and_imports_nothing_on_a_rerun(
     runner, plan_file, geolens
 ):
     service = FakeImport(geolens, [_layer(0, "Imagery", "Raster Layer")])
@@ -382,8 +382,10 @@ def test_a_service_with_nothing_to_import_is_done_and_not_probed_again(
     assert entry["status"] == "done" and entry["dataset_ids"] == []
     assert "the service has no layer to import" in entry["notes"]
 
-    _migrate(runner, plan_file, "--only", A2)
-    assert len(service.bodies(PROBE)) == 1
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 0, result.output
+    assert payload["not_up_to_date"] == {}
+    assert service.bodies(PREVIEW) == []
 
 
 def test_layers_geolens_already_holds_make_the_item_exist(runner, plan_file, geolens):

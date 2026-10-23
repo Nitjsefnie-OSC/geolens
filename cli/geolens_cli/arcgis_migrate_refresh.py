@@ -381,6 +381,8 @@ def refresh_file(
     it, one layer each for a multi-layer file."""
     extension = EXTENSIONS.get(item["type"])
     row = ctx.inventory.get(item["id"])
+    if not entry.layer_datasets:
+        return []
     if extension is None or row is None:
         return ["the item is not in the inventory the plan was built from"]
     limit = _limit(ctx)
@@ -481,16 +483,3 @@ def _bring_each(
         if problem:
             problems.append(f"dataset {dataset_id}: {problem}")
     return problems
-
-
-def bring_up_to_date(
-    ctx: MigrationContext,
-    item: Mapping[str, Any],
-    entry: ItemState,
-    refresher: Refresher,
-) -> list[str]:
-    """Bring a finished item's datasets up to date one at a time; why any of
-    them, or the item, is not."""
-    if not entry.layer_datasets:
-        return []
-    return refresher(ctx, item, entry)
