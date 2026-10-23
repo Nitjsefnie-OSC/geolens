@@ -439,8 +439,8 @@ async def get_job_status(
         refuse_publish_key(db, "A publish key can read only its owner's jobs")
     if not await _may_read_job(request, db, user, job):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to view this job",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
         )
 
     await _settle_stale(db, [job])
@@ -864,8 +864,8 @@ async def retry_job(
         request, db, user, job
     ):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to retry this job",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
         )
 
     if job.status != "failed":
@@ -961,7 +961,7 @@ async def _may_cancel_job(
     Arm 1: owners always retain access. Arm 2: the effective cross-user
     capability policy (same as view/retry). Arm 3: dataset write access —
     ``check_dataset_write_access`` raises 404 (not visible) or 403 (visible,
-    not owner/admin); the caller's generic 403 avoids leaking visibility.
+    not owner/admin); the caller's generic 404 avoids leaking visibility.
 
     Arm 2 runs as a SILENT probe: a losing arm is not a denial when a later
     arm grants (arm 3, for a dataset owner
@@ -1037,8 +1037,8 @@ async def cancel_job(
         refuse_publish_key(db, "A publish key can cancel only its owner's jobs")
     if not await _may_cancel_job(request, db, user, job):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to cancel this job",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
         )
 
     if job.status == "cancelled":

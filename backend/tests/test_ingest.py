@@ -374,7 +374,7 @@ class TestJobStatus:
     async def test_job_status_forbidden_other_user(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session
     ):
-        """Non-creator, non-admin user gets 403 on another user's job."""
+        """Non-creator, non-admin user gets 404 on another user's job."""
         # Get admin user ID
         from app.modules.auth.models import User
 
@@ -406,7 +406,8 @@ class TestJobStatus:
 
         editor_headers = await get_auth_header(client, username, "TestPass1234!")
         resp = await client.get(f"/jobs/{job.id}", headers=editor_headers)
-        assert resp.status_code == 403
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Job not found"
 
     async def test_job_status_auto_fails_stale_pending(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session
