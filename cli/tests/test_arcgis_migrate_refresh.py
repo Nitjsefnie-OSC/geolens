@@ -364,6 +364,31 @@ def test_a_refresh_an_earlier_run_left_is_found_behind_newer_runs(
     assert _state(plan_file)["items"][A2]["refreshing"] == {}
 
 
+def test_a_recovered_refresh_is_recorded_before_the_next_one_starts(
+    runner, plan_file, geolens, monkeypatch
+):
+    monkeypatch.setattr(refresh_mod, "JOB_TIMEOUT", 0.05)
+    monkeypatch.setattr(refresh_mod, "JOB_POLL_INTERVAL", 0.01)
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service, outcome="running").allow(PARCELS)
+    _migrate(runner, plan_file, "--only", A2)
+    [run] = refresh.runs[PARCELS]
+    run.update(status="succeeded", finished_at=LATER)
+    service.fields[PARCELS] = {"updated_at": LATER}
+
+    refresh.outcome = "failed"
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 1 and len(refresh.bodies) == 2
+    recorded = _state(plan_file)["items"][A2]["last_update"][PARCELS]
+    assert recorded["updated_at"].startswith("2026-10-02")
+
+    refresh.outcome = "succeeded"
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert len(refresh.bodies) == 3
+
+
 def test_a_rerun_writes_the_portals_new_item_metadata(runner, tmp_path, geolens):
     plan_file = _write_plan(tmp_path, rows={A2: {"snippet": "Old summary"}})
     service = _migrated(runner, plan_file, geolens)

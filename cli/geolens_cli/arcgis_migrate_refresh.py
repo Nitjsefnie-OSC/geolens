@@ -149,7 +149,8 @@ def changed_in_geolens(
     """Why *dataset* must be left alone, or None when this command may write it.
 
     A refresh an earlier run started and never settled explains a change only
-    when it succeeded and the dataset is still as it published it. A dataset
+    when it succeeded and the dataset is still as it published it; that result
+    is then recorded as this command's own write before anything else. A dataset
     with no recorded last update (a state file from before they were recorded)
     counts as unchanged only when the operator wrote it last, before the item
     finished.
@@ -162,6 +163,8 @@ def changed_in_geolens(
         if str(run.status) == "succeeded" and _published_unchanged(
             ctx, dataset, marker.get("revision")
         ):
+            record(entry, dataset_id, dataset)
+            ctx.save()
             return None
     seen = entry.last_update.get(dataset_id)
     if seen is None:
