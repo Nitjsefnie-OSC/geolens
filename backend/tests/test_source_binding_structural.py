@@ -45,7 +45,7 @@ _SQLALCHEMY_MODULES = frozenset({"sa", "sqlalchemy"})
 # ``update()`` are not here: ``payload.update({"origin_ref": ...})`` writes no row.
 _ROW_METHODS = frozenset({"values", "bulk_insert_mappings", "bulk_update_mappings"})
 _SQL_WRITE = re.compile(
-    r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\s*=(?!=)"
+    r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\"?\s*=(?!=)"
     r"|\bINSERT\s+INTO\s+[\w.\"]*datasets\"?\s*\([^)]*\borigin_(?:ref|uri)\b",
     re.IGNORECASE,
 )
@@ -71,6 +71,41 @@ def _dict_column_keys(node: ast.AST):
                     yield key.value
 
 
+def _may_write(source: str) -> bool:
+    """Whether the text names a column at all, in any case, so it is worth parsing."""
+    lowered = source.lower()
+    return any(column in lowered for column in COLUMNS)
+
+
+def _is_statement_builder(func: ast.expr) -> bool:
+    return _terminal_name(func) in _STATEMENTS and (
+        isinstance(func, ast.Name)
+        or (isinstance(func.value, ast.Name) and func.value.id in _SQLALCHEMY_MODULES)
+    )
+
+
+def _is_sql_write(text: object) -> bool:
+    return (
+        isinstance(text, str)
+        and "origin_" in text.lower()
+        and _SQL_WRITE.search(text) is not None
+    )
+
+
+def _binds_a_write(statement: ast.expr) -> bool:
+    """Whether execute()'s parameters are row values: the statement writes, or is unknown.
+
+    A statement passed by name can't be read here, so its parameters are checked.
+    """
+    if isinstance(statement, (ast.Name, ast.Attribute)):
+        return True
+    return any(
+        (isinstance(node, ast.Call) and _is_statement_builder(node.func))
+        or (isinstance(node, ast.Constant) and _is_sql_write(node.value))
+        for node in ast.walk(statement)
+    )
+
+
 def _call_writes(call: ast.Call) -> list[str]:
     func = call.func
     if (
@@ -87,20 +122,16 @@ def _call_writes(call: ast.Call) -> list[str]:
     ):
         return [f"setattr(..., {call.args[1].value!r}, ...)"]
     name = _terminal_name(func)
-    if name == "Dataset" or (
-        name in _STATEMENTS
-        and (
-            isinstance(func, ast.Name)
-            or (
-                isinstance(func.value, ast.Name)
-                and func.value.id in _SQLALCHEMY_MODULES
-            )
-        )
-    ):
+    if name == "Dataset" or _is_statement_builder(func):
         args = call.args
     elif isinstance(func, ast.Attribute) and name in _ROW_METHODS:
         args = call.args
-    elif isinstance(func, ast.Attribute) and name == "execute":
+    elif (
+        isinstance(func, ast.Attribute)
+        and name == "execute"
+        and call.args
+        and _binds_a_write(call.args[0])
+    ):
         # The statement is checked as its own call; the rest are bind parameters.
         args = call.args[1:]
     else:
@@ -123,12 +154,7 @@ def _node_writes(node: ast.AST) -> list[str]:
         return [f"writes an item of .{node.value.attr}"]
     if isinstance(node, ast.Call):
         return _call_writes(node)
-    if (
-        isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and "origin_" in node.value
-        and _SQL_WRITE.search(node.value)
-    ):
+    if isinstance(node, ast.Constant) and _is_sql_write(node.value):
         return ["raw SQL writes the column"]
     return []
 
@@ -160,7 +186,7 @@ def test_only_the_binding_module_writes_origin_columns() -> None:
     for path in sorted(APP_ROOT.rglob("*.py")):
         rel = path.relative_to(BACKEND_ROOT).as_posix()
         source = path.read_text(encoding="utf-8")
-        if rel == OWNER or not any(column in source for column in COLUMNS):
+        if rel == OWNER or not _may_write(source):
             continue
         for line, _, what in binding_writes(source):
             violations.append(f"{rel}:{line}: {what}")
@@ -220,6 +246,10 @@ def test_the_owner_check_sees_an_extra_write(old: str, new: str) -> None:
         "session.execute(update(Dataset), [{'id': 1, 'origin_ref': ref}])",
         "text('UPDATE catalog.datasets SET origin_uri = :u WHERE id = :id')",
         "text('INSERT INTO catalog.datasets (id, origin_ref) VALUES (:i, :r)')",
+        "text('UPDATE catalog.datasets SET \"origin_ref\" = :ref WHERE id = :id')",
+        "text('INSERT INTO catalog.datasets (id, \"origin_uri\") VALUES (:i, :u)')",
+        "text('UPDATE catalog.datasets SET ORIGIN_REF = :ref WHERE id = :id')",
+        "session.execute(stmt, [{'id': 1, 'origin_ref': ref}])",
     ],
 )
 def test_the_scan_sees_a_write(snippet: str) -> None:
@@ -239,6 +269,10 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
         "payload.update(origin_uri=uri)",
         "response.values()",
         "session.execute(select(Dataset.origin_ref))",
+        "session.execute(text('SELECT id FROM catalog.datasets "
+        "WHERE origin_ref = :origin_ref'), {'origin_ref': ref})",
+        "session.execute(select(Dataset.id).where(Dataset.origin_uri == bindparam("
+        "'origin_uri')), {'origin_uri': uri})",
         "text('UPDATE catalog.datasets SET last_checked_at = now() "
         "WHERE origin_ref = :ref')",
         "text(\"INSERT INTO v (h) SELECT origin_ref->>'file_hash' FROM d\")",
@@ -246,3 +280,8 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
 )
 def test_the_scan_leaves_a_read_alone(snippet: str) -> None:
     assert binding_writes(snippet) == [], snippet
+
+
+def test_a_module_naming_a_column_only_in_upper_case_is_still_scanned() -> None:
+    assert _may_write("text('UPDATE catalog.datasets SET ORIGIN_URI = :u')")
+    assert not _may_write("text('UPDATE catalog.datasets SET title = :t')")
