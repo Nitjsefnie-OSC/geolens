@@ -424,6 +424,39 @@ def test_a_rerun_writes_the_portals_new_item_metadata(runner, tmp_path, geolens)
     assert service.summaries[PARCELS].startswith("New summary")
 
 
+@pytest.mark.parametrize("edited", [False, True])
+def test_a_summary_cleared_in_the_portal_is_cleared_unless_edited_in_geolens(
+    runner, tmp_path, geolens, edited
+):
+    plan_file = _write_plan(tmp_path, rows={A2: {"snippet": "Old summary"}})
+    service = _migrated(runner, plan_file, geolens)
+    FakeRefresh(geolens, service).allow(PARCELS)
+    assert service.summaries[PARCELS].startswith("Old summary")
+    _set_snippet(plan_file, A2, None)
+    path = plan_file.parent / "arcgis-inventory.json"
+    inventory = json.loads(path.read_text())
+    for row in inventory["items"]:
+        if row["id"] == A2:
+            row["description"] = None
+    path.write_text(json.dumps(inventory))
+    if edited:
+        service.summaries[PARCELS] = "Written in GeoLens"
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    entry = _state(plan_file)["items"][A2]
+    if edited:
+        assert service.summaries[PARCELS] == "Written in GeoLens"
+        assert (
+            f"kept the summary edited in GeoLens on dataset {PARCELS}"
+            in (entry["notes"])
+        )
+    else:
+        assert service.summaries[PARCELS] is None
+        assert entry["metadata_baseline"][PARCELS]["summary"] == ""
+
+
 def test_a_data_file_is_downloaded_again_and_replaced(
     runner, tmp_path, geolens, portal
 ):

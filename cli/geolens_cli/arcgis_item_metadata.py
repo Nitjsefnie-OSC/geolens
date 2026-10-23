@@ -225,12 +225,19 @@ def apply_item_metadata(
             base = entry.metadata_baseline.get(dataset_id)
             meta: dict[str, Any] = {}
             baseline = dict(base or {})
-            for name, value in fields.items():
+            # A field this command wrote that the portal has since emptied is
+            # emptied too, by the same rule as any other change.
+            cleared = {
+                name: ""
+                for name, written in (base or {}).items()
+                if name != "keywords" and written and name not in fields
+            }
+            for name, value in {**fields, **cleared}.items():
                 action, claim = _decide(
                     name, _current(current, name), value, base, entry.metadata_hash
                 )
                 if action == "write":
-                    meta[name] = value
+                    meta[name] = value or None
                 elif action == "keep":
                     entry.notes.append(
                         f"kept the {name.replace('_', ' ')} edited in GeoLens on "
