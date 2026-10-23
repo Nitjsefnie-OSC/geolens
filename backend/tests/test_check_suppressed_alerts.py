@@ -105,7 +105,9 @@ def test_stuck_alert_is_dismissed_with_marker_and_audit_log(
 
 
 @pytest.mark.parametrize("stderr", ["dismissal denied", "  dismissal\n\tdenied \r\n"])
-def test_failed_dismissal_returns_failure_with_error(monkeypatch, capsys, stderr) -> None:
+def test_failed_dismissal_returns_failure_with_error(
+    monkeypatch, capsys, stderr
+) -> None:
     sarif = {"runs": [{"results": [_result(148, suppressed=True)]}]}
     monkeypatch.setattr(checker, "_load_sarif", lambda path: sarif)
     monkeypatch.setattr(checker, "_open_alerts", lambda repo: [_alert(136, 148)])
