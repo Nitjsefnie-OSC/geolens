@@ -1100,6 +1100,24 @@ class TestGetJobStatusByDataset:
 
 
 class TestRetryJob:
+    async def test_publish_key_cannot_retry_another_users_job_with_public_metadata(
+        self, client: AsyncClient, admin_auth_header: dict, test_db_session
+    ):
+        """A non-owner's publish key gets 404 when user_metadata sets visibility public."""
+        _, owner_id = await create_user(client, admin_auth_header, "editor")
+        job = await _create_job(
+            test_db_session,
+            created_by=uuid.UUID(owner_id),
+            status="failed",
+            user_metadata={"visibility": "public"},
+        )
+        publish = await _mint(client, admin_auth_header, "publish")
+
+        resp = await client.post(f"/jobs/{job.id}/retry", headers=publish)
+
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"] == "Job not found"
+
     async def test_publish_key_cannot_distinguish_another_users_job_from_unknown(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session
     ):
