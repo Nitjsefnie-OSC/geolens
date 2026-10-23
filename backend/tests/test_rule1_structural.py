@@ -294,8 +294,9 @@ ALLOWLIST: dict[str, str] = {
     ),
     # Owner-or-policy: creator passes, everyone else goes through
     # _can_access_another_users_job (the effective permission matrix), and a
-    # refusal answers 404 "Job not found", identical to an unknown id,
-    # and is still recorded as a permission denial.
+    # refusal answers 404 "Job not found", identical to an unknown id.
+    # Cross-user publish keys are rejected earlier without a permission-denial
+    # record; policy refusals are still recorded as permission denials.
     "app.platform.jobs.router.get_job_status": (
         "owner-or-policy via _may_read_job; a refused id is "
         'reported as 404 "Job not found", identical to an unknown id'
