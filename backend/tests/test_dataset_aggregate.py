@@ -499,18 +499,38 @@ class TestViewThreshold:
         assert resp.status_code == 200, resp.text
         assert resp.json()["result"] == {"count": 2}
 
-    async def test_a_view_containing_the_dataset_gets_the_whole_layer_result(
-        self, client: AsyncClient, points
+    async def test_a_view_containing_the_dataset_skips_the_view_limit(
+        self, client: AsyncClient, points, planned
     ):
-        body = {"op": "stats", "column": "pop", "stats": ["sum"]}
-        whole = await _aggregate(client, points.id, body)
-        assert whole.status_code == 200, whole.text
+        body = {"op": "stats", "column": "pop", "stats": ["sum"], "bbox": WHOLE_WORLD}
+        first = await _aggregate(client, points.id, body)
+        again = await _aggregate(client, points.id, body)
 
-        resp = await _aggregate(client, points.id, {**body, "bbox": WHOLE_WORLD})
+        assert first.status_code == 200, first.text
+        assert first.json()["result"]["sum"] == 360
+        assert again.json()["cached"] is True
+        assert planned == []
 
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["result"]["sum"] == 360.0
-        assert resp.json()["cached"] is True
+    async def test_a_covering_view_still_leaves_out_rows_without_geometry(
+        self, client: AsyncClient, test_db_session, points
+    ):
+        await test_db_session.execute(
+            text(
+                f"INSERT INTO data.{points.table_name}"  # noqa: S608
+                " (kind, pop, geom, geom_4326) VALUES"
+                " ('keep', 90, NULL, NULL),"
+                " ('keep', 100, ST_GeomFromText('POINT EMPTY', 4326),"
+                " ST_GeomFromText('POINT EMPTY', 4326))"
+            )
+        )
+        await test_db_session.commit()
+        body = {"op": "count", "filter": KEEP}
+
+        layer = await _aggregate(client, points.id, body)
+        view = await _aggregate(client, points.id, {**body, "bbox": WHOLE_WORLD})
+
+        assert layer.json()["result"] == {"count": 8}
+        assert view.json()["result"] == {"count": 6}
 
 
 class TestCache:

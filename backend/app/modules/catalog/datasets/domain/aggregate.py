@@ -337,6 +337,14 @@ def _number_sql(column: str, data_type: str) -> str:
     return f"{_sql_quote_ident(column)}::{cast}"
 
 
+def _view_predicates(bbox: Sequence[float] | None, *, covered: bool) -> list[str]:
+    if bbox is not None:
+        return [_bbox_predicate(bbox, "_t")]
+    if covered:
+        return ["_t.geom_4326 IS NOT NULL AND NOT ST_IsEmpty(_t.geom_4326)"]
+    return []
+
+
 def _key_sql(column: str, data_type: str) -> tuple[str, str]:
     """What a category groups on, and its returned key over the grouped ``_g._k``.
 
@@ -643,16 +651,28 @@ async def run_aggregate(
     owned = geolens_owns_table(
         dataset.source_format, dataset.record.record_type, dataset.origin_ref
     )
-    if owned and bbox is not None and _covers(bbox, dataset.record.spatial_extent):
+    # A view around the whole extent skips the view limit, but still leaves
+    # out the rows with no geometry, which no view contains.
+    covered = (
+        owned and bbox is not None and _covers(bbox, dataset.record.spatial_extent)
+    )
+    if covered:
         bbox = None
     whole_layer = owned and bbox is None and request.filter is None
     if not await feature_table_exists(db, dataset.table_name):
         raise TableUnavailable(dataset.table_name)
-    if whole_layer and request.op == "count" and dataset.feature_count is not None:
+    if (
+        whole_layer
+        and not covered
+        and request.op == "count"
+        and dataset.feature_count is not None
+    ):
         return _respond("count", {"count": dataset.feature_count}, cached=False)
 
     cache_key = _cache_key(
-        "aggregate", dataset, request.model_dump(mode="json") | {"bbox": bbox}
+        "aggregate",
+        dataset,
+        request.model_dump(mode="json") | {"bbox": bbox, "covered": covered},
     )
     cached = await get_cache().get(cache_key) if cache_key is not None else None
     if cached is not None:
@@ -680,7 +700,7 @@ async def run_aggregate(
     where_sql, binds = layer_filter if layer_filter else (None, [])
     columns = {col["name"]: str(col["type"]).lower() for col in live}
     source = render_filtered_table_ref(_safe_table_ref(dataset.table_name), where_sql)
-    predicates = [_bbox_predicate(bbox, "_t")] if bbox is not None else []
+    predicates = _view_predicates(bbox, covered=covered)
     sql = build_aggregate_sql(request, source, predicates, columns)
     # The request session has no tenant schema rewrite, so EXPLAIN reads the
     # resolved table rather than the sandbox's logical reference.
