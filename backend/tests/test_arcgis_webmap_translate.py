@@ -316,6 +316,49 @@ class TestUniqueValueRenderer:
         values = [c["value"] for c in layer.style_config["categories"]]
         assert values == [0.1, 2.5, 0.30000000000000004, "0.1000000000000000001"]
 
+    @pytest.mark.parametrize(
+        ("field_type", "text", "value", "key"),
+        [
+            ("esriFieldTypeInteger", "1.0", 1, "1"),
+            ("esriFieldTypeInteger", "1e3", 1000, "1000"),
+            ("esriFieldTypeDouble", "2.50", 2.5, "2.5"),
+            ("esriFieldTypeDouble", "0.00001", 1e-05, "0.00001"),
+            ("esriFieldTypeDouble", "1e-7", 1e-07, "1e-7"),
+        ],
+    )
+    def test_the_paint_key_is_the_text_of_the_typed_number(
+        self, field_type: str, text: str, value: float, key: str
+    ) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "N",
+            "uniqueValueInfos": [{"value": text, "symbol": _fill([255, 0, 0, 255])}],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "N", "type": field_type}
+        ]
+        layer = _translate(webmap).layers[0]
+        assert layer.style_config["categories"][0]["value"] == value
+        assert layer.paint["fill-color"][3][2] == key
+
+    def test_a_dataset_column_types_a_field_the_web_map_does_not_declare(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "CODE",
+            "uniqueValueInfos": [{"value": "7", "symbol": _fill()}],
+        }
+        dataset_id = uuid.uuid4()
+        result = translate_webmap(
+            _with_renderer(renderer),
+            name=None,
+            dataset_matches={"L1": dataset_id},
+            basemap_map={},
+            available_basemaps=BASEMAPS,
+            dataset_columns={dataset_id: [{"name": "CODE", "type": "integer"}]},
+        )
+        assert result.layers[0].style_config["categories"][0]["value"] == 7
+
     def test_oid_values_are_stored_as_numbers(self) -> None:
         renderer = {
             "type": "uniqueValue",

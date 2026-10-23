@@ -270,6 +270,21 @@ def _report_class_differences(
         )
 
 
+def _js_string(value: str | int | float) -> str:
+    """The text MapLibre's ``to-string`` gives a value, which the paint ``match`` keys on."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) or (value.is_integer() and abs(value) < 1e21):
+        return str(int(value))
+    text = repr(value)
+    if "e" not in text:
+        return text
+    if 1e-6 <= abs(value) < 1e21:
+        return format(Decimal(text), "f")
+    mantissa, _, exponent = text.partition("e")
+    return f"{mantissa}e{exponent[0]}{exponent[1:].lstrip('0')}"
+
+
 def _typed_value(value: Any, field_kind: str | None) -> str | int | float:
     """A category value as the column stores it; ArcGIS writes numbers as strings.
 
@@ -339,15 +354,16 @@ def _categorical(
             dropped += 1
             continue
         seen.add(key)
+        typed = _typed_value(value, (numeric_fields or {}).get(field_name))
         label = info.get("label")
         categories.append(
             {
-                "value": _typed_value(value, (numeric_fields or {}).get(field_name)),
+                "value": typed,
                 "label": label if isinstance(label, str) and label else key,
                 "color": _class_color(sym),
             }
         )
-        pairs += [key, _css_color(sym)]
+        pairs += [_js_string(typed), _css_color(sym)]
     if dropped:
         loss.add(path, "renderer_class_dropped", f"{dropped} classes")
     if not categories:
