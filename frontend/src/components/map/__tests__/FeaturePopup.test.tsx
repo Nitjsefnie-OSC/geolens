@@ -123,7 +123,7 @@ describe('FeaturePopup — EASY-11 rich-text rendering', () => {
 });
 
 describe('FeaturePopup keyboard activation', () => {
-  it('leaves Enter on the image link uncanceled without copying the value', async () => {
+  it.each(['Enter', ' '])('leaves %j on the image link uncanceled without copying the value', async (key) => {
     userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, 'writeText');
     render(
@@ -136,15 +136,15 @@ describe('FeaturePopup keyboard activation', () => {
     );
     const anchor = screen.getByRole('link', { name: 'https://example.com/x.jpg' });
     anchor.focus();
-    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    const activation = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
 
-    await act(async () => { fireEvent(anchor, enter); });
+    await act(async () => { fireEvent(anchor, activation); });
 
-    expect(enter.defaultPrevented).toBe(false);
+    expect(activation.defaultPrevented).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
   });
 
-  it('leaves Enter on the rich-text link uncanceled without copying the value', async () => {
+  it.each(['Enter', ' '])('leaves %j on the rich-text link uncanceled without copying the value', async (key) => {
     userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, 'writeText');
     render(
@@ -157,11 +157,11 @@ describe('FeaturePopup keyboard activation', () => {
     );
     const anchor = screen.getByRole('link', { name: 'https://example.com/x.jpg' });
     anchor.focus();
-    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    const activation = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
 
-    await act(async () => { fireEvent(anchor, enter); });
+    await act(async () => { fireEvent(anchor, activation); });
 
-    expect(enter.defaultPrevented).toBe(false);
+    expect(activation.defaultPrevented).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
   });
 
