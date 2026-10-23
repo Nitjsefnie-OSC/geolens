@@ -4247,6 +4247,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maps/import/arcgis-webmap/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Arcgis Webmap Endpoint
+         * @description Import an ArcGIS web map as a new GeoLens map.
+         *
+         *     Translates the web map's operational layers, renderers, labels, popups and
+         *     scale ranges, and reports everything it could not carry over in
+         *     `loss_report`. Only layers named in `dataset_matches` are imported, and
+         *     every matched dataset must be readable by the caller (404 otherwise). The
+         *     report is also written to the map's private notes. With `dry_run` nothing
+         *     is created and `map` is null.
+         */
+        post: operations["import_arcgis_webmap_endpoint_maps_import_arcgis_webmap__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/maps/shared/{token}": {
         parameters: {
             query?: never;
@@ -6866,6 +6893,116 @@ export interface components {
              */
             expires_at: string;
         };
+        /** ArcgisLossItem */
+        ArcgisLossItem: {
+            /**
+             * Path
+             * @description JSON path of the web map part that was not carried over.
+             */
+            path: string;
+            /**
+             * Kind
+             * @description Stable code for the kind of loss.
+             */
+            kind: string;
+            /**
+             * Detail
+             * @description Free text; not localized.
+             * @default
+             */
+            detail: string;
+        };
+        /** ArcgisLossReport */
+        ArcgisLossReport: {
+            /** Items */
+            items: components["schemas"]["ArcgisLossItem"][];
+            /**
+             * Summary
+             * @description Item count per `kind`.
+             */
+            summary: {
+                [key: string]: number;
+            };
+        };
+        /** ArcgisUnmatchedLayer */
+        ArcgisUnmatchedLayer: {
+            /** Layer Id */
+            layer_id: string;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
+            /**
+             * Reason
+             * @description `no_match` or `invalid`.
+             */
+            reason: string;
+        };
+        /** ArcgisWebmapImportRequest */
+        ArcgisWebmapImportRequest: {
+            /**
+             * Webmap
+             * @description The web map item data JSON, at most 1 MB serialized.
+             */
+            webmap: {
+                [key: string]: unknown;
+            };
+            /**
+             * Name
+             * @description Map name. Defaults to `title`.
+             */
+            name?: string | null;
+            /**
+             * Title
+             * @description The web map item's title.
+             */
+            title?: string | null;
+            /**
+             * @description Visibility of the new map.
+             * @default private
+             */
+            visibility: components["schemas"]["MapVisibility"];
+            /**
+             * Basemap Map
+             * @description Esri basemap URL or style URL (the first base map layer's `url` or `styleUrl`) to a GeoLens basemap id. An unmapped basemap falls back to the first enabled basemap and is reported.
+             */
+            basemap_map?: {
+                [key: string]: string;
+            };
+            /**
+             * Dataset Matches
+             * @description Operational layer id to GeoLens dataset id. Every dataset must be one the caller can read, or the request is refused with 404. A layer with no entry is not imported and is listed as unmatched.
+             */
+            dataset_matches?: {
+                [key: string]: string;
+            };
+            /**
+             * Dry Run
+             * @description Return the translation without creating a map.
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /** ArcgisWebmapImportResponse */
+        ArcgisWebmapImportResponse: {
+            /** @description The new map; null on a dry run. */
+            map: components["schemas"]["MapResponse"] | null;
+            /**
+             * Layers
+             * @description The translated layers, in draw order.
+             */
+            layers: components["schemas"]["MapLayerInput"][];
+            /**
+             * Layer Ids
+             * @description Operational layer id to the id of the map layer created for it. Layers that were not imported are absent; see `loss_report`. Empty on a dry run.
+             */
+            layer_ids?: {
+                [key: string]: string;
+            };
+            loss_report: components["schemas"]["ArcgisLossReport"];
+            /** Unmatched Layers */
+            unmatched_layers: components["schemas"]["ArcgisUnmatchedLayer"][];
+        };
         /** AttributeMetadataListResponse */
         AttributeMetadataListResponse: {
             /** Attributes */
@@ -8152,6 +8289,16 @@ export interface components {
              * @default false
              */
             strict_cog: boolean;
+            /**
+             * Item Id
+             * @description Vector file only: ArcGIS portal item ID the file came from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description Vector file only: ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            portal_url?: string | null;
         };
         /** CommitResponse */
         CommitResponse: {
@@ -8171,6 +8318,11 @@ export interface components {
              * @description Human-readable commit result.
              */
             message: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ConfigImportRequest
@@ -9987,6 +10139,16 @@ export interface components {
              * @description Layers to ingest as separate datasets. Maximum 50 per request.
              */
             layers: components["schemas"]["FanOutLayerRequest"][];
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the file came from. Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link. Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /**
          * FanOutCommitResponse
@@ -10004,6 +10166,11 @@ export interface components {
              * @description Per-layer outcomes in the same order as the request layers.
              */
             results: components["schemas"]["FanOutLayerResult"][];
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * FanOutLayerRequest
@@ -13860,6 +14027,16 @@ export interface components {
             object_id_field?: string | null;
             /** @description Structured credential for a protected service. Mutually exclusive with the token field. */
             auth?: components["schemas"]["ServiceAuthRequest"] | null;
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the layer was published from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss. Dropped for a non-ArcGIS service type.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is https and shares a registrable domain with the service URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /** ServicePreviewResponse */
         ServicePreviewResponse: {
@@ -13908,6 +14085,11 @@ export interface components {
              * @description Layer name as it appears in the remote service.
              */
             layer_name: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ServiceProbeResult
@@ -36833,6 +37015,113 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MapStyleImportResponse"];
+                };
+            };
+            /** @description Bad request — invalid payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks write access */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    import_arcgis_webmap_endpoint_maps_import_arcgis_webmap__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArcgisWebmapImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArcgisWebmapImportResponse"];
                 };
             };
             /** @description Bad request — invalid payload */
