@@ -2782,6 +2782,18 @@ export type CommitRequest = {
      * Raster only: reject a non-COG TIFF instead of converting it. False (the default) converts the source to a COG during ingest. True fails the job when the source is not already a compliant COG, and cannot be combined with resampling, nodata_override, srid_override or a compression other than the default DEFLATE: each of those is applied by a conversion, so the commit is refused with a 422 naming the fields that clash.
      */
     strict_cog?: boolean;
+    /**
+     * Item Id
+     *
+     * Vector file only: ArcGIS portal item ID the file came from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * Vector file only: ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -2806,6 +2818,12 @@ export type CommitResponse = {
      * Human-readable commit result.
      */
     message: string;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -5173,6 +5191,18 @@ export type FanOutCommitRequest = {
      * Layers to ingest as separate datasets. Maximum 50 per request.
      */
     layers: Array<FanOutLayerRequest>;
+    /**
+     * Item Id
+     *
+     * ArcGIS portal item ID the file came from. Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * ArcGIS portal address for the item link. Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -5193,6 +5223,12 @@ export type FanOutCommitResponse = {
      * Per-layer outcomes in the same order as the request layers.
      */
     results: Array<FanOutLayerResult>;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -5457,6 +5493,102 @@ export type GeoJsonGeometryCollection = {
      * Geometries
      */
     geometries: Array<GeoJsonGeometry>;
+};
+
+/**
+ * GroupListResponse
+ */
+export type GroupListResponse = {
+    /**
+     * Groups
+     *
+     * Page of groups, by name.
+     */
+    groups: Array<GroupResponse>;
+    /**
+     * Total
+     *
+     * Total number of groups (across all pages).
+     */
+    total: number;
+};
+
+/**
+ * GroupMemberListResponse
+ */
+export type GroupMemberListResponse = {
+    /**
+     * Members
+     *
+     * Page of group members, by username.
+     */
+    members: Array<UserNameItem>;
+    /**
+     * Total
+     *
+     * Total number of members (across all pages).
+     */
+    total: number;
+};
+
+/**
+ * GroupMembersAdd
+ */
+export type GroupMembersAdd = {
+    /**
+     * User Ids
+     *
+     * Users to add. Users already in the group are left as they are; if any id matches no user, none are added.
+     */
+    user_ids: Array<string>;
+};
+
+/**
+ * GroupResponse
+ */
+export type GroupResponse = {
+    /**
+     * Id
+     *
+     * Unique group identifier.
+     */
+    id: string;
+    /**
+     * Name
+     *
+     * Group name.
+     */
+    name: string;
+    /**
+     * Member Count
+     *
+     * Number of users in the group.
+     */
+    member_count: number;
+    /**
+     * Created At
+     *
+     * When the group was created.
+     */
+    created_at: string;
+    /**
+     * Updated At
+     *
+     * When the group was last renamed.
+     */
+    updated_at: string;
+};
+
+/**
+ * GroupWrite
+ */
+export type GroupWrite = {
+    /**
+     * Name
+     *
+     * Group name, unique across the instance. Leading and trailing whitespace is removed.
+     */
+    name: string;
 };
 
 /**
@@ -6000,6 +6132,12 @@ export type LayerInfo = {
      * False when the layer holds no features (ArcGIS composite, raster and annotation layers) and a preview of it is refused with 'unsupported_layer_type'.
      */
     importable?: boolean;
+    /**
+     * Has Attachments
+     *
+     * Whether the ArcGIS layer reports file attachments. Null when the service does not say, and for other service types.
+     */
+    has_attachments?: boolean | null;
     /**
      * Layer Id
      *
@@ -10093,6 +10231,18 @@ export type ServicePreviewRequest = {
      * Structured credential for a protected service. Mutually exclusive with the token field.
      */
     auth?: ServiceAuthRequest | null;
+    /**
+     * Item Id
+     *
+     * ArcGIS portal item ID the layer was published from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss. Dropped for a non-ArcGIS service type.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is https and shares a registrable domain with the service URL, otherwise dropped and reported in origin_link_loss.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -10151,6 +10301,12 @@ export type ServicePreviewResponse = {
      * Layer name as it appears in the remote service.
      */
     layer_name: string;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -13528,6 +13684,490 @@ export type GetEmbeddingStatsAdminEmbeddingStatsGetResponses = {
 };
 
 export type GetEmbeddingStatsAdminEmbeddingStatsGetResponse = GetEmbeddingStatsAdminEmbeddingStatsGetResponses[keyof GetEmbeddingStatsAdminEmbeddingStatsGetResponses];
+
+export type ListGroupsAdminGroupsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Skip
+         */
+        skip?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/admin/groups/';
+};
+
+export type ListGroupsAdminGroupsGetErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type ListGroupsAdminGroupsGetError = ListGroupsAdminGroupsGetErrors[keyof ListGroupsAdminGroupsGetErrors];
+
+export type ListGroupsAdminGroupsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupListResponse;
+};
+
+export type ListGroupsAdminGroupsGetResponse = ListGroupsAdminGroupsGetResponses[keyof ListGroupsAdminGroupsGetResponses];
+
+export type CreateGroupAdminGroupsPostData = {
+    body: GroupWrite;
+    path?: never;
+    query?: never;
+    url: '/admin/groups/';
+};
+
+export type CreateGroupAdminGroupsPostErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Conflict — resource state prevents the operation
+     */
+    409: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type CreateGroupAdminGroupsPostError = CreateGroupAdminGroupsPostErrors[keyof CreateGroupAdminGroupsPostErrors];
+
+export type CreateGroupAdminGroupsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: GroupResponse;
+};
+
+export type CreateGroupAdminGroupsPostResponse = CreateGroupAdminGroupsPostResponses[keyof CreateGroupAdminGroupsPostResponses];
+
+export type DeleteGroupAdminGroupsGroupIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/admin/groups/{group_id}';
+};
+
+export type DeleteGroupAdminGroupsGroupIdDeleteErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type DeleteGroupAdminGroupsGroupIdDeleteError = DeleteGroupAdminGroupsGroupIdDeleteErrors[keyof DeleteGroupAdminGroupsGroupIdDeleteErrors];
+
+export type DeleteGroupAdminGroupsGroupIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteGroupAdminGroupsGroupIdDeleteResponse = DeleteGroupAdminGroupsGroupIdDeleteResponses[keyof DeleteGroupAdminGroupsGroupIdDeleteResponses];
+
+export type GetGroupAdminGroupsGroupIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/admin/groups/{group_id}';
+};
+
+export type GetGroupAdminGroupsGroupIdGetErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type GetGroupAdminGroupsGroupIdGetError = GetGroupAdminGroupsGroupIdGetErrors[keyof GetGroupAdminGroupsGroupIdGetErrors];
+
+export type GetGroupAdminGroupsGroupIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupResponse;
+};
+
+export type GetGroupAdminGroupsGroupIdGetResponse = GetGroupAdminGroupsGroupIdGetResponses[keyof GetGroupAdminGroupsGroupIdGetResponses];
+
+export type RenameGroupAdminGroupsGroupIdPatchData = {
+    body: GroupWrite;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/admin/groups/{group_id}';
+};
+
+export type RenameGroupAdminGroupsGroupIdPatchErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Conflict — resource state prevents the operation
+     */
+    409: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type RenameGroupAdminGroupsGroupIdPatchError = RenameGroupAdminGroupsGroupIdPatchErrors[keyof RenameGroupAdminGroupsGroupIdPatchErrors];
+
+export type RenameGroupAdminGroupsGroupIdPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupResponse;
+};
+
+export type RenameGroupAdminGroupsGroupIdPatchResponse = RenameGroupAdminGroupsGroupIdPatchResponses[keyof RenameGroupAdminGroupsGroupIdPatchResponses];
+
+export type ListGroupMembersAdminGroupsGroupIdMembersGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: {
+        /**
+         * Skip
+         */
+        skip?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/admin/groups/{group_id}/members/';
+};
+
+export type ListGroupMembersAdminGroupsGroupIdMembersGetErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type ListGroupMembersAdminGroupsGroupIdMembersGetError = ListGroupMembersAdminGroupsGroupIdMembersGetErrors[keyof ListGroupMembersAdminGroupsGroupIdMembersGetErrors];
+
+export type ListGroupMembersAdminGroupsGroupIdMembersGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupMemberListResponse;
+};
+
+export type ListGroupMembersAdminGroupsGroupIdMembersGetResponse = ListGroupMembersAdminGroupsGroupIdMembersGetResponses[keyof ListGroupMembersAdminGroupsGroupIdMembersGetResponses];
+
+export type AddGroupMembersAdminGroupsGroupIdMembersPostData = {
+    body: GroupMembersAdd;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/admin/groups/{group_id}/members/';
+};
+
+export type AddGroupMembersAdminGroupsGroupIdMembersPostErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type AddGroupMembersAdminGroupsGroupIdMembersPostError = AddGroupMembersAdminGroupsGroupIdMembersPostErrors[keyof AddGroupMembersAdminGroupsGroupIdMembersPostErrors];
+
+export type AddGroupMembersAdminGroupsGroupIdMembersPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupResponse;
+};
+
+export type AddGroupMembersAdminGroupsGroupIdMembersPostResponse = AddGroupMembersAdminGroupsGroupIdMembersPostResponses[keyof AddGroupMembersAdminGroupsGroupIdMembersPostResponses];
+
+export type RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/admin/groups/{group_id}/members/{user_id}';
+};
+
+export type RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteError = RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors[keyof RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors];
+
+export type RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponse = RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses[keyof RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses];
 
 export type GetInfrastructureAdminInfrastructureGetData = {
     body?: never;

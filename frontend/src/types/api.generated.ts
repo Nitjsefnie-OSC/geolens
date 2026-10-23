@@ -236,6 +236,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/groups/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Groups
+         * @description List sharing groups by name, with member counts (admin only).
+         */
+        get: operations["list_groups_admin_groups__get"];
+        put?: never;
+        /**
+         * Create Group
+         * @description Create an empty sharing group (admin only). A duplicate name is 409.
+         */
+        post: operations["create_group_admin_groups__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/groups/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Group
+         * @description Get one sharing group with its member count (admin only).
+         */
+        get: operations["get_group_admin_groups__group_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Group
+         * @description Delete a sharing group and all its memberships (admin only).
+         */
+        delete: operations["delete_group_admin_groups__group_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename Group
+         * @description Rename a sharing group (admin only). A name already in use is 409.
+         */
+        patch: operations["rename_group_admin_groups__group_id__patch"];
+        trace?: never;
+    };
+    "/admin/groups/{group_id}/members/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Group Members
+         * @description List a sharing group's members by username (admin only).
+         */
+        get: operations["list_group_members_admin_groups__group_id__members__get"];
+        put?: never;
+        /**
+         * Add Group Members
+         * @description Add users to a sharing group (admin only).
+         *
+         *     Users already in the group are skipped. If any id matches no user, the
+         *     request is 404 and nobody is added.
+         */
+        post: operations["add_group_members_admin_groups__group_id__members__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/groups/{group_id}/members/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Group Member
+         * @description Remove one user from a sharing group (admin only).
+         */
+        delete: operations["remove_group_member_admin_groups__group_id__members__user_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/infrastructure/": {
         parameters: {
             query?: never;
@@ -8019,6 +8118,16 @@ export interface components {
              * @default false
              */
             strict_cog: boolean;
+            /**
+             * Item Id
+             * @description Vector file only: ArcGIS portal item ID the file came from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description Vector file only: ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            portal_url?: string | null;
         };
         /** CommitResponse */
         CommitResponse: {
@@ -8038,6 +8147,11 @@ export interface components {
              * @description Human-readable commit result.
              */
             message: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ConfigImportRequest
@@ -9811,6 +9925,16 @@ export interface components {
              * @description Layers to ingest as separate datasets. Maximum 50 per request.
              */
             layers: components["schemas"]["FanOutLayerRequest"][];
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the file came from. Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link. Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /**
          * FanOutCommitResponse
@@ -9828,6 +9952,11 @@ export interface components {
              * @description Per-layer outcomes in the same order as the request layers.
              */
             results: components["schemas"]["FanOutLayerResult"][];
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * FanOutLayerRequest
@@ -10047,6 +10176,80 @@ export interface components {
             type: "GeometryCollection";
             /** Geometries */
             geometries: components["schemas"]["GeoJSONGeometry"][];
+        };
+        /** GroupListResponse */
+        GroupListResponse: {
+            /**
+             * Groups
+             * @description Page of groups, by name.
+             */
+            groups: components["schemas"]["GroupResponse"][];
+            /**
+             * Total
+             * @description Total number of groups (across all pages).
+             */
+            total: number;
+        };
+        /** GroupMemberListResponse */
+        GroupMemberListResponse: {
+            /**
+             * Members
+             * @description Page of group members, by username.
+             */
+            members: components["schemas"]["UserNameItem"][];
+            /**
+             * Total
+             * @description Total number of members (across all pages).
+             */
+            total: number;
+        };
+        /** GroupMembersAdd */
+        GroupMembersAdd: {
+            /**
+             * User Ids
+             * @description Users to add. Users already in the group are left as they are; if any id matches no user, none are added.
+             */
+            user_ids: string[];
+        };
+        /** GroupResponse */
+        GroupResponse: {
+            /**
+             * Id
+             * Format: uuid
+             * @description Unique group identifier.
+             */
+            id: string;
+            /**
+             * Name
+             * @description Group name.
+             */
+            name: string;
+            /**
+             * Member Count
+             * @description Number of users in the group.
+             */
+            member_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the group was created.
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             * @description When the group was last renamed.
+             */
+            updated_at: string;
+        };
+        /** GroupWrite */
+        GroupWrite: {
+            /**
+             * Name
+             * @description Group name, unique across the instance. Leading and trailing whitespace is removed.
+             * @example Planning
+             */
+            name: string;
         };
         /** HealthResponse */
         HealthResponse: {
@@ -10457,6 +10660,11 @@ export interface components {
              * @default true
              */
             importable: boolean;
+            /**
+             * Has Attachments
+             * @description Whether the ArcGIS layer reports file attachments. Null when the service does not say, and for other service types.
+             */
+            has_attachments?: boolean | null;
             /**
              * Layer Id
              * @description Numeric or string layer ID used by ArcGIS services.
@@ -13467,6 +13675,16 @@ export interface components {
             object_id_field?: string | null;
             /** @description Structured credential for a protected service. Mutually exclusive with the token field. */
             auth?: components["schemas"]["ServiceAuthRequest"] | null;
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the layer was published from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss. Dropped for a non-ArcGIS service type.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is https and shares a registrable domain with the service URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /** ServicePreviewResponse */
         ServicePreviewResponse: {
@@ -13515,6 +13733,11 @@ export interface components {
              * @description Layer name as it appears in the remote service.
              */
             layer_name: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ServiceProbeResult
@@ -16624,6 +16847,803 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["EmbeddingStatsResponse"];
                 };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_groups_admin_groups__get: {
+        parameters: {
+            query?: {
+                skip?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupListResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    create_group_admin_groups__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    get_group_admin_groups__group_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    delete_group_admin_groups__group_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    rename_group_admin_groups__group_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Conflict — resource state prevents the operation */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_group_members_admin_groups__group_id__members__get: {
+        parameters: {
+            query?: {
+                skip?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberListResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    add_group_members_admin_groups__group_id__members__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMembersAdd"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
+                };
+            };
+            /** @description Bad request — invalid query parameters or payload */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Unauthorized — missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Forbidden — caller lacks access to this resource */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Too many requests — retry after the advertised interval */
+            429: {
+                headers: {
+                    /** @description Seconds until the request may be retried */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Service unavailable — the database could not serve the request */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    remove_group_member_admin_groups__group_id__members__user_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Bad request — invalid query parameters or payload */
             400: {
