@@ -7045,6 +7045,13 @@ export interface components {
              */
             example_values?: unknown[] | null;
             /**
+             * Value Labels
+             * @description Label for each stored code, keyed by the code as text.
+             */
+            value_labels?: {
+                [key: string]: string;
+            } | null;
+            /**
              * Ordinal Position
              * @description Column position in the table (1-based)
              */
@@ -7086,6 +7093,13 @@ export interface components {
              * @description Value domain: continuous, categorical, coded, etc.
              */
             domain_type?: ("continuous" | "discrete" | "categorical" | "coded" | "codedValue" | "boolean" | "text" | "date" | "temporal" | "geometry" | "range") | null;
+            /**
+             * Value Labels
+             * @description Label for each stored code, keyed by the code as text.
+             */
+            value_labels?: {
+                [key: string]: string;
+            } | null;
         };
         /** AuditLogListResponse */
         AuditLogListResponse: {
