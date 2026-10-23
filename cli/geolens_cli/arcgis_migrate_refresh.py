@@ -321,6 +321,9 @@ def refresh_layers(
         return [f"probe failed, {exc}"]
     except ItemFailed as exc:
         return [str(exc)]
+    # A state file from before the URL was recorded adopts the one that
+    # answered, so a later change of service is refused like any other.
+    entry.service_url = row["url"]
     flags = attachment_flags(probe.layers)
     entry.attachments = {key: flags.get(key) for key in entry.layer_datasets}
     ctx.save()

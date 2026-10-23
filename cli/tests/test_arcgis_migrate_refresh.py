@@ -704,6 +704,32 @@ def test_a_service_url_changed_in_the_portal_is_not_refreshed(
     assert "service URL changed" in payload["not_up_to_date"][A2][0]
 
 
+def test_a_legacy_entry_adopts_its_service_url_and_refuses_a_later_change(
+    runner, plan_file, geolens
+):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+    url = _service_url(plan_file, A2)
+    _edit_state(plan_file, A2, service_url=None)
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert _state(plan_file)["items"][A2]["service_url"] == url
+    path = plan_file.parent / "arcgis-inventory.json"
+    inventory = json.loads(path.read_text())
+    for row in inventory["items"]:
+        if row["id"] == A2:
+            row["url"] = "https://services1.arcgis.com/ExAmPlEoRg0123/x/FeatureServer"
+    path.write_text(json.dumps(inventory))
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    assert len(refresh.bodies) == 1
+    assert "service URL changed" in payload["not_up_to_date"][A2][0]
+
+
 def test_a_refresh_an_earlier_run_left_running_is_not_started_again(
     runner, plan_file, geolens
 ):
