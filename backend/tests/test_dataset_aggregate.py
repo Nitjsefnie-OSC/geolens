@@ -18,6 +18,7 @@ from tests.factories import (
     create_user,
     get_user_id,
 )
+from tests.test_api_key_publish_scope import _mint
 from tests.test_api_key_scope_875 import _remove_keys_minted_by_the_test  # noqa: F401
 from tests.test_embed_token_creator_access import _embed
 
@@ -84,6 +85,7 @@ async def _aggregate(client: AsyncClient, dataset_id, body: dict, headers=None):
     )
 
 
+@contextlib.asynccontextmanager
 async def _dropped(session: AsyncSession, **dataset_fields):
     dataset = await _points(session, **dataset_fields)
     yield dataset
@@ -93,13 +95,13 @@ async def _dropped(session: AsyncSession, **dataset_fields):
 
 @pytest.fixture
 async def points(client, test_db_session):
-    async for dataset in _dropped(test_db_session):
+    async with _dropped(test_db_session) as dataset:
         yield dataset
 
 
 @pytest.fixture
 async def private_points(client, test_db_session):
-    async for dataset in _dropped(test_db_session, visibility="private"):
+    async with _dropped(test_db_session, visibility="private") as dataset:
         yield dataset
 
 
@@ -313,18 +315,15 @@ class TestCache:
 def stored_ttls(monkeypatch) -> list[int]:
     """The TTL of every aggregate result the endpoint writes to the cache."""
     cache = aggregate.get_cache()
+    original = cache.set
     ttls: list[int] = []
 
-    class _Recording:
-        get = staticmethod(cache.get)
+    async def _recording(key, value, ttl=300, **kwargs):
+        if key.startswith("aggregate:"):
+            ttls.append(ttl)
+        await original(key, value, ttl=ttl, **kwargs)
 
-        @staticmethod
-        async def set(key, value, ttl=300, **kwargs):
-            if key.startswith("aggregate:"):
-                ttls.append(ttl)
-            await cache.set(key, value, ttl=ttl, **kwargs)
-
-    monkeypatch.setattr(aggregate, "get_cache", lambda: _Recording)
+    monkeypatch.setattr(cache, "set", _recording)
     return ttls
 
 
@@ -387,9 +386,9 @@ class TestCachePolicy:
         self, client: AsyncClient, test_db_session, stored_ttls
     ):
         """Direct SQL may have changed the table since its count was stored."""
-        async for registered in _dropped(
+        async with _dropped(
             test_db_session, source_format=None, feature_count=99
-        ):
+        ) as registered:
             resp = await _aggregate(client, registered.id, {"op": "count"})
             stats = await _aggregate(
                 client,
@@ -460,7 +459,7 @@ class TestAccess:
         private_points,
     ):
         admin_id = await get_user_id(test_db_session, "admin")
-        async for other in _dropped(test_db_session, visibility="private"):
+        async with _dropped(test_db_session, visibility="private") as other:
             raw, _share = await _embed(
                 client, test_db_session, admin_auth_header, admin_id, other.id
             )
@@ -494,13 +493,7 @@ class TestApiKeys:
     ):
         """A private dataset its user cannot read stays 404 through the key."""
         headers, _user_id = await create_user(client, admin_auth_header, "editor")
-        minted = await client.post(
-            "/auth/api-keys/",
-            json={"name": f"{scope} key", "scope": scope},
-            headers=headers,
-        )
-        assert minted.status_code == 201, minted.text
-        key = {"X-Api-Key": minted.json()["key"]}
+        key = await _mint(client, headers, scope)
         body = {"op": "count", "filter": KEEP}
 
         public = await _aggregate(client, points.id, body, key)

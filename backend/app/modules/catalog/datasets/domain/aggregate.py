@@ -467,13 +467,8 @@ async def run_aggregate(
     )
     if owned and bbox is not None and _covers(bbox, dataset.record.spatial_extent):
         bbox = None
-    if (
-        owned
-        and request.op == "count"
-        and bbox is None
-        and request.filter is None
-        and dataset.feature_count is not None
-    ):
+    whole_layer = owned and bbox is None and request.filter is None
+    if whole_layer and request.op == "count" and dataset.feature_count is not None:
         return AggregateResponse(
             op="count", result=CountResult(count=dataset.feature_count), cached=False
         )
@@ -497,8 +492,9 @@ async def run_aggregate(
         else None
     )
     verdict = await get_cache().get(verdict_key) if verdict_key is not None else None
-    if verdict is not None and verdict["too_wide"]:
+    if verdict:
         raise _too_wide()
+    judge_view = bbox is not None and verdict is None
 
     live = await get_catalog_port().get_column_info(db, dataset.table_name)
     try:
@@ -526,7 +522,7 @@ async def run_aggregate(
         )
     async with _aggregate_slots:
         over_estimate = False
-        if bbox is not None and verdict is None:
+        if judge_view:
             await db.execute(
                 text(f"SET LOCAL statement_timeout = {AGGREGATE_TIMEOUT_MS}")
             )
@@ -543,7 +539,7 @@ async def run_aggregate(
         db.expunge_all()
         await db.rollback()
 
-        if bbox is not None and verdict is None:
+        if judge_view:
             too_wide = False
             if over_estimate:
                 # Statistics can overstate a view; count it exactly, up to the
@@ -555,9 +551,7 @@ async def run_aggregate(
                 counted = await _sandboxed(db, probe, binds, caller_key, row_limit=1)
                 too_wide = int(counted.rows[0][0]) > MAX_VIEW_ROWS
             if verdict_key is not None:
-                await get_cache().set(
-                    verdict_key, {"too_wide": too_wide}, ttl=keyed_ttl
-                )
+                await get_cache().set(verdict_key, too_wide, ttl=keyed_ttl)
             if too_wide:
                 raise _too_wide()
         result = await _sandboxed(
@@ -576,7 +570,6 @@ async def run_aggregate(
     payload = _result(request, result.rows)
     encoded = payload.model_dump(mode="json")
     if cache_key is not None and len(json.dumps(encoded)) <= _MAX_CACHED_BYTES:
-        whole_layer = owned and bbox is None and request.filter is None
         await get_cache().set(
             cache_key, encoded, ttl=_WHOLE_LAYER_TTL if whole_layer else keyed_ttl
         )
