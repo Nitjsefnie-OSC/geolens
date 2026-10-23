@@ -7,7 +7,6 @@ Everything else keeps a default paint and is recorded in the loss report.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -299,9 +298,11 @@ def _typed_value(value: Any, field_kind: str | None) -> str | int | float:
         exact = Decimal(value)
     except InvalidOperation:
         return value
-    if field_kind == "integer":
-        return int(exact) if exact == int(exact) and abs(exact) < 2**53 else value
     if not exact.is_finite():
+        return value
+    if field_kind == "integer":
+        if exact.copy_abs() < 2**53 and exact == exact.to_integral_value():
+            return int(exact)
         return value
     number = float(exact)
     if Decimal(repr(number)) != exact:
@@ -422,6 +423,27 @@ def _single_class(field_name: str, only: tuple, base: _Symbol, fallback: str) ->
     return Styled(_paint(base, expression, 1.0), _style_config(base), base.kind)
 
 
+def _tighten_separators(label: str) -> str:
+    """``label`` without whitespace next to ``-``, ``<`` or ``<=``, in one pass."""
+    out: list[str] = []
+    i = 0
+    while i < len(label):
+        if not label[i].isspace():
+            out.append(label[i])
+            i += 1
+            continue
+        j = i
+        while j < len(label) and label[j].isspace():
+            j += 1
+        after_separator = bool(out) and (
+            out[-1] in "<-" or (out[-1] == "=" and len(out) > 1 and out[-2] == "<")
+        )
+        if not after_separator and not (j < len(label) and label[j] in "<-"):
+            out.append(label[i:j])
+        i = j
+    return "".join(out)
+
+
 def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
     """Class-break labels that differ from the range ArcGIS generates for the class."""
     ordered = sorted(
@@ -445,7 +467,7 @@ def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
                 generated = {f"<{high:g}", f"<={high:g}"}
             if low is not None:
                 generated.add(f"{low:g}-{high:g}")
-        if re.sub(r"\s*(<=|<|-)\s*", r"\1", label.strip()) not in generated:
+        if _tighten_separators(label.strip()) not in generated:
             authored += 1
     return authored
 

@@ -359,6 +359,20 @@ class TestUniqueValueRenderer:
         )
         assert result.layers[0].style_config["categories"][0]["value"] == 7
 
+    @pytest.mark.parametrize("text", ["NaN", "Infinity", "-Infinity", "1e999999999"])
+    def test_values_that_are_not_safe_integers_stay_strings(self, text: str) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "N",
+            "uniqueValueInfos": [{"value": text, "symbol": _fill()}],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "N", "type": "esriFieldTypeInteger"}
+        ]
+        result = _translate(webmap)
+        assert result.layers[0].style_config["categories"][0]["value"] == text
+
     def test_oid_values_are_stored_as_numbers(self) -> None:
         renderer = {
             "type": "uniqueValue",
@@ -2161,6 +2175,11 @@ class TestLegendLabels:
     @pytest.mark.parametrize("label", ["< 20", "<= 20", "1 0 - 20"])
     def test_a_later_class_has_no_upper_bound_form(self, label: str) -> None:
         assert "class_label" in self._kinds(self._breaks(["0 - 10", label]))
+
+    def test_a_long_run_of_spaces_is_handled(self) -> None:
+        gap = " " * 100_000
+        assert "class_label" not in self._kinds(self._breaks([f"0{gap}-{gap}10"]))
+        assert "class_label" in self._kinds(self._breaks([f"0{gap}x{gap}-10"]))
 
     def test_spacing_inside_a_number_is_not_ignored(self) -> None:
         renderer = self._breaks(["0 - 1 000", "1000 - 2000"])
