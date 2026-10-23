@@ -409,14 +409,11 @@ def _histogram(rows: Sequence[Sequence[Any]], bins: int) -> HistogramResult:
             bins=[HistogramBin(lower=low, upper=high, count=int(rows[0][3]))]
         )
     counts = {int(row[2]): int(row[3]) for row in rows}
-    width = (high - low) / bins
+    # A weighted mean of the ends stays finite where high - low would overflow.
+    edges = [low * (1 - i / bins) + high * (i / bins) for i in range(bins + 1)]
     return HistogramResult(
         bins=[
-            HistogramBin(
-                lower=low + i * width,
-                upper=high if i == bins - 1 else low + (i + 1) * width,
-                count=counts.get(i + 1, 0),
-            )
+            HistogramBin(lower=edges[i], upper=edges[i + 1], count=counts.get(i + 1, 0))
             for i in range(bins)
         ]
     )

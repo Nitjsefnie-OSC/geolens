@@ -204,6 +204,28 @@ class TestOperations:
         assert resp.status_code == 200, resp.text
         assert resp.json()["result"]["max"] == "1" + "0" * 5000
 
+    async def test_a_histogram_over_the_whole_double_range_stays_finite(
+        self, client: AsyncClient, test_db_session, points
+    ):
+        await test_db_session.execute(
+            text(
+                f"UPDATE data.{points.table_name}"  # noqa: S608
+                " SET score = CASE gid WHEN 3 THEN -1e308 ELSE 1e308 END"
+                " WHERE gid IN (3, 4)"
+            )
+        )
+        await test_db_session.commit()
+
+        resp = await _aggregate(
+            client, points.id, {"op": "histogram", "column": "score", "bins": 2}
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["result"]["bins"] == [
+            {"lower": -1e308, "upper": 0.0, "count": 1},
+            {"lower": 0.0, "upper": 1e308, "count": 5},
+        ]
+
     async def test_the_live_columns_are_read_once(
         self, client: AsyncClient, points, monkeypatch
     ):
