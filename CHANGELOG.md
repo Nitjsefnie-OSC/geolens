@@ -37,8 +37,9 @@ and releases use semantic versioning.
   schema rejects a v2 plan.
 - A rerun of `geolens arcgis migrate` now brings the items it migrated before
   up to date: it refreshes each service item's datasets with the run's ArcGIS
-  credential, downloads each data file again and replaces its datasets, and
-  writes the item metadata again. A refresh that stops for review is reported
+  credential, downloads each data file again and replaces its datasets,
+  exports an archive-only item again when the portal changed it, and writes
+  the item metadata again. A refresh that stops for review is reported
   with the command that accepts it and is never accepted for you. A dataset
   changed in GeoLens since the last run is reported and left alone, and each
   request carries the data revision the CLI recorded. Private items need an

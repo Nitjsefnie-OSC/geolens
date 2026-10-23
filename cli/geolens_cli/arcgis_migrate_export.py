@@ -413,6 +413,52 @@ def export_item(
             shutil.rmtree(build, ignore_errors=True)
 
 
+def _modified(item: Any) -> int | None:
+    value = item.get("modified") if isinstance(item, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def refresh_export(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
+) -> list[str]:
+    """Export a finished item again when the portal changed it since its bundle
+    was written; why the bundle may be out of date.
+
+    A bundle without a recorded change time, from before it was recorded,
+    counts as changed. A failed export keeps the earlier bundle.
+    """
+    client = ctx.portal.client if ctx.portal is not None else None
+    if client is None:
+        return ["the run can't read this item from the portal to check it for changes"]
+    try:
+        modified = _modified(client.get_json(f"content/items/{item['id']}"))
+    except PortalError as exc:
+        if exc.http_status in _TOKEN_STATUSES:
+            raise StopRun(
+                f"the portal refused the ArcGIS token ({exc}); it may have "
+                "expired. Rerun with a fresh token to resume."
+            ) from None
+        return [f"reading the item to check it for changes failed, {exc}"]
+    if modified is None:
+        return [
+            "the portal doesn't say when the item last changed, so its bundle "
+            "may be out of date"
+        ]
+    recorded = (entry.export or {}).get("modified")
+    if isinstance(recorded, int) and modified <= recorded:
+        return []
+    try:
+        result = export_item(ctx, item, entry)
+    except ItemFailed as exc:
+        return [
+            "changed in the portal since it was exported, and exporting it "
+            f"again failed: {exc}"
+        ]
+    entry.notes = list(result.notes)
+    ctx.save()
+    return []
+
+
 def _recover_leftovers(folder: Path) -> None:
     """Undo what a run that was killed mid-swap left beside *folder*.
 
@@ -498,6 +544,8 @@ def _export_into(
         "partial": export.partial,
         "errors": [redact_json(e, ctx.redact) for e in export.errors],
         "story": story,
+        # The portal's last change to the item, which a rerun compares.
+        "modified": _modified(full),
     }
     if swapped:
         # Otherwise the earlier bundle stays as it was, and so does its record.

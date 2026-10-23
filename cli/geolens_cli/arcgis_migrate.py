@@ -40,6 +40,7 @@ from .arcgis_migrate_export import (
     DEFAULT_CAP_MB,
     EXPORT_DIRNAME,
     export_item,
+    refresh_export,
     write_index,
 )
 from .arcgis_migrate_cutover import failing_checks
@@ -127,6 +128,7 @@ HANDLERS: dict[str, Handler] = {
 REFRESHERS: dict[str, Refresher] = {
     _plan.IMPORT_LAYERS: refresh_layers,
     _plan.IMPORT_FILE: refresh_file,
+    _plan.EXPORT_ONLY: refresh_export,
 }
 
 

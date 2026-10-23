@@ -951,3 +951,97 @@ def test_recovery_never_deletes_the_only_copy_of_a_bundle(tmp_path):
 
     assert (backup / "item.json").read_text() == "only copy"
     assert not trash.exists()
+
+
+def _exported_c3(runner, tmp_path, install, **routes):
+    portal = install({f"content/items/{C3}/resources": _resources(), **routes})
+    plan_file = _plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", C3, "--token", TOKEN)
+    assert result.exit_code == 0, result.output
+    return portal, plan_file
+
+
+def _change_in_portal(portal, **fields) -> None:
+    item = portal.routes[f"content/items/{C3}"]
+    portal.routes[f"content/items/{C3}"] = {
+        **item,
+        "modified": item["modified"] + 60_000,
+        **fields,
+    }
+
+
+def test_a_rerun_leaves_an_unchanged_bundle_alone(runner, tmp_path, geolens, install):
+    portal, plan_file = _exported_c3(runner, tmp_path, install)
+    assert (
+        _state(plan_file)["items"][C3]["export"]["modified"]
+        == (portal.routes[f"content/items/{C3}"]["modified"])
+    )
+    downloads = len(portal.requests_to(f"content/items/{C3}/data"))
+
+    result, payload = _migrate(runner, plan_file, "--only", C3, "--token", TOKEN)
+
+    assert result.exit_code == 0, result.output
+    assert payload["refreshed"] == [C3] and payload["not_up_to_date"] == {}
+    assert len(portal.requests_to(f"content/items/{C3}/data")) == downloads
+
+
+@pytest.mark.parametrize("old_state", [False, True])
+def test_a_bundle_the_portal_changed_since_is_exported_again(
+    runner, tmp_path, geolens, install, old_state
+):
+    portal, plan_file = _exported_c3(runner, tmp_path, install)
+    portal.routes[f"content/items/{C3}/data"] = {"title": "new"}
+    if old_state:
+        # A state file from before the change time was recorded.
+        state = _state(plan_file)
+        del state["items"][C3]["export"]["modified"]
+        (plan_file.parent / "arcgis-migration-state.json").write_text(json.dumps(state))
+    else:
+        _change_in_portal(portal)
+
+    result, payload = _migrate(runner, plan_file, "--only", C3, "--token", TOKEN)
+
+    assert result.exit_code == 0, result.output
+    assert payload["not_up_to_date"] == {}
+    folder = _export(plan_file, "dashboard", C3)
+    assert json.loads((folder / "data.json").read_text()) == {"title": "new"}
+    recorded = _state(plan_file)["items"][C3]["export"]["modified"]
+    assert recorded == portal.routes[f"content/items/{C3}"]["modified"]
+
+
+def test_a_failed_export_of_a_changed_item_keeps_the_bundle_and_blocks_cutover(
+    runner, tmp_path, geolens, install
+):
+    portal, plan_file = _exported_c3(runner, tmp_path, install)
+    folder = _export(plan_file, "dashboard", C3)
+    before = _tree(folder)
+    plan = json.loads(plan_file.read_text())
+    for item in plan["items"]:
+        if item["id"] != C3:
+            item["action"] = "skip"
+    plan_file.write_text(json.dumps(plan))
+    _change_in_portal(portal)
+    portal.routes[f"content/items/{C3}/data"] = (503, {"error": {"code": 503}})
+
+    result, payload = _migrate(runner, plan_file, "--token", TOKEN, "--cutover")
+
+    assert result.exit_code == 1
+    [reason] = payload["not_up_to_date"][C3]
+    assert "exporting it again failed" in reason
+    assert _tree(folder) == before
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+
+
+@pytest.mark.parametrize(
+    "answer", [(500, {"error": {"code": 500}}), {"id": C3, "title": "no date"}]
+)
+def test_a_bundle_whose_item_change_time_cant_be_read_is_reported(
+    runner, tmp_path, geolens, install, answer
+):
+    portal, plan_file = _exported_c3(runner, tmp_path, install)
+    portal.routes[f"content/items/{C3}"] = answer
+
+    result, payload = _migrate(runner, plan_file, "--only", C3, "--token", TOKEN)
+
+    assert result.exit_code == 1
+    assert payload["not_up_to_date"][C3]
