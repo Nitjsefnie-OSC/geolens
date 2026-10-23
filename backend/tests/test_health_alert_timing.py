@@ -337,12 +337,8 @@ async def test_a_failed_send_gets_the_backoff_only_inside_the_first_cooldown(
     assert len(calls) == (2 if retried else 1)
 
 
-async def test_a_written_back_claim_delays_the_next_incident_by_one_backoff(
-    monkeypatch, sent
-):
-    """A failed send reads its claim, another replica's recovery deletes it,
-    then the send writes it back. The next incident alerts once that backoff
-    runs out."""
+async def test_a_failed_send_cannot_resurrect_a_recovered_claim(monkeypatch, sent):
+    """Recovery wins before the failed send's conditional rewrite reaches storage."""
     calls, answers = sent
     monkeypatch.setattr(health_svc, "HEALTH_ALERT_RETRY_SECS", 0.05)
     other: dict = {}
@@ -350,32 +346,37 @@ async def test_a_written_back_claim_delays_the_next_incident_by_one_backoff(
     class _RecoveryBetweenReadAndWrite(_SharedMemoryCache):
         armed = False
 
-        async def get(self, key, *, security=False):
-            value = await super().get(key, security=security)
+        async def _recover(self, key):
             if self.armed and key == health_svc._HEALTH_ALERT_KEY:
                 self.armed = False
                 with _replica(other):
                     await _poll()
+
+        async def get(self, key, *, security=False):
+            value = await super().get(key, security=security)
+            await self._recover(key)
             return value
+
+        async def compare_and_set(self, key, expected, value, ttl=300):
+            await self._recover(key)
+            return await super().compare_and_set(key, expected, value, ttl)
 
     cache = _RecoveryBetweenReadAndWrite()
     monkeypatch.setattr(provider, "_cache_provider", cache)
     _checks(monkeypatch, DEGRADED, DEGRADED, HEALTHY, DEGRADED, DEGRADED)
 
     claimed = await _poll(run_background=False)
-    token = health_svc._alert_claim_token
     with _replica(other):
         await _poll()
     answers.append(PARTLY_DELIVERED)
     cache.armed = True
     await claimed.background()
-    assert await cache.get(health_svc._HEALTH_ALERT_KEY) == token
+    assert await cache.get(health_svc._HEALTH_ALERT_KEY) is None
     with _replica(other):
         await _poll()
-    await asyncio.sleep(0.1)
+    assert len(calls) == 2
     with _replica(other):
         await _poll()
-
     assert len(calls) == 2
 
 
@@ -557,3 +558,128 @@ async def test_a_probe_queued_behind_a_stuck_one_still_answers(monkeypatch, sent
     assert response.status_code == 503
     assert calls == []
     assert "health_probe_result_dropped" in [log["event"] for log in logs]
+
+
+async def test_an_undelivered_claim_expires_before_the_cooldown(monkeypatch):
+    cache = get_cache()
+    before = time.monotonic()
+    claim = await health_svc.claim_health_alert(["database"])
+    assert claim is not None
+    remaining = cache._store[health_svc._HEALTH_ALERT_KEY][1] - before
+    assert (
+        health_svc.HEALTH_ALERT_DELIVERY_TIMEOUT + health_svc.HEALTH_TIMEOUT
+        < remaining
+        < health_svc.HEALTH_ALERT_COOLDOWN_SECS
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "retry"), [(DELIVERED, True), (DELIVERED, False), (UNDELIVERED, False)]
+)
+async def test_completed_delivery_renews_the_claim_from_delivery_time(
+    monkeypatch, sent, outcome, retry
+):
+    _, answers = sent
+    answers.append(outcome)
+    if not retry:
+        monkeypatch.setattr(health_svc, "_last_health_status", "degraded")
+        monkeypatch.setattr(
+            health_svc,
+            "_health_incident_started_at",
+            time.monotonic() - health_svc.HEALTH_ALERT_COOLDOWN_SECS,
+        )
+    _checks(monkeypatch, DEGRADED)
+    response = await _poll(run_background=False)
+    cache = get_cache()
+    token = health_svc._alert_claim_token
+    cache._store[health_svc._HEALTH_ALERT_KEY] = (token, time.monotonic() + 1)
+    before = time.monotonic()
+    await response.background()
+    assert cache._store[health_svc._HEALTH_ALERT_KEY][1] >= (
+        before + health_svc.HEALTH_ALERT_COOLDOWN_SECS
+    )
+
+
+async def test_recovery_cannot_delete_a_replacement_claim(monkeypatch):
+    class _ReplacedAtStorage(_SharedMemoryCache):
+        armed = False
+
+        async def _replace(self, key):
+            if self.armed:
+                self.armed = False
+                await self.set(key, "successor")
+
+        async def get(self, key, *, security=False):
+            value = await super().get(key, security=security)
+            await self._replace(key)
+            return value
+
+        async def compare_and_delete(self, key, expected):
+            await self._replace(key)
+            return await super().compare_and_delete(key, expected)
+
+    cache = _ReplacedAtStorage()
+    monkeypatch.setattr(provider, "_cache_provider", cache)
+    await health_svc.claim_health_alert(["database"])
+    cache.armed = True
+    await health_svc.release_health_alert()
+    assert await cache.get(health_svc._HEALTH_ALERT_KEY) == "successor"
+    assert health_svc._alert_claim_token is None
+
+
+async def test_a_stalled_delivery_is_bounded_and_gets_backoff(monkeypatch, sent):
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(events_mod, "notify", stalled)
+    monkeypatch.setattr(
+        health_svc, "HEALTH_ALERT_DELIVERY_TIMEOUT", 0.01, raising=False
+    )
+    _checks(monkeypatch, DEGRADED)
+    response = await _poll(run_background=False)
+    finished = True
+    try:
+        await asyncio.wait_for(response.background(), timeout=0.2)
+    except TimeoutError:
+        finished = False
+    assert finished, "the delivery deadline must finish before the claim can expire"
+    remaining = get_cache()._store[health_svc._HEALTH_ALERT_KEY][1] - time.monotonic()
+    assert 0 < remaining <= health_svc.HEALTH_ALERT_RETRY_SECS
+
+
+@pytest.mark.parametrize("outcome", [DELIVERED, UNDELIVERED])
+async def test_delivery_never_renews_a_successor_claim(monkeypatch, sent, outcome):
+    _, answers = sent
+    _checks(monkeypatch, DEGRADED)
+    response = await _poll(run_background=False)
+    cache = get_cache()
+    await cache.set(health_svc._HEALTH_ALERT_KEY, "successor", ttl=1)
+    expiry = cache._store[health_svc._HEALTH_ALERT_KEY][1]
+    answers.append(outcome)
+    await response.background()
+    assert cache._store[health_svc._HEALTH_ALERT_KEY] == ("successor", expiry)
+
+
+async def test_a_stored_null_does_not_swallow_an_alert_or_get_deleted():
+    cache = get_cache()
+    await cache.set(health_svc._HEALTH_ALERT_KEY, None)
+    claim = await health_svc.claim_health_alert(["database"])
+    assert claim is not None and not claim.shared
+    await health_svc.release_health_alert()
+    assert health_svc._HEALTH_ALERT_KEY in cache._store
+
+
+async def test_a_failed_renewal_does_not_break_delivery(monkeypatch, sent):
+    calls, _ = sent
+    _checks(monkeypatch, DEGRADED)
+    response = await _poll(run_background=False)
+    cache = get_cache()
+    original = cache._store[health_svc._HEALTH_ALERT_KEY]
+    monkeypatch.setattr(
+        cache, "compare_and_set", AsyncMock(side_effect=ConnectionError)
+    )
+    with structlog.testing.capture_logs() as logs:
+        await response.background()
+    assert len(calls) == 1
+    assert cache._store[health_svc._HEALTH_ALERT_KEY] == original
+    assert "health_alert_claim_update_failed" in [entry["event"] for entry in logs]
