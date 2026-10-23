@@ -29,40 +29,45 @@ FIRST_TWO = [0.0005, -1, 0.0025, 1]
 WHOLE_WORLD = [-180, -90, 180, 90]
 
 
-async def _points(session: AsyncSession, *, visibility: str = "public"):
-    """Points 1-8 with pop = 10 * i; 1-6 are ``keep`` and 7-8 ``drop``."""
+async def _points(session: AsyncSession, **dataset_fields):
+    """Points 1-8 with pop = 10 * i; 1-6 are ``keep`` and 7-8 ``drop``.
+
+    ``note`` holds a 3,000-character value per row.
+    """
     admin_id = await get_user_id(session, "admin")
     table = f"agg_{uuid.uuid4().hex[:10]}"
     await session.execute(
         text(
             f"CREATE TABLE data.{table} (gid SERIAL PRIMARY KEY, kind TEXT,"
-            " pop INTEGER, geom geometry(Point, 4326),"
+            " pop INTEGER, note TEXT, geom geometry(Point, 4326),"
             " geom_4326 geometry(Point, 4326))"
         )
     )
     await session.execute(text(f"GRANT SELECT ON data.{table} TO geolens_reader"))
     await session.execute(
         text(
-            f"INSERT INTO data.{table} (kind, pop, geom, geom_4326)"  # noqa: S608
+            f"INSERT INTO data.{table} (kind, pop, note, geom, geom_4326)"  # noqa: S608
             " SELECT CASE WHEN i <= 6 THEN 'keep' ELSE 'drop' END, i * 10,"
+            " repeat('x', 3000) || i,"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326),"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326)"
             " FROM generate_series(1, 8) AS i"
         )
     )
     await session.commit()
+    fields = {"visibility": "public", "feature_count": 8, **dataset_fields}
     return await create_dataset(
         session,
         created_by=admin_id,
         table_name=table,
-        visibility=visibility,
         geometry_type="POINT",
-        feature_count=8,
         spatial_extent_wkt=EXTENT,
         column_info=[
             {"name": "kind", "type": "text"},
             {"name": "pop", "type": "integer"},
+            {"name": "note", "type": "text"},
         ],
+        **fields,
     )
 
 
@@ -72,8 +77,8 @@ async def _aggregate(client: AsyncClient, dataset_id, body: dict, headers=None):
     )
 
 
-async def _dropped(session: AsyncSession, visibility: str):
-    dataset = await _points(session, visibility=visibility)
+async def _dropped(session: AsyncSession, **dataset_fields):
+    dataset = await _points(session, **dataset_fields)
     yield dataset
     await session.execute(text(f"DROP TABLE data.{dataset.table_name}"))
     await session.commit()
@@ -81,13 +86,13 @@ async def _dropped(session: AsyncSession, visibility: str):
 
 @pytest.fixture
 async def points(client, test_db_session):
-    async for dataset in _dropped(test_db_session, "public"):
+    async for dataset in _dropped(test_db_session):
         yield dataset
 
 
 @pytest.fixture
 async def private_points(client, test_db_session):
-    async for dataset in _dropped(test_db_session, "private"):
+    async for dataset in _dropped(test_db_session, visibility="private"):
         yield dataset
 
 
@@ -226,6 +231,62 @@ class TestCache:
         after = await _aggregate(client, points.id, body)
         assert after.json()["cached"] is False
         assert after.json()["result"]["count"] == 9
+
+
+@pytest.fixture
+def stored_ttls(monkeypatch) -> list[int]:
+    """The TTL of every result the endpoint writes to the cache."""
+    cache = aggregate.get_cache()
+    ttls: list[int] = []
+
+    class _Recording:
+        get = staticmethod(cache.get)
+
+        @staticmethod
+        async def set(key, value, ttl=300, **kwargs):
+            ttls.append(ttl)
+            await cache.set(key, value, ttl=ttl, **kwargs)
+
+    monkeypatch.setattr(aggregate, "get_cache", lambda: _Recording)
+    return ttls
+
+
+class TestCachePolicy:
+    async def test_only_an_unfiltered_whole_layer_result_is_kept_long(
+        self, client: AsyncClient, points, stored_ttls
+    ):
+        body = {"op": "stats", "column": "pop", "stats": ["sum"]}
+        await _aggregate(client, points.id, body)
+        await _aggregate(client, points.id, {**body, "filter": KEEP})
+        await _aggregate(client, points.id, {**body, "bbox": FIRST_THREE})
+
+        assert stored_ttls == [24 * 3600, 300, 300]
+
+    async def test_a_large_result_is_not_cached(self, client: AsyncClient, points):
+        body = {"op": "value_counts", "column": "note", "limit": 8}
+        first = await _aggregate(client, points.id, body)
+        again = await _aggregate(client, points.id, body)
+
+        assert first.status_code == 200, first.text
+        assert again.json()["cached"] is False
+
+    async def test_a_registered_table_skips_its_stored_count_and_stays_fresh(
+        self, client: AsyncClient, test_db_session, stored_ttls
+    ):
+        """Direct SQL may have changed the table since its count was stored."""
+        async for registered in _dropped(
+            test_db_session, source_format=None, feature_count=99
+        ):
+            resp = await _aggregate(client, registered.id, {"op": "count"})
+            stats = await _aggregate(
+                client,
+                registered.id,
+                {"op": "stats", "column": "pop", "stats": ["max"]},
+            )
+
+            assert resp.json()["result"] == {"count": 8}
+            assert stats.status_code == 200, stats.text
+            assert stored_ttls and max(stored_ttls) <= 60
 
 
 class TestAccess:

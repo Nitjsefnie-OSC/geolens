@@ -4,7 +4,7 @@ Server-built SQL from a validated request runs through the read-only sandbox
 (``execute_safe``) under a statement timeout. A map-view request the planner
 expects to read more than ``MAX_VIEW_ROWS`` rows is refused, never
 approximated. Results are cached per dataset ``tile_cache_version``, which
-rolls on every write to the live table.
+rolls on every in-app write to the live table.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from app.modules.catalog.datasets.domain.service import (
 )
 from app.modules.catalog.features.service import parse_bbox, planner_row_estimate
 from app.platform.analysis_sql import binds_referenced_by, render_filtered_table_ref
+from app.platform.dataset_origin import geolens_owns_table
 from app.platform.cache import (
     get_cache,
     tenant_cache_context_available,
@@ -51,7 +52,13 @@ _MAX_ITEMS = 50
 # Category keys are column values of any size; numbers need no cap.
 _MAX_KEYED_RESULT_BYTES = 1 << 20
 _WHOLE_LAYER_TTL = 24 * 3600
-_VIEW_TTL = 600
+# Filters and views are caller-chosen keys. Long-lived entries for them would
+# push the rate-limit counters out of a volatile-ttl Valkey, so they live as
+# long as a tile and stay small.
+_KEYED_TTL = 300
+_MAX_CACHED_BYTES = 16 * 1024
+# Direct SQL can change a registered table without rolling its version.
+_REGISTERED_TTL = 60
 
 
 # The same pool-derived size as analysis previews, as a separate pool so
@@ -425,10 +432,15 @@ async def run_aggregate(
     bbox = request.bbox
     if bbox is not None and not dataset.geometry_type:
         raise AggregateError("no_geometry", "This dataset has no geometry to bound")
-    if bbox is not None and _covers(bbox, dataset.record.spatial_extent):
+    # A registered table's stored count and extent can be stale.
+    owned = geolens_owns_table(
+        dataset.source_format, dataset.record.record_type, dataset.origin_ref
+    )
+    if owned and bbox is not None and _covers(bbox, dataset.record.spatial_extent):
         bbox = None
     if (
-        request.op == "count"
+        owned
+        and request.op == "count"
         and bbox is None
         and request.filter is None
         and dataset.feature_count is not None
@@ -513,10 +525,12 @@ async def run_aggregate(
         )
 
     payload = _result(request, result.rows)
-    if cache_key is not None:
+    encoded = payload.model_dump(mode="json")
+    if cache_key is not None and len(json.dumps(encoded)) <= _MAX_CACHED_BYTES:
+        ttl = (
+            _WHOLE_LAYER_TTL if bbox is None and request.filter is None else _KEYED_TTL
+        )
         await get_cache().set(
-            cache_key,
-            payload.model_dump(mode="json"),
-            ttl=_WHOLE_LAYER_TTL if bbox is None else _VIEW_TTL,
+            cache_key, encoded, ttl=ttl if owned else min(ttl, _REGISTERED_TTL)
         )
     return AggregateResponse(op=request.op, result=payload, cached=False)
