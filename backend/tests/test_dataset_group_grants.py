@@ -9,8 +9,10 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select, text
 
+from app.modules.auth.models import Role
 from app.modules.catalog.datasets.domain.models import (
     Dataset,
+    DatasetGrant,
     DatasetGroupGrant,
     Record,
 )
@@ -339,7 +341,7 @@ async def test_removing_a_member_with_their_own_vrt_over_a_granted_source(
 
 async def _group_granting_a_vrt_past_its_source(
     client: AsyncClient, admin: dict, session
-) -> str:
+) -> tuple[str, uuid.UUID]:
     """A group granted a VRT but not its source, which only another group's
     members (the VRT's owner) can read: any new active member makes the VRT
     reach past its source."""
@@ -356,14 +358,14 @@ async def _group_granting_a_vrt_past_its_source(
     await _grant(session, source, await _new_group(client, admin, [owner_id]))
     group_id = await _new_group(client, admin, [])
     await _grant(session, vrt, group_id)
-    return group_id
+    return group_id, source
 
 
 async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(
     client: AsyncClient, admin_auth_header: dict, test_db_session
 ):
     _, joiner_id = await create_user(client, admin_auth_header, "viewer")
-    group_id = await _group_granting_a_vrt_past_its_source(
+    group_id, _ = await _group_granting_a_vrt_past_its_source(
         client, admin_auth_header, test_db_session
     )
 
@@ -395,28 +397,39 @@ async def _activate(client, admin, session, path: str, user_id: str):
     return await client.post("/auth/verify-email", json={"token": token})
 
 
+async def _inactive_member_of_a_vrt_group(
+    client: AsyncClient, admin: dict, session, *, pending: bool
+) -> tuple[str, uuid.UUID]:
+    """An inactive (or pending) viewer in a group granted a VRT but not its
+    source; returns the user id and the source."""
+    _, user_id = await create_user(client, admin, "viewer")
+    await session.execute(
+        text("UPDATE catalog.users SET status = :s, is_active = false WHERE id = :id"),
+        {"s": "pending" if pending else "deactivated", "id": user_id},
+    )
+    await session.commit()
+    group_id, source = await _group_granting_a_vrt_past_its_source(
+        client, admin, session
+    )
+    added = await client.post(
+        f"/admin/groups/{group_id}/members/",
+        json={"user_ids": [user_id]},
+        headers=admin,
+    )
+    assert added.status_code == 200, added.text
+    return user_id, source
+
+
 @pytest.mark.parametrize("path", ["patch", "legacy_patch", "approve", "verify"])
 async def test_activating_a_member_a_vrt_would_reach_past_a_source_is_refused(
     client: AsyncClient, admin_auth_header: dict, test_db_session, path: str
 ):
     """An inactive account counts in no audience, so it can join the group;
     becoming active is the widening and is refused as adding it would be."""
-    _, user_id = await create_user(client, admin_auth_header, "viewer")
     pending = path in ("approve", "verify")
-    await test_db_session.execute(
-        text("UPDATE catalog.users SET status = :s, is_active = false WHERE id = :id"),
-        {"s": "pending" if pending else "deactivated", "id": user_id},
+    user_id, _ = await _inactive_member_of_a_vrt_group(
+        client, admin_auth_header, test_db_session, pending=pending
     )
-    await test_db_session.commit()
-    group_id = await _group_granting_a_vrt_past_its_source(
-        client, admin_auth_header, test_db_session
-    )
-    added = await client.post(
-        f"/admin/groups/{group_id}/members/",
-        json={"user_ids": [user_id]},
-        headers=admin_auth_header,
-    )
-    assert added.status_code == 200, added.text
 
     activated = await _activate(
         client, admin_auth_header, test_db_session, path, user_id
@@ -427,3 +440,29 @@ async def test_activating_a_member_a_vrt_would_reach_past_a_source_is_refused(
         text("SELECT status FROM catalog.users WHERE id = :id"), {"id": user_id}
     )
     assert status_now == ("pending" if pending else "deactivated")
+
+
+@pytest.mark.parametrize("path", ["patch", "approve"])
+async def test_activating_into_a_role_that_reads_the_source_is_admitted(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, path: str
+):
+    """The admission judges the account with the role it is given."""
+    user_id, source = await _inactive_member_of_a_vrt_group(
+        client, admin_auth_header, test_db_session, pending=path == "approve"
+    )
+    editor = await test_db_session.scalar(select(Role.id).where(Role.name == "editor"))
+    test_db_session.add(DatasetGrant(dataset_id=source, role_id=editor))
+    await test_db_session.commit()
+    url = f"/admin/users/{user_id}"
+
+    if path == "patch":
+        activated = await client.patch(
+            url, json={"status": "active", "role": "editor"}, headers=admin_auth_header
+        )
+    else:
+        activated = await client.post(
+            f"{url}/approve/", json={"role": "editor"}, headers=admin_auth_header
+        )
+
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["status"] == "active"

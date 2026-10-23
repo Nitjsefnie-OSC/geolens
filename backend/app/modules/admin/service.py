@@ -2,7 +2,6 @@
 
 import uuid
 from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
 import structlog
@@ -417,20 +416,22 @@ class AdminService:
                 user.email_verified = email is not None
             user.email = email
 
-        if target_status is not None:
-            set_status = partial(self._set_status, user, target_status)
-            if target_status != "active":
-                await self._retire_member_tiles(user)
-                await set_status()
-            elif not self._is_active(user):
-                await reactivate_member_access(self.db, user_id, set_status)
+        async def apply_status_and_role() -> None:
+            if target_status is not None:
+                await self._set_status(user, target_status)
+            if updates.role is not None:
+                await self._update_user_role(
+                    user, updates.role, lock_held=True, viability_checked=True
+                )
+            await self.db.flush()
 
-        if updates.role is not None:
-            await self._update_user_role(
-                user, updates.role, lock_held=True, viability_checked=True
-            )
-
-        await self.db.flush()
+        if target_status not in (None, "active"):
+            await self._retire_member_tiles(user)
+        if target_status == "active" and not self._is_active(user):
+            # Judged with the new role in place, since it may grant a source.
+            await reactivate_member_access(self.db, user_id, apply_status_and_role)
+        else:
+            await apply_status_and_role()
         await self.db.refresh(user, attribute_names=["roles"])
         after = self._user_audit_snapshot(user)
         return user, before, after
@@ -729,20 +730,20 @@ class AdminService:
                 "Pending user approval is no longer available"
             )
 
-        await reactivate_member_access(
-            self.db, user.id, partial(self._set_status, user, "active")
-        )
+        async def activate_with_role() -> None:
+            # A pending account should not normally own a role, but
+            # legacy/manual rows may. Replace the complete assignment so the
+            # approved role is the only authority the account receives.
+            await self.db.execute(delete(UserRole).where(UserRole.user_id == user.id))
+            self.db.add(UserRole(user_id=user.id, role_id=role.id))
+            await self._set_status(user, "active")
+
+        await reactivate_member_access(self.db, user.id, activate_with_role)
 
         # Approval assigns the account's authority, so bump key_epoch: a key
         # that existed while pending (legacy/manual rows) must not wake up with
         # the approved role's privileges. Race-free: the row is locked above.
         user.key_epoch += 1
-
-        # A pending account should not normally own a role, but legacy/manual
-        # rows may. Replace the complete assignment so the approved role is the
-        # only authority the newly active account receives.
-        await self.db.execute(delete(UserRole).where(UserRole.user_id == user.id))
-        self.db.add(UserRole(user_id=user.id, role_id=role.id))
         await self.db.flush()
         await self.db.refresh(user, attribute_names=["roles"])
         return user
