@@ -762,13 +762,11 @@ async def test_a_publish_key_cancels_and_retries_only_its_owners_jobs(
     await test_db_session.commit()
     try:
         resp = await client.post(f"/jobs/{job.id}/cancel", headers=publish)
-        assert _refused_with(resp, "A publish key can cancel only its owner's jobs"), (
-            resp.text
-        )
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"] == "Job not found"
         read = await client.get(f"/jobs/{job.id}", headers=publish)
-        assert _refused_with(read, "A publish key can read only its owner's jobs"), (
-            read.text
-        )
+        assert read.status_code == 404, read.text
+        assert read.json()["detail"] == "Job not found"
         # The admin's publish key doesn't see the editor's private dataset at all.
         by_dataset = await client.get(f"/jobs/by-dataset/{dataset.id}", headers=publish)
         assert by_dataset.status_code == 404, by_dataset.text
@@ -783,9 +781,8 @@ async def test_a_publish_key_cancels_and_retries_only_its_owners_jobs(
         )
         assert seen.json()["jobs"][0]["status"] == "pending", seen.text
         retry = await client.post(f"/jobs/{job.id}/retry", headers=publish)
-        assert _refused_with(retry, "A publish key can retry only its owner's jobs"), (
-            retry.text
-        )
+        assert retry.status_code == 404, retry.text
+        assert retry.json()["detail"] == "Job not found"
         for url, body in (
             (f"/ingest/preview/{job.id}", None),
             (f"/ingest/commit/{job.id}", {"title": "Not mine"}),

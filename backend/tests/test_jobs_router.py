@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 from app.platform.jobs.models import IngestJob, commit_attempted_marker
 
 from tests.factories import create_user, get_user_id
+from tests.test_api_key_publish_scope import _mint
+from tests.test_api_key_scope_875 import _remove_keys_minted_by_the_test  # noqa: F401
 
 
 async def _create_job(
@@ -57,6 +59,23 @@ async def _create_job(
 
 
 class TestGetJobStatus:
+    async def test_publish_key_cannot_distinguish_another_users_job_from_unknown(
+        self, client: AsyncClient, admin_auth_header: dict, test_db_session
+    ):
+        _, owner_id = await create_user(client, admin_auth_header, "editor")
+        job = await _create_job(
+            test_db_session, created_by=uuid.UUID(owner_id), status="pending"
+        )
+        publish = await _mint(client, admin_auth_header, "publish")
+
+        unreadable = await client.get(f"/jobs/{job.id}", headers=publish)
+        unknown = await client.get(f"/jobs/{uuid.uuid4()}", headers=publish)
+
+        assert unreadable.status_code == unknown.status_code == 404
+        assert (
+            unreadable.json()["detail"] == unknown.json()["detail"] == "Job not found"
+        )
+
     @pytest.mark.parametrize("role", ["editor", "viewer"])
     async def test_unreadable_job_is_indistinguishable_from_unknown(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session, role
@@ -1081,6 +1100,23 @@ class TestGetJobStatusByDataset:
 
 
 class TestRetryJob:
+    async def test_publish_key_cannot_distinguish_another_users_job_from_unknown(
+        self, client: AsyncClient, admin_auth_header: dict, test_db_session
+    ):
+        _, owner_id = await create_user(client, admin_auth_header, "editor")
+        job = await _create_job(
+            test_db_session, created_by=uuid.UUID(owner_id), status="failed"
+        )
+        publish = await _mint(client, admin_auth_header, "publish")
+
+        unreadable = await client.post(f"/jobs/{job.id}/retry", headers=publish)
+        unknown = await client.post(f"/jobs/{uuid.uuid4()}/retry", headers=publish)
+
+        assert unreadable.status_code == unknown.status_code == 404
+        assert (
+            unreadable.json()["detail"] == unknown.json()["detail"] == "Job not found"
+        )
+
     async def test_unreadable_job_is_indistinguishable_from_unknown(
         self, client: AsyncClient, editor_auth_header: dict, test_db_session
     ):

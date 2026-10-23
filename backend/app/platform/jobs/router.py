@@ -435,8 +435,11 @@ async def get_job_status(
             detail="Job not found",
         )
 
-    if job.created_by != user.id:
-        refuse_publish_key(db, "A publish key can read only its owner's jobs")
+    if job.created_by != user.id and is_publish_key(db):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
     if not await _may_read_job(request, db, user, job):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -846,8 +849,11 @@ async def retry_job(
             detail="Job not found",
         )
 
-    if job.created_by != user.id:
-        refuse_publish_key(db, "A publish key can retry only its owner's jobs")
+    if job.created_by != user.id and is_publish_key(db):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
     metadata = job.user_metadata or {}
     # Asked for by another credential: a publish key's own jobs never make
     # anything public or change an existing dataset's visibility. A job aimed
@@ -1033,8 +1039,11 @@ async def cancel_job(
             detail="Job not found",
         )
 
-    if job.created_by != user.id:
-        refuse_publish_key(db, "A publish key can cancel only its owner's jobs")
+    if job.created_by != user.id and is_publish_key(db):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
     if not await _may_cancel_job(request, db, user, job):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
