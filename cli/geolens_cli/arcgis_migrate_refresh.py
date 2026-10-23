@@ -40,7 +40,12 @@ from .arcgis_migrate_layers import (
 )
 from .arcgis_migrate_session import GeoLensError, ItemFailed, MigrationContext, StopRun
 from .arcgis_migrate_state import ItemState
-from .refresh import review_reason_sentence
+from .refresh import (
+    RefreshPollResult,
+    _value,
+    blocked_guidance,
+    describe_failure_reason,
+)
 
 _ENDED = frozenset({"succeeded", "failed", "cancelled", "blocked"})
 RUN_PAGE = 50
@@ -48,12 +53,6 @@ RUN_PAGE = 50
 Refresher = Callable[
     [MigrationContext, Mapping[str, Any], ItemState, Mapping[str, Any]], list[str]
 ]
-
-
-def _value(value: Any) -> Any:
-    from geolens.types import Unset
-
-    return None if isinstance(value, Unset) else value
 
 
 def get_dataset(ctx: MigrationContext, dataset_id: str) -> Any:
@@ -170,19 +169,21 @@ def _wait_for_run(
         return None
     if status == "blocked":
         found = _value(run.verification)
-        if hasattr(found, "to_dict"):
-            found = found.to_dict()
-        reasons = found.get("review_reasons") if isinstance(found, dict) else None
+        poll = RefreshPollResult(
+            status,
+            verification=found.to_dict() if hasattr(found, "to_dict") else found,
+            run_id=str(run.id),
+        )
         return " ".join(
             [
                 "its refresh stopped for review and published nothing.",
-                *(review_reason_sentence(str(r)) for r in reasons or []),
-                f"Review it, then accept with: geolens refresh {dataset_id} "
-                f"--accept-blocked-run {run.id}",
+                *blocked_guidance(UUID(dataset_id), poll),
             ]
         )
     error = _value(run.error_message)
-    return f"its refresh ended {status}" + (f": {error}" if error else "")
+    return f"its refresh ended {status}" + (
+        f": {describe_failure_reason(str(error))}" if error else ""
+    )
 
 
 def _origin_url(dataset: Any) -> str | None:
@@ -415,7 +416,11 @@ def _settle(
 ) -> None:
     """Record the last update of every dataset whose writes have ended, so
     this command's own refresh doesn't read as a GeoLens change next time."""
-    ended = [d for d in current if "ended" in entry.refreshing.get(d, {"ended": ""})]
+    ended = [
+        d
+        for d in current
+        if d not in entry.refreshing or entry.refreshing[d].get("ended")
+    ]
     try:
         record_last_update(ctx, entry, ended)
     except GeoLensError as exc:

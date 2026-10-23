@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from . import arcgis_plan as _plan
-from .arcgis_migrate_state import FINISHED, MigrationState
+from .arcgis_migrate_state import FINISHED, ItemState, MigrationState
 
 UNFINISHED = "unfinished-items"
 INVENTORY = "incomplete-inventory"
@@ -41,26 +41,29 @@ def _unfinished(plan: Mapping[str, Any], state: MigrationState) -> list[dict[str
     return out
 
 
+def attachment_losses(
+    item: Mapping[str, Any], entry: ItemState | None
+) -> list[tuple[str, str, str]]:
+    """``(layer, dataset, "has" | "may have")`` for each migrated layer of a
+    service item whose attachments stay behind, or that the probe didn't say."""
+    if item.get("removed") or item["action"] != _plan.IMPORT_LAYERS or not entry:
+        return []
+    flags = entry.attachments or {}
+    return [
+        (layer, dataset, "has" if flags.get(layer) else "may have")
+        for layer, dataset in entry.layer_datasets.items()
+        if flags.get(layer) is not False
+    ]
+
+
 def _attachments(
     plan: Mapping[str, Any], state: MigrationState
 ) -> list[dict[str, str]]:
-    out = []
-    for item in plan["items"]:
-        entry = state.items.get(item["id"])
-        if item.get("removed") or item["action"] != _plan.IMPORT_LAYERS or not entry:
-            continue
-        flags = entry.attachments or {}
-        for layer, dataset in entry.layer_datasets.items():
-            flag = flags.get(layer)
-            if flag is not False:
-                reason = "has attachments" if flag else "may have attachments"
-                out.append(
-                    {
-                        "item": item["id"],
-                        "reason": f"layer {layer} ({dataset}) {reason}",
-                    }
-                )
-    return out
+    return [
+        {"item": item["id"], "reason": f"layer {layer} ({dataset}) {has} attachments"}
+        for item in plan["items"]
+        for layer, dataset, has in attachment_losses(item, state.items.get(item["id"]))
+    ]
 
 
 def _users(

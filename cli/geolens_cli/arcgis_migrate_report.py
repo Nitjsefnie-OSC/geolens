@@ -21,6 +21,7 @@ from typing import Any
 
 from . import arcgis_report as _report
 from .arcgis_migrate_collections import DENIED
+from .arcgis_migrate_cutover import attachment_losses
 from .arcgis_migrate_export import replacement_note
 from . import arcgis_plan as _plan
 from .arcgis_migrate_state import DONE, EXISTS, FAILED, PENDING, SKIPPED, MigrationState
@@ -134,15 +135,12 @@ def _follow_ups(
                 f"with --unmapped-owner until its owner can take it: "
                 f"{entry.owner_pending}; a later run hands it over",
             )
-        for layer, has in (entry.attachments or {}).items():
-            if has is not False and layer in entry.layer_datasets:
-                add(
-                    item["id"],
-                    "attachments",
-                    f"layer {layer} "
-                    + ("has" if has else "may have")
-                    + " attachments, which GeoLens doesn't import yet",
-                )
+        for layer, _dataset, has in attachment_losses(item, entry):
+            add(
+                item["id"],
+                "attachments",
+                f"layer {layer} {has} attachments, which GeoLens doesn't import yet",
+            )
     for unresolved in owner_unresolved:
         add(unresolved["item"], "owner_unresolved", unresolved["reason"])
     for change in owner_changes:

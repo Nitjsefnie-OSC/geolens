@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import heapq
 from collections import Counter
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -540,15 +540,16 @@ def mark_cutover(
     if not opts.cutover:
         return None
     failing = failing_checks(plan, state, owners.unresolved)
+    accepted = [c["check"] for c in failing if c["check"] in opts.accept]
     refused = [c["check"] for c in failing if c["check"] not in opts.accept]
     marked = not refused and summary.stopped is None and not opts.dry_run
     if marked:
-        state.cutover = {"at": _now(), "accepted": [c["check"] for c in failing]}
+        state.cutover = {"at": _now(), "accepted": accepted}
         state.save()
     return {
         "marked": marked,
         "refused": refused,
-        "accepted": [c["check"] for c in failing if c["check"] in opts.accept],
+        "accepted": accepted,
         "checks": failing,
     }
 
@@ -675,6 +676,8 @@ def hand_over(
                 )
                 continue
             summary.handed_over.append({"item": item_id, "owner": owner.username})
+        elif entry.owner_pending == owners.pending.get(item_id):
+            continue
         entry.owner_pending = owners.pending.get(item_id)
         state.save()
 
@@ -682,7 +685,7 @@ def hand_over(
 def refresh_finished(
     ctx: MigrationContext,
     state: MigrationState,
-    items: list[Mapping[str, Any]],
+    items: Sequence[Mapping[str, Any]],
     summary: RunSummary,
 ) -> None:
     """Bring each finished item up to date and record why any isn't."""
@@ -741,7 +744,7 @@ def run_items(
             summary.stopped = state.item(item["id"]).error
             break
     if summary.stopped is None:
-        refresh_finished(ctx, state, list(refresh), summary)
+        refresh_finished(ctx, state, refresh, summary)
     state.save()
     write_index(ctx, plan, state)
     return summary
@@ -1020,14 +1023,19 @@ def _inventory_rows(
 
 
 def _resumes_without_download(entry: ItemState | None) -> bool:
-    """Whether a data file's state already holds what its import continues
-    from (a pending upload, a committed job, a fan-out or a dataset), so the
-    rerun does not download it from the portal."""
-    return entry is not None and bool(
-        entry.layer_datasets
-        or entry.layer_jobs
-        or entry.fan_out
-        or entry.pending_upload
+    """Whether an unfinished data file's state already holds what its import
+    continues from (a pending upload, a committed job, a fan-out or a dataset),
+    so the rerun does not download it from the portal. A finished one is
+    downloaded again to bring it up to date."""
+    return (
+        entry is not None
+        and entry.status not in FINISHED
+        and bool(
+            entry.layer_datasets
+            or entry.layer_jobs
+            or entry.fan_out
+            or entry.pending_upload
+        )
     )
 
 
@@ -1038,12 +1046,11 @@ def _portal_client(
     rows: Mapping[str, Mapping[str, Any]],
     state: MigrationState,
     redact: Redactor,
-    refreshing: Container[str] = (),
 ) -> tuple[PortalClient, str | None] | None:
     """A client for the plan's portal holding the run's token or password.
 
-    None when no item to import or bring up to date (*refreshing*) needs one;
-    a ``UsageError`` when one does and no credential was given.
+    None when no item to import or bring up to date needs one; a
+    ``UsageError`` when one does and no credential was given.
     """
     wanted = [
         i
@@ -1060,7 +1067,6 @@ def _portal_client(
         if (rows[item["id"]].get("sharing") or {}).get("access") != "public"
         and not (
             item["action"] == _plan.IMPORT_FILE
-            and item["id"] not in refreshing
             and _resumes_without_download(state.items.get(item["id"]))
         )
     )
@@ -1147,9 +1153,7 @@ def _run(
         portal = (
             None
             if opts.dry_run
-            else _portal_client(
-                opts, plan, touched, rows, state, redact, {i["id"] for i in refresh}
-            )
+            else _portal_client(opts, plan, touched, rows, state, redact)
         )
     except (_plan.PlanError, StateError, UsageError) as exc:
         fmt.error(str(exc))

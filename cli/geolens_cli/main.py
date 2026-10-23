@@ -23,6 +23,7 @@ from rich.table import Table
 from . import analysis as _analysis
 from . import arcgis_inventory as _arcgis_inventory
 from . import arcgis_migrate as _arcgis_migrate
+from . import arcgis_migrate_cutover as _arcgis_cutover
 from . import arcgis_plan as _arcgis_plan
 from . import auth as _auth
 from . import config as _config
@@ -2280,10 +2281,10 @@ def arcgis_migrate(
     """
     state: AppState = ctx.obj
     accepted = {
-        "unfinished-items": accept_unfinished_items,
-        "incomplete-inventory": accept_incomplete_inventory,
-        "attachment-loss": accept_attachment_loss,
-        "unresolved-users": accept_unresolved_users,
+        _arcgis_cutover.UNFINISHED: accept_unfinished_items,
+        _arcgis_cutover.INVENTORY: accept_incomplete_inventory,
+        _arcgis_cutover.ATTACHMENTS: accept_attachment_loss,
+        _arcgis_cutover.USERS: accept_unresolved_users,
     }
     options = _arcgis_migrate.MigrateOptions(
         plan_path=plan,
