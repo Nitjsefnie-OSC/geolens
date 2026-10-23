@@ -14,7 +14,7 @@ from geolens_cli import arcgis_migrate_webmaps as webmaps
 from geolens_cli.arcgis_migrate_state import ItemState
 from geolens_cli.arcgis_migrate_webmaps import match_datasets
 
-from .arcgis_fake import B1, FakePortal, item_data_path, portal_routes
+from .arcgis_fake import A1, A2, B1, FakePortal, item_data_path, portal_routes
 from .test_arcgis_migrate_layers import (  # noqa: F401  (fixtures)
     NOW,
     OPERATOR,
@@ -189,6 +189,7 @@ def _state_item(status: str = "done", **fields: Any) -> ItemState:
 
 def test_layers_match_the_dataset_of_their_service_layer():
     ctx = SimpleNamespace(
+        aliases={},
         items={
             "svc": _state_item(
                 layer_datasets={"0": "ds-0", "1": "ds-1"}, dataset_ids=["ds-0", "ds-1"]
@@ -211,7 +212,7 @@ def test_layers_match_the_dataset_of_their_service_layer():
             ),
             "many": _state_item(dataset_ids=["a", "b"]),
             "failed": _state_item("failed", dataset_ids=["ds-failed"]),
-        }
+        },
     )
     base = "https://h/arcgis/rest/services/S/FeatureServer"
     webmap = {
@@ -350,3 +351,43 @@ def test_a_refused_portal_token_stops_the_run(runner, plan_file, geolens, portal
     assert entry["status"] == "failed"
     assert "Rerun with a fresh token" in entry["error"]
     assert _sent(geolens) == []
+
+
+def test_a_basemap_url_with_a_query_finds_the_plans_entry(
+    runner, plan_file, geolens, portal
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    data = json.loads(json.dumps(portal.routes[item_data_path(B1)]))
+    layer = data["baseMap"]["baseMapLayers"][0]
+    layer["url"] = HILLSHADE + "?cacheKey=abc"
+    portal.routes[item_data_path(B1)] = data
+    plan = json.loads(plan_file.read_text())
+    plan["basemap_map"] = {HILLSHADE: "dark"}
+    plan_file.write_text(json.dumps(plan))
+
+    result, _ = _run(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    [request] = [s.json() for s in _sent(geolens)]
+    sent_url = request["webmap"]["baseMap"]["baseMapLayers"][0]["url"]
+    assert request["basemap_map"] == {sent_url: "dark"}
+
+
+def test_a_layer_of_a_skipped_view_matches_its_parents_dataset(
+    runner, plan_file, geolens
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    plan = json.loads(plan_file.read_text())
+    for item in plan["items"]:
+        if item["id"] == A2:
+            item["action"] = "skip"
+            item["alias_of"] = A1
+    plan_file.write_text(json.dumps(plan))
+
+    result, _ = _run(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    [request] = [s.json() for s in _sent(geolens)]
+    assert request["dataset_matches"]["view_0"] == dataset_id("Parcels")

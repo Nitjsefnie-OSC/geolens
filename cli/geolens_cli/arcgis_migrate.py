@@ -961,6 +961,7 @@ def _run(
         export_cap=opts.export_cap_mb * 1024 * 1024,
         web_origin=_web_origin(instance),
         basemap_map={u: b for u, b in plan.get("basemap_map", {}).items() if b},
+        aliases={i["id"]: i["alias_of"] for i in plan["items"] if i.get("alias_of")},
         portal_root=_portal_base(plan["portal"]["url"]),
         redact=redact,
     )

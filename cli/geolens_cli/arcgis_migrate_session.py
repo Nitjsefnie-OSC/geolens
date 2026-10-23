@@ -198,6 +198,9 @@ class MigrationContext:
     web_origin: str = ""
     # Esri basemap URL -> GeoLens basemap id, from the plan.
     basemap_map: dict[str, str] = field(default_factory=dict)
+    # A skipped hosted view's item id -> the parent item whose datasets stand
+    # in for it, from the plan's alias_of.
+    aliases: dict[str, str] = field(default_factory=dict)
     portal_root: str = ""
     redact: Callable[[str], str] = str
     # The instance's upload_max_size_mb in bytes, read once from its settings.

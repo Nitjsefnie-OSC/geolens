@@ -28,7 +28,7 @@ from .arcgis_migrate_session import (
     StopRun,
 )
 from .arcgis_migrate_state import DONE, EXISTS, FINISHED, ItemState
-from .arcgis_portal import PortalError, redact_json
+from .arcgis_portal import PortalError, redact_json, sanitize_url
 
 LOSS_DIRNAME = "webmap-loss"
 _ITEM_ID = re.compile(r"[0-9A-Za-z]{32}")
@@ -80,7 +80,11 @@ def match_datasets(ctx: MigrationContext, webmap: Mapping[str, Any]) -> dict[str
     matches: dict[str, str] = {}
     for layer in _walk(webmap.get("operationalLayers")):
         layer_id, item_id = layer.get("id"), layer.get("itemId")
-        source = ctx.items.get(item_id) if isinstance(item_id, str) else None
+        source = (
+            ctx.items.get(ctx.aliases.get(item_id, item_id))
+            if isinstance(item_id, str)
+            else None
+        )
         if not isinstance(layer_id, str) or source is None:
             continue
         if source.status not in FINISHED:
@@ -101,10 +105,14 @@ def _basemap_entries(
     first = layers[0] if isinstance(layers, list) and layers else None
     if not isinstance(first, dict):
         return {}
+    # The plan's keys have no query or userinfo; the server looks the web
+    # map's own URL up, so the request is keyed by that.
     return {
-        key: ctx.basemap_map[key]
+        key: ctx.basemap_map[plain]
         for key in (first.get("url"), first.get("styleUrl"))
-        if isinstance(key, str) and key in ctx.basemap_map
+        if isinstance(key, str)
+        and (plain := sanitize_url(key)) is not None
+        and plain in ctx.basemap_map
     }
 
 
