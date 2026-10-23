@@ -93,7 +93,6 @@ jobs:
 
   backend-lint:
     name: Backend Lint
-    if: needs.changes.outputs.backend == 'true' || (github.event_name == 'push' && needs.changes.outputs.queue_verified != 'true') || github.event_name == 'merge_group'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
