@@ -319,6 +319,7 @@ def _categorical(
         base, [sym for _, sym in classes] + [default_sym], path, loss
     )
     categories: list[dict] = []
+    pairs: list[str] = []
     seen: set[str] = set()
     for info, sym in classes:
         value = info.get("value")
@@ -333,18 +334,14 @@ def _categorical(
                 "value": _typed_value(value, field_name in numeric_fields),
                 "label": label if isinstance(label, str) and label else key,
                 "color": _class_color(sym),
-                "paint_color": _css_color(sym),
-                "key": key,
             }
         )
+        pairs += [key, _css_color(sym)]
     if dropped:
         loss.add(path, "renderer_class_dropped", f"{dropped} classes")
     if not categories:
         return _simple(base, hint)
 
-    pairs = [item for c in categories for item in (c["key"], c["paint_color"])]
-    for category in categories:
-        del category["paint_color"], category["key"]
     expression = [
         "case",
         ["==", ["get", field_name], None],
@@ -398,10 +395,6 @@ def _single_class(field_name: str, only: tuple, base: _Symbol, fallback: str) ->
     return Styled(_paint(base, expression, 1.0), _style_config(base), base.kind)
 
 
-def _bound(value: float) -> str:
-    return f"{value:g}"
-
-
 def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
     """Class-break labels that differ from the range ArcGIS generates for the class."""
     ordered = sorted(
@@ -421,10 +414,10 @@ def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
             continue
         generated = set()
         if high is not None:
-            generated = {f"< {_bound(high)}", f"<= {_bound(high)}"}
+            generated = {f"<{high:g}", f"<={high:g}"}
             if low is not None:
-                generated.add(f"{_bound(low)} - {_bound(high)}")
-        if "".join(label.split()) not in {"".join(g.split()) for g in generated}:
+                generated.add(f"{low:g}-{high:g}")
+        if "".join(label.split()) not in generated:
             authored += 1
     return authored
 
