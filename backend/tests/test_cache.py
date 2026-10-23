@@ -974,3 +974,16 @@ async def test_redis_conditional_fallback_honors_the_requested_ttl(redis_cache):
 
     assert await cache._fallback.get("claim") == "renewed"
     assert 0 < cache._fallback._store["claim"][1] - time.monotonic() <= 17
+
+
+@pytest.mark.asyncio
+async def test_memory_conditional_delete_releases_the_byte_budget():
+    cache = InMemoryCacheProvider(max_bytes=10)
+    await cache.set("claim", "owner")
+
+    assert await cache.compare_and_delete("claim", "owner") is True
+
+    assert cache._bytes == 0
+    assert "claim" not in cache._sizes
+    await cache.set("next", "value")
+    assert await cache.get("next") == "value"

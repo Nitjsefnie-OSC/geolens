@@ -24,6 +24,8 @@ async def send_email(notification: "Notification") -> None:  # type: ignore[name
     Imports are deferred so this module pays no import cost
     for deployments that never call it.
 
+    Caller cancellation waits for the blocking send to finish before propagating.
+
     Raises:
         smtplib.SMTPException: on SMTP-level failures.
         OSError: on connection failures (host unreachable, timeout, ...).
@@ -81,4 +83,16 @@ async def send_email(notification: "Notification") -> None:  # type: ignore[name
         finally:
             conn.quit()
 
-    await asyncio.to_thread(_blocking_send)
+    # Cancelling an executor await cannot stop its thread. Join it before
+    # propagating cancellation so callers can retain ownership until it exits.
+    worker = asyncio.create_task(asyncio.to_thread(_blocking_send))
+    finished = asyncio.gather(worker, return_exceptions=True)
+    cancelled = False
+    while not finished.done():
+        try:
+            await asyncio.shield(finished)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    worker.result()

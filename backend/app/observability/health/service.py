@@ -3,6 +3,7 @@
 import asyncio
 import time
 import uuid
+from contextlib import suppress
 from contextvars import ContextVar
 from typing import Any, Coroutine, NamedTuple
 
@@ -174,7 +175,8 @@ async def check_oidc_health(db: AsyncSession) -> dict[str, dict[str, Any]]:
 
 HEALTH_ALERT_COOLDOWN_SECS = 300
 HEALTH_ALERT_DELIVERY_TIMEOUT = 60
-# Bound delivery below the lease, leaving time for claim and renewal cache I/O.
+# Renew throughout delivery and SMTP cancellation cleanup. A dead sender
+# stops renewing, so replicas wait only this short lease before retrying.
 HEALTH_ALERT_CLAIM_SECS = int(HEALTH_ALERT_DELIVERY_TIMEOUT + 2 * HEALTH_TIMEOUT)
 # How long a failed delivery keeps the claim before any replica may retry.
 HEALTH_ALERT_RETRY_SECS = 60
@@ -354,6 +356,13 @@ async def _apply_health_result(seq: int, result: dict) -> BackgroundTask | None:
     )
 
 
+async def _renew_health_alert_claim(token: str) -> None:
+    """Keep the delivery's lease live, including while cancellation drains I/O."""
+    while True:
+        await asyncio.sleep(HEALTH_ALERT_CLAIM_SECS / 3)
+        await _set_health_alert_ttl(token, HEALTH_ALERT_CLAIM_SECS)
+
+
 async def _deliver_health_alert(
     token: str, retry: bool, sent_at: float, component: str, status: str
 ) -> None:
@@ -369,6 +378,7 @@ async def _deliver_health_alert(
     )
 
     global _last_health_alert_at
+    renewal = asyncio.create_task(_renew_health_alert_claim(token))
     try:
         async with asyncio.timeout(HEALTH_ALERT_DELIVERY_TIMEOUT):
             delivery = await emit_event_safe(
@@ -386,6 +396,11 @@ async def _deliver_health_alert(
     except TimeoutError:
         logger.warning("health_alert_delivery_timed_out")
         delivery = None
+    finally:
+        # Stop renewal before completion/backoff assigns the final TTL.
+        renewal.cancel()
+        with suppress(asyncio.CancelledError):
+            await renewal
     if delivery or not retry:
         await _set_health_alert_ttl(token, HEALTH_ALERT_COOLDOWN_SECS)
         return
