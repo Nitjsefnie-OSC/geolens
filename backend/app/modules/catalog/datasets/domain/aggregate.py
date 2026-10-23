@@ -34,7 +34,11 @@ from app.modules.catalog.datasets.domain.service import (
     compile_layer_filter,
     preview_slot_bound,
 )
-from app.modules.catalog.features.service import parse_bbox, planner_row_estimate
+from app.modules.catalog.features.service import (
+    feature_table_exists,
+    parse_bbox,
+    planner_row_estimate,
+)
 from app.platform.analysis_sql import binds_referenced_by, render_filtered_table_ref
 from app.platform.dataset_origin import geolens_owns_table
 from app.platform.cache import (
@@ -218,6 +222,10 @@ class AggregateResponse(BaseModel):
         False, description="Always false: a view too wide to count exactly is refused."
     )
     cached: bool
+
+
+class TableUnavailable(Exception):
+    """The dataset's backing table is missing."""
 
 
 class AggregateError(Exception):
@@ -468,6 +476,8 @@ async def run_aggregate(
     if owned and bbox is not None and _covers(bbox, dataset.record.spatial_extent):
         bbox = None
     whole_layer = owned and bbox is None and request.filter is None
+    if not await feature_table_exists(db, dataset.table_name):
+        raise TableUnavailable(dataset.table_name)
     if whole_layer and request.op == "count" and dataset.feature_count is not None:
         return AggregateResponse(
             op="count", result=CountResult(count=dataset.feature_count), cached=False

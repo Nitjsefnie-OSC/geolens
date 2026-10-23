@@ -470,6 +470,28 @@ class TestAccess:
 
             assert resp.status_code == 404, resp.text
 
+    async def test_a_missing_table_is_unavailable_not_its_stored_count(
+        self, client: AsyncClient, test_db_session
+    ):
+        async with _dropped(test_db_session) as dataset:
+            await test_db_session.execute(
+                text(
+                    f"ALTER TABLE data.{dataset.table_name} RENAME TO {dataset.table_name}_x"
+                )
+            )
+            await test_db_session.commit()
+
+            resp = await _aggregate(client, dataset.id, {"op": "count"})
+
+            await test_db_session.execute(
+                text(
+                    f"ALTER TABLE data.{dataset.table_name}_x RENAME TO {dataset.table_name}"
+                )
+            )
+            await test_db_session.commit()
+
+        assert resp.status_code == 503, resp.text
+
     async def test_a_raster_has_nothing_to_aggregate(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session
     ):

@@ -20,6 +20,7 @@ from app.modules.catalog.datasets.domain.aggregate import (
     AggregateError,
     AggregateRequest,
     AggregateResponse,
+    TableUnavailable,
     run_aggregate,
 )
 from app.modules.catalog.datasets.domain.service import get_dataset
@@ -110,7 +111,7 @@ async def aggregate_endpoint(
             ),
             detail={"code": exc.category, "message": exc.user_message},
         ) from exc
-    except (ProgrammingError, OperationalError) as exc:
+    except (ProgrammingError, OperationalError, TableUnavailable) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Dataset table is temporarily unavailable",
