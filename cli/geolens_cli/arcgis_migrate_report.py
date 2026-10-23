@@ -37,6 +37,7 @@ def _follow_ups(
     state: MigrationState,
     runnable: Container[str],
     owner_changes: Sequence[Mapping[str, str]],
+    owner_unresolved: Sequence[Mapping[str, str]] = (),
 ) -> list[dict[str, str]]:
     """What the operator still has to do, one entry per item and reason."""
     items = {item["id"]: item for item in plan["items"]}
@@ -122,6 +123,28 @@ def _follow_ups(
                 )
             for error in entry.export["errors"]:
                 add(item["id"], "export_error", error)
+        if entry is None or item.get("removed"):
+            continue
+        for reason in entry.stale:
+            add(item["id"], "not_up_to_date", reason)
+        if entry.owner_pending:
+            add(
+                item["id"],
+                "owner_pending",
+                f"with --unmapped-owner until its owner can take it: "
+                f"{entry.owner_pending}; a later run hands it over",
+            )
+        for layer, has in (entry.attachments or {}).items():
+            if has is not False and layer in entry.layer_datasets:
+                add(
+                    item["id"],
+                    "attachments",
+                    f"layer {layer} "
+                    + ("has" if has else "may have")
+                    + " attachments, which GeoLens doesn't import yet",
+                )
+    for unresolved in owner_unresolved:
+        add(unresolved["item"], "owner_unresolved", unresolved["reason"])
     for change in owner_changes:
         add(
             change["item"],
@@ -200,13 +223,35 @@ def _export_section(
     return rows
 
 
+def _cutover_section(
+    state: MigrationState, cutover: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """This run's cutover checks, or when an earlier run was marked final."""
+    if cutover is not None:
+        return {
+            **cutover,
+            "at": (state.cutover or {}).get("at") if cutover["marked"] else None,
+        }
+    if state.cutover:
+        return {
+            "marked": True,
+            "refused": [],
+            "accepted": state.cutover["accepted"],
+            "checks": [],
+            "at": state.cutover["at"],
+        }
+    return None
+
+
 def build_run_report(
     plan: Mapping[str, Any],
     state: MigrationState,
     *,
     runnable: Container[str] = (),
     owner_changes: Sequence[Mapping[str, str]] = (),
+    owner_unresolved: Sequence[Mapping[str, str]] = (),
     stopped: str | None = None,
+    cutover: Mapping[str, Any] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """The report of the whole plan as of *state*."""
@@ -235,13 +280,40 @@ def build_run_report(
         "portal": plan["portal"]["url"],
         "counts": dict(sorted(counts.items())),
         "stopped": stopped,
+        "cutover": _cutover_section(state, cutover),
         "items": rows,
         "unsupported": _export_section(plan, state),
-        "follow_ups": _follow_ups(plan, state, runnable, owner_changes),
+        "follow_ups": _follow_ups(
+            plan, state, runnable, owner_changes, owner_unresolved
+        ),
         "loss_reports": sorted(
             {row["loss_report"] for row in rows if row["loss_report"]}
         ),
     }
+
+
+def _cutover_lines(cutover: Mapping[str, Any] | None) -> list[str]:
+    if cutover is None:
+        return []
+    esc = _report.md_escape
+    if cutover["marked"]:
+        accepted = ", ".join(cutover["accepted"]) or "none"
+        lines = [
+            f"**Cut over** at {esc(cutover['at'])}; losses accepted: {esc(accepted)}",
+            "",
+        ]
+    else:
+        lines = [
+            "**Cutover refused:** " + esc(", ".join(cutover["refused"])),
+            "",
+        ]
+    for check in cutover["checks"]:
+        lines.append(f"- `{check['check']}`")
+        lines += [
+            f"  - {esc(found['item'])}: {esc(found['reason'])}"
+            for found in check["items"]
+        ]
+    return lines + ([""] if cutover["checks"] else [])
 
 
 def render_run_markdown(report: Mapping[str, Any]) -> str:
@@ -255,6 +327,7 @@ def render_run_markdown(report: Mapping[str, Any]) -> str:
     ]
     if report["stopped"]:
         lines += [f"**The run stopped:** {esc(report['stopped'])}", ""]
+    lines += _cutover_lines(report.get("cutover"))
     lines += ["## Counts", ""]
     lines += _report.md_table(
         ["Status", "Items"], ([esc(s), str(n)] for s, n in report["counts"].items())

@@ -142,6 +142,20 @@ def _layer_label(layer: Any) -> str:
     return title if isinstance(title, str) and title else str(layer.name)
 
 
+def attachment_flags(layers: Any) -> dict[str, bool | None]:
+    """Probed layer -> whether it has attachments, None where the service
+    doesn't say."""
+    flags: dict[str, bool | None] = {}
+    for layer in layers:
+        value = getattr(layer, "has_attachments", None)
+        if not isinstance(value, bool):
+            value = (getattr(layer, "additional_properties", None) or {}).get(
+                "has_attachments"
+            )
+        flags[_layer_key(layer)] = value if isinstance(value, bool) else None
+    return flags
+
+
 def _importable(layer: Any) -> str | None:
     """Why *layer* is not imported, or None."""
     kind = getattr(layer, "source_layer_type", None)
@@ -388,6 +402,7 @@ def import_layers(
     reasons = [(layer, _importable(layer)) for layer in layers]
     notes = [reason for _layer, reason in reasons if reason]
     wanted = [layer for layer, reason in reasons if reason is None]
+    entry.attachments = attachment_flags(wanted)
     if not wanted:
         # Done rather than skipped, so a rerun doesn't probe it again.
         return ItemResult(notes=[*notes, "the service has no layer to import"])

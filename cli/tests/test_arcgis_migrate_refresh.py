@@ -1,0 +1,518 @@
+"""`geolens arcgis migrate` reruns: refresh, replace, GeoLens changes and --cutover."""
+
+from __future__ import annotations
+
+import json
+import secrets
+from pathlib import Path
+
+import pytest
+
+from geolens_cli import arcgis_migrate_refresh as refresh_mod
+
+from . import test_arcgis_migrate_files as files
+from . import test_arcgis_migrate_layers as layers
+from .arcgis_fake import A1, A2, D3, item_data_path
+from .test_arcgis_migrate_layers import (
+    FakeImport,
+    _layer,
+    _migrate,
+    _state,
+    _uuid,
+    _write_plan,
+    dataset_id,
+)
+
+geolens = layers.geolens
+quick = layers.quick
+portal = files.portal
+private_tempdir = files.private_tempdir
+plan_file = layers.plan_file
+
+LATER = "2026-10-02T00:00:00Z"
+EDITED = "2026-10-03T00:00:00Z"
+ALICE = "00000000-0000-0000-0000-0000000000a1"
+PARCELS = dataset_id("Parcels")
+# The fixture's inventory is a complete org one read by an org admin.
+USER_INVENTORY = {"scope": {"mode": "user", "owner": "gis_admin", "org_id": None}}
+
+
+def _run(dataset: str, run_id: str, status: str, **extra) -> dict:
+    return {
+        "id": run_id,
+        "dataset_id": dataset,
+        "origin_kind": "service",
+        "trigger": "manual",
+        "status": status,
+        "started_at": layers.NOW,
+        "finished_at": None if status == "running" else LATER,
+        **extra,
+    }
+
+
+class FakeRefresh:
+    """The refresh endpoint and run history of the datasets it is given."""
+
+    def __init__(self, fake, service: FakeImport, outcome: str = "succeeded") -> None:
+        self.fake = fake
+        self.service = service
+        self.outcome = outcome
+        self.extra: dict = {}
+        self.bodies: list[dict] = []
+        self.runs: dict[str, list[dict]] = {}
+
+    def allow(self, *datasets: str) -> FakeRefresh:
+        for dataset in datasets:
+            self.fake.routes[f"POST /datasets/{dataset}/refresh"] = (
+                lambda seen, d=dataset: self.refresh(d, seen)
+            )
+            self.fake.routes[f"GET /datasets/{dataset}/refresh-runs"] = (
+                lambda seen, d=dataset: {
+                    "runs": self.runs.get(d, []),
+                    "total": len(self.runs.get(d, [])),
+                }
+            )
+        return self
+
+    def refresh(self, dataset: str, seen):
+        self.bodies.append(seen.json())
+        run_id = _uuid("5e", f"{len(self.bodies):02d}")
+        self.runs.setdefault(dataset, []).insert(
+            0, _run(dataset, run_id, self.outcome, **self.extra)
+        )
+        if self.outcome == "succeeded":
+            self.service.fields.setdefault(dataset, {})["updated_at"] = LATER
+        return (
+            202,
+            {
+                "run_id": run_id,
+                "job_id": _uuid("0a", f"{len(self.bodies):02d}"),
+                "dataset_id": dataset,
+                "origin_kind": "service",
+                "trigger": "manual",
+                "message": "queued",
+                "status": "pending",
+            },
+        )
+
+
+def _migrated(runner, plan_file: Path, geolens, item: str = A2, *args: str):
+    service = FakeImport(geolens, [_layer(0, "Parcels")], needs_auth=item == A1)
+    result, _ = _migrate(runner, plan_file, "--only", item, *args)
+    assert result.exit_code == 0, result.output
+    return service
+
+
+def _service_url(plan_file: Path, item: str) -> str:
+    inventory = json.loads((plan_file.parent / "arcgis-inventory.json").read_text())
+    return next(row["url"] for row in inventory["items"] if row["id"] == item)
+
+
+def _edit_state(plan_file: Path, item: str, **changes) -> None:
+    path = plan_file.parent / "arcgis-migration-state.json"
+    state = json.loads(path.read_text())
+    state["items"][item].update(changes)
+    path.write_text(json.dumps(state))
+
+
+def _edit_plan(plan_file: Path, keep: tuple[str, ...], **inventory) -> None:
+    """Leave only the *keep* items to run, and update the plan's inventory block."""
+    plan = json.loads(plan_file.read_text())
+    for item in plan["items"]:
+        if item["id"] not in keep:
+            item["action"] = "skip"
+    plan["inventory"].update(inventory)
+    plan_file.write_text(json.dumps(plan))
+
+
+# Refresh
+
+
+def test_a_rerun_refreshes_a_migrated_service_and_records_its_last_update(
+    runner, plan_file, geolens
+):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert payload["refreshed"] == [A2] and payload["not_up_to_date"] == {}
+    [body] = refresh.bodies
+    assert "auth" not in body and "accept_blocked_run_id" not in body
+    entry = _state(plan_file)["items"][A2]
+    assert entry["last_update"][PARCELS]["updated_at"].startswith("2026-10-02")
+    assert entry["refreshing"] == {} and entry["stale"] == []
+
+
+def test_a_private_service_is_refreshed_with_the_token(runner, plan_file, geolens):
+    token = secrets.token_urlsafe(16)
+    service = _migrated(runner, plan_file, geolens, A1, "--token", token)
+    service.fields[PARCELS] = {"origin_ref": {"url": _service_url(plan_file, A1)}}
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+
+    result, _ = _migrate(runner, plan_file, "--only", A1, "--token", token)
+
+    assert result.exit_code == 0, result.output
+    [body] = refresh.bodies
+    assert body["auth"] == {"method": "bearer", "token": token}
+    raw = (plan_file.parent / "arcgis-migration-state.json").read_text()
+    assert token not in raw and token not in result.output
+
+
+def test_the_token_is_not_sent_to_a_stored_source_on_another_host(
+    runner, plan_file, geolens
+):
+    token = secrets.token_urlsafe(16)
+    service = _migrated(runner, plan_file, geolens, A1, "--token", token)
+    service.fields[PARCELS] = {
+        "origin_ref": {"url": "https://elsewhere.example.org/arcgis/rest/services/P"}
+    }
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+
+    result, payload = _migrate(runner, plan_file, "--only", A1, "--token", token)
+
+    assert result.exit_code == 1
+    assert refresh.bodies == []
+    [reason] = payload["not_up_to_date"][A1]
+    assert "elsewhere.example.org" in reason and "token was not sent" in reason
+    assert token not in result.output
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        {"updated_at": EDITED, "updated_by": ALICE},
+        # A feature added by the operator's own account moves only the count.
+        {"feature_count": 5},
+    ],
+)
+def test_a_dataset_changed_in_geolens_since_the_last_run_is_left_alone(
+    runner, plan_file, geolens, edit
+):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+    service.fields.setdefault(PARCELS, {}).update(edit)
+    before = len(geolens.seen)
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    assert refresh.bodies == []
+    assert [s for s in geolens.seen[before:] if s.method != "GET"] == []
+    [reason] = payload["not_up_to_date"][A2]
+    assert "changed in GeoLens since the last run" in reason
+    entry = _state(plan_file)["items"][A2]
+    assert entry["last_update"][PARCELS] == {
+        "updated_at": "2026-10-01T00:00:00+00:00",
+        "feature_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("updated_by", "refreshed"), [(None, True), (layers.OPERATOR, True), (ALICE, False)]
+)
+def test_a_state_without_last_updates_trusts_only_the_operators_last_write(
+    runner, plan_file, geolens, updated_by, refreshed
+):
+    service = _migrated(runner, plan_file, geolens)
+    _edit_state(plan_file, A2, last_update={})
+    service.fields[PARCELS] = {"updated_at": EDITED, "updated_by": updated_by}
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert bool(refresh.bodies) is refreshed
+    assert result.exit_code == (0 if refreshed else 1)
+    if not refreshed:
+        assert (
+            "changed in GeoLens since it was migrated"
+            in (payload["not_up_to_date"][A2][0])
+        )
+
+
+def test_a_refresh_that_stops_for_review_is_reported_not_accepted(
+    runner, plan_file, geolens
+):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service, outcome="blocked").allow(PARCELS)
+    refresh.extra = {"verification": {"review_reasons": ["live_data_changed"]}}
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    [body] = refresh.bodies
+    assert "accept_blocked_run_id" not in body
+    [reason] = payload["not_up_to_date"][A2]
+    run_id = refresh.runs[PARCELS][0]["id"]
+    assert "stopped for review and published nothing" in reason
+    assert "Features were edited while the replacement ran" in reason
+    assert f"geolens refresh {PARCELS} --accept-blocked-run {run_id}" in reason
+
+
+@pytest.mark.parametrize(
+    ("updated_by", "updated_at", "adopted"),
+    [
+        (layers.OPERATOR, LATER, True),
+        # Edited by someone else while the refresh ran.
+        (ALICE, LATER, False),
+        # Edited after the refresh ended.
+        (layers.OPERATOR, EDITED, False),
+    ],
+)
+def test_a_refresh_still_running_at_the_deadline_is_picked_up_by_the_next_run(
+    runner, plan_file, geolens, monkeypatch, updated_by, updated_at, adopted
+):
+    monkeypatch.setattr(refresh_mod, "JOB_TIMEOUT", 0.05)
+    monkeypatch.setattr(refresh_mod, "JOB_POLL_INTERVAL", 0.01)
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service, outcome="running").allow(PARCELS)
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    assert "still running" in payload["not_up_to_date"][A2][0]
+    entry = _state(plan_file)["items"][A2]
+    [run] = refresh.runs[PARCELS]
+    assert entry["refreshing"] == {PARCELS: {"run": run["id"]}}
+    assert entry["last_update"][PARCELS]["updated_at"].startswith("2026-10-01")
+
+    run.update(status="succeeded", finished_at=LATER)
+    service.fields[PARCELS] = {"updated_at": updated_at, "updated_by": updated_by}
+    refresh.outcome = "succeeded"
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert (len(refresh.bodies) == 2) is adopted
+    assert result.exit_code == (0 if adopted else 1), result.output
+    if adopted:
+        assert _state(plan_file)["items"][A2]["refreshing"] == {}
+
+
+def test_a_rerun_writes_the_portals_new_item_metadata(runner, tmp_path, geolens):
+    plan_file = _write_plan(tmp_path, rows={A2: {"snippet": "Old summary"}})
+    service = _migrated(runner, plan_file, geolens)
+    FakeRefresh(geolens, service).allow(PARCELS)
+    path = plan_file.parent / "arcgis-inventory.json"
+    inventory = json.loads(path.read_text())
+    for row in inventory["items"]:
+        if row["id"] == A2:
+            row["snippet"] = "New summary"
+    path.write_text(json.dumps(inventory))
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.summaries[PARCELS].startswith("New summary")
+
+
+def test_a_data_file_is_downloaded_again_and_replaced(
+    runner, tmp_path, geolens, portal
+):
+    files.FakeFiles(geolens)
+    plan_file = files._plan(tmp_path)
+    result, _ = _migrate(runner, plan_file, "--only", D3)
+    assert result.exit_code == 0, result.output
+    [dataset] = _state(plan_file)["items"][D3]["dataset_ids"]
+    job = _uuid("0c", "01")
+    sent: dict[str, list] = {"upload": [], "commit": []}
+
+    def upload(seen):
+        sent["upload"].append(seen.body)
+        return (201, {"job_id": job, "message": "ok", "status": "pending"})
+
+    def commit(seen):
+        sent["commit"].append(seen.json())
+        return (202, {"job_id": job, "status": "pending", "message": "queued"})
+
+    diff = {
+        "columns_added": [],
+        "columns_removed": [],
+        "type_changes": [],
+        "row_count_old": 2,
+        "row_count_new": 2,
+        "row_count_delta": 0,
+    }
+    geolens.routes.update(
+        {
+            f"POST /datasets/{dataset}/reupload": upload,
+            f"POST /datasets/{dataset}/reupload/{job}/preview": {
+                "job_id": job,
+                "source_filename": "f.csv",
+                "columns": [],
+                "crs": 4326,
+                "geometry_type": "Point",
+                "feature_count": 2,
+                "sample_rows": [],
+                "layer_name": "f",
+                "schema_diff": diff,
+            },
+            f"POST /datasets/{dataset}/reupload/{job}/commit": commit,
+            f"GET /datasets/{dataset}/refresh-runs": {
+                "runs": [
+                    _run(dataset, _uuid("5e", "01"), "succeeded", ingest_job_id=job)
+                ],
+                "total": 1,
+            },
+        }
+    )
+
+    result, payload = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 0, result.output
+    assert payload["refreshed"] == [D3] and payload["not_up_to_date"] == {}
+    assert len(portal.requests_to(item_data_path(D3))) == 2
+    [body] = sent["upload"]
+    assert files.CSV in body
+    [committed] = sent["commit"]
+    assert "review_fingerprint" not in committed
+    assert _state(plan_file)["items"][D3]["refreshing"] == {}
+
+
+# Cutover
+
+
+def test_cutover_refuses_a_migrated_layer_with_attachments_until_accepted(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,))
+    service = FakeImport(geolens, [_layer(0, "Parcels", has_attachments=True)])
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["refused"] == ["attachment-loss"]
+    [check] = payload["cutover"]["checks"]
+    assert check["items"] == [
+        {"item": A2, "reason": f"layer 0 ({PARCELS}) has attachments"}
+    ]
+    assert _state(plan_file)["cutover"] is None
+    report = json.loads((plan_file.parent / "arcgis-migration-report.json").read_text())
+    assert {
+        "item": A2,
+        "kind": "attachments",
+        "text": ("layer 0 has attachments, which GeoLens doesn't import yet"),
+    } in report["follow_ups"]
+    assert report["cutover"]["refused"] == ["attachment-loss"]
+
+    FakeRefresh(geolens, service).allow(PARCELS)
+    result, payload = _migrate(
+        runner, plan_file, "--cutover", "--accept-attachment-loss"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert payload["cutover"]["marked"] is True
+    recorded = _state(plan_file)["cutover"]
+    assert recorded["accepted"] == ["attachment-loss"] and recorded["at"]
+
+
+def test_cutover_treats_a_layer_the_probe_says_nothing_about_as_a_loss(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,))
+    FakeImport(geolens, [_layer(0, "Parcels")])
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    [check] = payload["cutover"]["checks"]
+    assert check["items"][0]["reason"].endswith("may have attachments")
+
+
+def test_cutover_refuses_a_plan_not_merged_from_a_complete_org_inventory(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,), **USER_INVENTORY)
+    service = FakeImport(geolens, [_layer(0, "Parcels", has_attachments=False)])
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["refused"] == ["incomplete-inventory"]
+    assert _state(plan_file)["cutover"] is None
+
+    FakeRefresh(geolens, service).allow(PARCELS)
+    result, payload = _migrate(
+        runner, plan_file, "--cutover", "--accept-incomplete-inventory"
+    )
+    assert result.exit_code == 0, result.output
+    assert _state(plan_file)["cutover"]["accepted"] == ["incomplete-inventory"]
+
+
+def test_cutover_refuses_unfinished_items_until_accepted(runner, plan_file, geolens):
+    _edit_plan(plan_file, (A2,))
+    service = FakeImport(geolens, [_layer(0, "Parcels", has_attachments=False)])
+    service.job_errors["Parcels"] = "boom"
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+    assert payload["cutover"]["checks"][0]["items"] == [
+        {"item": A2, "reason": "failed"}
+    ]
+
+    result, payload = _migrate(
+        runner, plan_file, "--cutover", "--accept-unfinished-items", "--no-retry"
+    )
+    assert payload["cutover"]["marked"] is True
+    # The item is still failed, so the run says so even though it is marked.
+    assert result.exit_code == 1
+
+
+def test_cutover_counts_an_item_left_out_of_date_as_unfinished(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,))
+    service = FakeImport(geolens, [_layer(0, "Parcels", has_attachments=False)])
+    _migrate(runner, plan_file)
+    FakeRefresh(geolens, service, outcome="failed").allow(PARCELS)
+
+    result, payload = _migrate(runner, plan_file, "--cutover")
+
+    assert result.exit_code == 1
+    [check] = payload["cutover"]["checks"]
+    assert check["check"] == "unfinished-items"
+    assert "its refresh ended failed" in check["items"][0]["reason"]
+
+
+def test_a_dry_run_shows_the_cutover_checks_and_writes_nothing(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,), **USER_INVENTORY)
+    FakeImport(geolens, [_layer(0, "Parcels")])
+
+    result, payload = _migrate(runner, plan_file, "--cutover", "--dry-run")
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["marked"] is False
+    assert payload["cutover"]["refused"] == ["unfinished-items", "incomplete-inventory"]
+    assert not (plan_file.parent / "arcgis-migration-state.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--accept-attachment-loss",), "go with --cutover"),
+        (("--cutover", "--only", A2), "drop --only"),
+    ],
+)
+def test_cutover_option_misuse_is_a_usage_error(
+    runner, plan_file, geolens, args, message
+):
+    result, _ = _migrate(runner, plan_file, *args)
+    assert result.exit_code == 2
+    assert message in result.output
+    assert geolens.seen == []
+
+
+def test_a_later_run_reports_the_cutover_in_the_report(runner, plan_file, geolens):
+    _edit_plan(plan_file, (A2,))
+    service = FakeImport(geolens, [_layer(0, "Parcels", has_attachments=False)])
+    result, _ = _migrate(runner, plan_file, "--cutover")
+    assert result.exit_code == 0, result.output
+    FakeRefresh(geolens, service).allow(PARCELS)
+
+    _migrate(runner, plan_file)
+
+    report = (plan_file.parent / "arcgis-migration-report.md").read_text()
+    assert "**Cut over** at" in report

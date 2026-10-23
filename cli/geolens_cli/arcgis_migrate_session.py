@@ -198,6 +198,8 @@ class MigrationContext:
     web_origin: str = ""
     portal_root: str = ""
     redact: Callable[[str], str] = str
+    # The GeoLens operator's user id, whose writes a rerun recognises as its own.
+    operator_id: str | None = None
     # The instance's upload_max_size_mb in bytes, read once from its settings.
     upload_limit: int | None = None
     sleep: Callable[[float], None] = time.sleep

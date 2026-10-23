@@ -148,6 +148,20 @@ def no_inventory(monkeypatch):
     monkeypatch.setattr(migrate, "_inventory_rows", lambda *args: ({}, None))
 
 
+@pytest.fixture(autouse=True)
+def refreshed(monkeypatch):
+    """Refreshers that record the finished items a rerun brings up to date."""
+    calls: list[str] = []
+
+    def refresher(ctx, item, entry, datasets):
+        calls.append(item["id"])
+        return []
+
+    for action in migrate.REFRESHERS:
+        monkeypatch.setitem(migrate.REFRESHERS, action, refresher)
+    return calls
+
+
 @pytest.fixture
 def geolens(fake_geolens):
     """The fake instance with an admin operator, alice (editor) and vic (viewer)."""
@@ -172,6 +186,7 @@ def _allow_transfers(fake, *ids: str, map_ids: tuple[str, ...] = ()) -> None:
         fake.routes[f"PATCH /datasets/{dataset_id}"] = (
             lambda seen, d=dataset_id: _dataset(d, seen.json()["owner_id"])
         )
+        fake.routes[f"GET /datasets/{dataset_id}"] = _dataset(dataset_id, OPERATOR)
     for map_id in map_ids:
         fake.routes[f"PATCH /maps/{map_id}"] = lambda seen, m=map_id: _map(
             m, seen.json()["owner_id"]
@@ -274,7 +289,7 @@ def test_a_dependency_outside_the_plan_does_not_hold_an_item_back(
 def test_resume_after_a_crash_runs_only_unfinished_items(
     runner, tmp_path, geolens, handled
 ):
-    _allow_transfers(geolens, _created_id(L2), _created_id(S1))
+    _allow_transfers(geolens, _created_id(L1), _created_id(L2), _created_id(S1))
     _write_state(
         tmp_path,
         {
@@ -531,12 +546,174 @@ def test_unmapped_owner_takes_items_whose_owner_cannot_hold_them(
     assert len(payload["owner_reassigned"]) == 2
 
 
-def test_unmapped_owner_does_not_cover_an_unknown_name(
+def test_an_unknown_name_is_refused_without_an_unmapped_owner(
     runner, tmp_path, geolens, handled
 ):
     plan = _plan([_item(L1)], owner_map={"agol_alice": "nobody"})
-    result, _ = _run(runner, tmp_path, plan, "--unmapped-owner", "alice")
+    result, _ = _run(runner, tmp_path, plan)
     assert result.exit_code == 2 and handled == []
+    assert "nobody (owner of" in result.output
+
+
+def _users(fake, *extra: dict) -> None:
+    users = [*fake.routes["GET /admin/users/"]["users"], *extra]
+    fake.routes["GET /admin/users/"] = {"users": users, "total": len(users)}
+
+
+def _owner_patches(fake) -> list[str]:
+    return [s.json()["owner_id"] for s in fake.seen if s.method == "PATCH"]
+
+
+NEW = "00000000-0000-0000-0000-0000000000a4"
+
+
+def test_an_owner_not_in_geolens_yet_waits_and_is_handed_over_later(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+
+    result, payload = _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+
+    assert result.exit_code == 0, result.output
+    reason = "newbie is not a GeoLens user yet"
+    assert payload["owner_pending"] == {L1: reason}
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == OPERATOR and entry["owner_pending"] == reason
+    report = json.loads((tmp_path / "arcgis-migration-report.json").read_text())
+    assert [f["kind"] for f in report["follow_ups"]] == ["owner_pending"]
+
+    _users(geolens, _user(NEW, "newbie", ["editor"]))
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 0, result.output
+    assert handled == [L1]
+    assert _owner_patches(geolens) == [OPERATOR, NEW]
+    assert payload["handed_over"] == [{"item": L1, "owner": "newbie"}]
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == NEW and entry["owner_pending"] is None
+
+
+def test_a_viewer_owner_is_asked_to_be_promoted_instead_of_a_refused_transfer(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "vic"})
+
+    result, payload = _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR]
+    assert "promote vic to editor" in payload["owner_pending"][L1]
+
+    _users(geolens)
+    geolens.routes["GET /settings/all/"] = _settings(
+        {**DEFAULT_ROLES, "viewer": {"upload": True, "edit_metadata": True}}
+    )
+    result, _ = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR, VIC]
+    assert _state(tmp_path)["items"][L1]["owner_pending"] is None
+
+
+def test_a_changed_unmapped_owner_takes_an_item_still_waiting(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+    _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+
+    result, payload = _run(runner, tmp_path, plan, "--unmapped-owner", "alice")
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR, ALICE]
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == ALICE
+    assert entry["owner_pending"] == "newbie is not a GeoLens user yet"
+
+
+def test_a_waiting_item_changed_in_geolens_is_not_handed_over(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+    _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+    edited = {"updated_at": "2026-10-05T00:00:00Z", "updated_by": ALICE}
+    geolens.routes[f"GET /datasets/{_created_id(L1)}"] = {
+        **_dataset(_created_id(L1), OPERATOR),
+        **edited,
+    }
+    _users(geolens, _user(NEW, "newbie", ["editor"]))
+
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 1
+    assert _owner_patches(geolens) == [OPERATOR]
+    [failed] = payload["handover_failed"]
+    assert "changed in GeoLens since the last run" in failed
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == OPERATOR and entry["owner_pending"]
+
+    # Handed to the owner in GeoLens meanwhile: nothing to transfer.
+    geolens.routes[f"GET /datasets/{_created_id(L1)}"] = {
+        **_dataset(_created_id(L1), NEW),
+        **edited,
+    }
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR]
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == NEW and entry["owner_pending"] is None
+
+
+@pytest.mark.parametrize(
+    ("owner", "reason"),
+    [
+        ("", "its plan owner is empty"),
+        ("nobody", "its plan owner nobody is not a GeoLens user"),
+        ("alice@example.org", "matches more than one GeoLens user"),
+    ],
+)
+def test_a_migrated_item_whose_plan_owner_no_longer_resolves_is_reported(
+    runner, tmp_path, geolens, handled, owner, reason
+):
+    _allow_transfers(geolens, _created_id(L1))
+    _users(geolens, _user(NEW, "alice@example.org", ["editor"]))
+    _write_state(
+        tmp_path,
+        {L1: {"status": "done", "dataset_ids": [_created_id(L1)], "owner_id": ALICE}},
+    )
+
+    result, payload = _run(
+        runner, tmp_path, _plan([_item(L1, target_owner=owner)]), "--cutover"
+    )
+
+    [unresolved] = payload["owner_unresolved"]
+    assert unresolved["item"] == L1 and reason in unresolved["reason"]
+    assert "unresolved-users" in payload["cutover"]["refused"]
+    assert _owner_patches(geolens) == []
+
+
+def test_cutover_refuses_an_item_still_waiting_for_its_owner(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+
+    result, payload = _run(
+        runner, tmp_path, plan, "--unmapped-owner", "operator", "--cutover"
+    )
+
+    assert result.exit_code == 1
+    assert "unresolved-users" in payload["cutover"]["refused"]
+    [check] = [
+        c for c in payload["cutover"]["checks"] if c["check"] == "unresolved-users"
+    ]
+    assert check["items"] == [
+        {"item": L1, "reason": "newbie is not a GeoLens user yet"}
+    ]
 
 
 def test_an_unusable_unmapped_owner_is_refused(runner, tmp_path, geolens, handled):

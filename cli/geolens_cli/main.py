@@ -2232,14 +2232,59 @@ def arcgis_migrate(
             help="Most megabytes saved per item in the export folder for items GeoLens can't host",
         ),
     ] = _arcgis_migrate.DEFAULT_CAP_MB,
+    cutover: Annotated[
+        bool,
+        typer.Option(
+            "--cutover",
+            help="Mark this run as the migration's final one; refuses while anything "
+            "the plan covers wouldn't carry over, unless that loss is accepted",
+        ),
+    ] = False,
+    accept_unfinished_items: Annotated[
+        bool,
+        typer.Option(
+            "--accept-unfinished-items",
+            help="With --cutover, accept items that aren't done or not up to date",
+        ),
+    ] = False,
+    accept_incomplete_inventory: Annotated[
+        bool,
+        typer.Option(
+            "--accept-incomplete-inventory",
+            help="With --cutover, accept a plan not last merged from a complete "
+            "--scope org inventory read by an organization administrator",
+        ),
+    ] = False,
+    accept_attachment_loss: Annotated[
+        bool,
+        typer.Option(
+            "--accept-attachment-loss",
+            help="With --cutover, accept that migrated layers' attachments stay behind",
+        ),
+    ] = False,
+    accept_unresolved_users: Annotated[
+        bool,
+        typer.Option(
+            "--accept-unresolved-users",
+            help="With --cutover, accept items whose plan owner isn't a GeoLens user "
+            "who can take them",
+        ),
+    ] = False,
 ) -> None:
     """Migrate the items of a plan into GeoLens, resuming from the state file.
 
     Needs a GeoLens admin session. Items are imported as you, in depends_on
-    order, then transferred to the owner the plan maps them to. Items that
-    aren't public need an ArcGIS token or a built-in account.
+    order, then transferred to the owner the plan maps them to. A rerun also
+    brings the items migrated before up to date. Items that aren't public need
+    an ArcGIS token or a built-in account.
     """
     state: AppState = ctx.obj
+    accepted = {
+        "unfinished-items": accept_unfinished_items,
+        "incomplete-inventory": accept_incomplete_inventory,
+        "attachment-loss": accept_attachment_loss,
+        "unresolved-users": accept_unresolved_users,
+    }
     options = _arcgis_migrate.MigrateOptions(
         plan_path=plan,
         state_path=state_file,
@@ -2254,6 +2299,8 @@ def arcgis_migrate(
         allow_insecure_http=allow_insecure_http,
         trusted_hosts=trust_service_host or [],
         export_cap_mb=export_cap_mb,
+        cutover=cutover,
+        accept=frozenset(name for name, given in accepted.items() if given),
     )
     code = _arcgis_migrate.run_cli(
         state.output,

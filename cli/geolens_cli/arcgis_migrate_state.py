@@ -100,6 +100,19 @@ class ItemState:
     # attribution, license, source_organization, keywords), so a rerun can tell
     # a field it wrote from one someone edited in GeoLens.
     metadata_baseline: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Dataset -> its GeoLens updated_at and feature count when this command
+    # last left it, so a rerun can tell a change made in GeoLens since.
+    last_update: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Dataset -> the refresh run ({"run": id}) or replacement upload job
+    # ({"job": id}) a run started and has not seen the end of.
+    refreshing: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Imported service layer -> whether the probe reported attachments (None:
+    # it didn't say); None until the service is probed by this version.
+    attachments: dict[str, bool | None] | None = None
+    # Why the item sits with --unmapped-owner instead of its plan owner.
+    owner_pending: str | None = None
+    # Why the last rerun couldn't bring the item up to date.
+    stale: list[str] = field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -130,6 +143,8 @@ class MigrationState:
         # Collection name the plan asked for -> the collection this run made
         # for it, which may carry the portal's name as a prefix.
         self.collections: dict[str, str] = {}
+        # When `migrate --cutover` passed its checks, and the losses accepted.
+        self.cutover: dict[str, Any] | None = None
         self._redact = redact
         self._persist = persist
 
@@ -178,6 +193,9 @@ class MigrationState:
             collections = {
                 str(k): str(v) for k, v in data.get("collections", {}).items()
             }
+            cutover = data.get("cutover")
+            if cutover is not None and not isinstance(cutover, dict):
+                raise ValueError("cutover is not an object")
             recorded_portal = data["portal_url"]
             recorded_instance = data["geolens_instance"]
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -197,6 +215,7 @@ class MigrationState:
             )
         state.items = items
         state.collections = collections
+        state.cutover = cutover
         return state
 
     def _lock(self) -> None:
@@ -249,6 +268,7 @@ class MigrationState:
             "portal_url": self.portal_url,
             "geolens_instance": self.instance,
             "collections": self.collections,
+            "cutover": self.cutover,
             "items": {k: vars(v) for k, v in self.items.items()},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
