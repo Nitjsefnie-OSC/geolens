@@ -2,6 +2,7 @@
 
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import structlog
@@ -19,6 +20,7 @@ from app.modules.auth.models import ApiKey, Role, User, UserRole
 from app.modules.auth.oauth.models import OAuthAccount, OAuthProvider
 from app.modules.auth.providers.local import hash_password_async
 from app.modules.auth.service import AuthService
+from app.modules.catalog.group_access import reactivate_member_access
 from app.core.identity import Identity
 from app.core.text import escape_ilike
 from app.platform.catalog_locks import (
@@ -316,6 +318,11 @@ class AdminService:
         await self.db.refresh(user)
         return user
 
+    async def _set_status(self, user: User, status: str) -> None:
+        user.status = status
+        user.is_active = status == "active"
+        await self.db.flush()
+
     async def reset_user_password(self, user_id: uuid.UUID, password: str) -> User:
         """Set another account's password, revoking its credentials.
 
@@ -404,10 +411,12 @@ class AdminService:
             user.email = email
 
         if target_status is not None:
+            set_status = partial(self._set_status, user, target_status)
             if target_status != "active":
                 await bump_publication_versions_for_member(self.db, user_id)
-            user.status = target_status
-            user.is_active = target_status == "active"
+                await set_status()
+            elif user.status != "active" or not user.is_active:
+                await reactivate_member_access(self.db, user_id, set_status)
 
         if updates.role is not None:
             await self._update_user_role(
@@ -713,8 +722,9 @@ class AdminService:
                 "Pending user approval is no longer available"
             )
 
-        user.status = "active"
-        user.is_active = True
+        await reactivate_member_access(
+            self.db, user.id, partial(self._set_status, user, "active")
+        )
 
         # Approval assigns the account's authority, so bump key_epoch: a key
         # that existed while pending (legacy/manual rows) must not wake up with

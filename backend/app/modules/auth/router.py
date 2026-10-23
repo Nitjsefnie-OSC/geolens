@@ -751,16 +751,28 @@ async def verify_email(
     # user through (redeem_verification_token already flipped email_verified).
     # Only accounts still PENDING: an admin may have suspended the account
     # within the token's validity window, and the link must NOT undo that.
-    activated = await db.scalar(
-        update(User)
-        .where(
-            User.id == user_id,
-            User.status == "pending",
-            User.is_active.is_(False),
+    async def activate() -> uuid.UUID | None:
+        return await db.scalar(
+            update(User)
+            .where(
+                User.id == user_id,
+                User.status == "pending",
+                User.is_active.is_(False),
+            )
+            .values(is_active=True, status="active", key_epoch=User.key_epoch + 1)
+            .returning(User.id)
         )
-        .values(is_active=True, status="active", key_epoch=User.key_epoch + 1)
-        .returning(User.id)
-    )
+
+    from app.modules.catalog.group_access import reactivate_member_access
+
+    try:
+        activated = await reactivate_member_access(db, user_id, activate)
+    except HTTPException as exc:
+        # The refusal names datasets; this caller is not signed in.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account can't be activated yet. Contact an administrator.",
+        ) from exc
     if activated is not None:
         await _grant_registration_role(db, user_id)
 

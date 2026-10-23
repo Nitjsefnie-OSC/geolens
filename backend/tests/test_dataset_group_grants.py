@@ -15,6 +15,7 @@ from app.modules.catalog.datasets.domain.models import (
     Record,
 )
 from app.modules.catalog.maps.models import Map, MapLayer
+from app.modules.auth.verification import issue_verification_token
 from tests.factories import create_user, get_user_id
 from tests.test_tile_signature_revocation_1963 import _evict_tile_meta, _make_vector
 from tests.test_vrt_member_audience import _servable_vrt
@@ -308,27 +309,35 @@ async def test_removing_a_member_with_their_own_vrt_over_a_granted_source(
     assert tiles.status_code == 409, tiles.text
 
 
-async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(
-    client: AsyncClient, admin_auth_header: dict, test_db_session
-):
-    """The VRT's group reaches past the group its source is shared with, so a
-    new member would see the source's pixels through the mosaic."""
-    _, owner_id = await create_user(client, admin_auth_header, "editor")
-    _, joiner_id = await create_user(client, admin_auth_header, "viewer")
+async def _group_granting_a_vrt_past_its_source(
+    client: AsyncClient, admin: dict, session
+) -> str:
+    """A group granted a VRT but not its source, which only another group's
+    members (the VRT's owner) can read: any new active member makes the VRT
+    reach past its source."""
+    _, owner_id = await create_user(client, admin, "editor")
     source = await _create_raster_dataset(
-        test_db_session,
-        created_by=await get_user_id(test_db_session, "admin"),
+        session,
+        created_by=await get_user_id(session, "admin"),
         visibility="restricted",
     )
     vrt = await _create_vrt_dataset(
-        test_db_session, created_by=uuid.UUID(owner_id), visibility="restricted"
+        session, created_by=uuid.UUID(owner_id), visibility="restricted"
     )
-    await _link_source(test_db_session, vrt, source, 0)
-    await _grant(
-        test_db_session, source, await _new_group(client, admin_auth_header, [owner_id])
+    await _link_source(session, vrt, source, 0)
+    await _grant(session, source, await _new_group(client, admin, [owner_id]))
+    group_id = await _new_group(client, admin, [])
+    await _grant(session, vrt, group_id)
+    return group_id
+
+
+async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(
+    client: AsyncClient, admin_auth_header: dict, test_db_session
+):
+    _, joiner_id = await create_user(client, admin_auth_header, "viewer")
+    group_id = await _group_granting_a_vrt_past_its_source(
+        client, admin_auth_header, test_db_session
     )
-    group_id = await _new_group(client, admin_auth_header, [])
-    await _grant(test_db_session, vrt, group_id)
 
     added = await client.post(
         f"/admin/groups/{group_id}/members/",
@@ -341,3 +350,52 @@ async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(
         f"/admin/groups/{group_id}/members/", headers=admin_auth_header
     )
     assert members.json()["total"] == 0
+
+
+async def _activate(client, admin, session, path: str, user_id: str):
+    url = f"/admin/users/{user_id}"
+    if path == "patch":
+        return await client.patch(url, json={"status": "active"}, headers=admin)
+    if path == "legacy_patch":
+        return await client.patch(url, json={"is_active": True}, headers=admin)
+    if path == "approve":
+        return await client.post(
+            f"{url}/approve/", json={"role": "viewer"}, headers=admin
+        )
+    token = await issue_verification_token(session, uuid.UUID(user_id))
+    await session.commit()
+    return await client.post("/auth/verify-email", json={"token": token})
+
+
+@pytest.mark.parametrize("path", ["patch", "legacy_patch", "approve", "verify"])
+async def test_activating_a_member_a_vrt_would_reach_past_a_source_is_refused(
+    client: AsyncClient, admin_auth_header: dict, test_db_session, path: str
+):
+    """An inactive account counts in no audience, so it can join the group;
+    becoming active is the widening and is refused as adding it would be."""
+    _, user_id = await create_user(client, admin_auth_header, "viewer")
+    pending = path in ("approve", "verify")
+    await test_db_session.execute(
+        text("UPDATE catalog.users SET status = :s, is_active = false WHERE id = :id"),
+        {"s": "pending" if pending else "deactivated", "id": user_id},
+    )
+    await test_db_session.commit()
+    group_id = await _group_granting_a_vrt_past_its_source(
+        client, admin_auth_header, test_db_session
+    )
+    added = await client.post(
+        f"/admin/groups/{group_id}/members/",
+        json={"user_ids": [user_id]},
+        headers=admin_auth_header,
+    )
+    assert added.status_code == 200, added.text
+
+    activated = await _activate(
+        client, admin_auth_header, test_db_session, path, user_id
+    )
+
+    assert activated.status_code == (409 if path == "verify" else 422), activated.text
+    status_now = await test_db_session.scalar(
+        text("SELECT status FROM catalog.users WHERE id = :id"), {"id": user_id}
+    )
+    assert status_now == ("pending" if pending else "deactivated")

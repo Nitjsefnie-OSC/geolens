@@ -2,8 +2,9 @@
 
 Adding or removing a member, or deleting a group, changes the audience of
 every dataset granted to the group without writing the dataset. Outstanding
-tile signatures are retired either way. A widening may not let a VRT newly
-reach past one of its members; a narrowing is a revocation and is never
+tile signatures are retired either way. A widening, which includes a
+member's account becoming active again, may not let a VRT newly reach past
+one of its members; a narrowing is a revocation and is never
 refused, so a VRT it leaves reaching past a member stops serving tiles and a
 map stops showing the layer to whoever lost it.
 """
@@ -18,7 +19,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.auth.models import Group
+from app.modules.auth.models import Group, GroupMember
 from app.modules.catalog.authorization import vrt_links_beyond_audience
 from app.modules.catalog.datasets.domain.models import DatasetGroupGrant
 from app.platform.catalog_locks import bump_publication_versions
@@ -50,22 +51,61 @@ async def change_group_access(
     if not granted:
         return await change()
 
-    exceeded_before = {} if narrowing else await vrt_links_beyond_audience(db, granted)
-    result = await change()
-    if not narrowing:
-        exceeded_after = await vrt_links_beyond_audience(db, granted)
-        newly = sorted(
-            {
-                title
-                for pair, title in exceeded_after.items()
-                if pair not in exceeded_before
-            }
-        )
-        if newly:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="This change would let VRTs reach people who cannot see "
-                f"all of their source datasets: {', '.join(newly)}",
-            )
+    if narrowing:
+        result = await change()
+    else:
+        result = await _admit_widening(db, granted, change)
     await bump_publication_versions(db, granted)
+    return result
+
+
+async def reactivate_member_access(
+    db: AsyncSession, user_id: uuid.UUID, change: Callable[[], Awaitable[T]]
+) -> T:
+    """Run ``change``, which makes ``user_id`` an active account again and
+    flushes, and return its result.
+
+    An inactive account is outside every audience, so its return widens each
+    of its groups as adding it would, and gets the same 422. Does not commit.
+    """
+    group_ids = list(
+        await db.scalars(
+            select(Group.id)
+            .join(GroupMember, GroupMember.group_id == Group.id)
+            .where(GroupMember.user_id == user_id)
+            .order_by(Group.id)
+            .with_for_update(of=Group)
+        )
+    )
+    granted = list(
+        await db.scalars(
+            select(DatasetGroupGrant.dataset_id)
+            .where(DatasetGroupGrant.group_id.in_(group_ids))
+            .distinct()
+        )
+    )
+    if not granted:
+        return await change()
+    return await _admit_widening(db, granted, change)
+
+
+async def _admit_widening(
+    db: AsyncSession,
+    granted: list[uuid.UUID],
+    change: Callable[[], Awaitable[T]],
+) -> T:
+    """Run ``change``; raise 422 if it makes a VRT linked to ``granted`` newly
+    reach past one of its members."""
+    exceeded_before = await vrt_links_beyond_audience(db, granted)
+    result = await change()
+    exceeded_after = await vrt_links_beyond_audience(db, granted)
+    newly = sorted(
+        {title for pair, title in exceeded_after.items() if pair not in exceeded_before}
+    )
+    if newly:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="This change would let VRTs reach people who cannot see "
+            f"all of their source datasets: {', '.join(newly)}",
+        )
     return result
