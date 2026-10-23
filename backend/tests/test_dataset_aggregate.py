@@ -186,6 +186,24 @@ class TestOperations:
         assert stats.json()["result"]["max"] == "9007199254740993"
         assert stats.json()["result"]["min"] == 3
 
+    async def test_a_numeric_key_longer_than_python_prints_is_returned(
+        self, client: AsyncClient, test_db_session, points
+    ):
+        await test_db_session.execute(
+            text(
+                f"UPDATE data.{points.table_name}"  # noqa: S608
+                " SET big = ('1' || repeat('0', 5000))::numeric WHERE gid = 3"
+            )
+        )
+        await test_db_session.commit()
+
+        resp = await _aggregate(
+            client, points.id, {"op": "stats", "column": "big", "stats": ["max"]}
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["result"]["max"] == "1" + "0" * 5000
+
     async def test_the_live_columns_are_read_once(
         self, client: AsyncClient, points, monkeypatch
     ):

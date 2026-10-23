@@ -440,9 +440,12 @@ def _exact(value: Any) -> Any:
         return value
     if not value.is_finite():
         return str(value)
-    if value == value.to_integral_value():
-        integer = int(value)
-        return integer if abs(integer) < _JS_SAFE_INTEGER else str(integer)
+    integral = value.to_integral_value()
+    if value == integral:
+        # format, not str(int(...)): Python refuses int-to-str past 4,300 digits.
+        return (
+            int(integral) if abs(integral) < _JS_SAFE_INTEGER else format(integral, "f")
+        )
     as_float = float(value)
     return as_float if Decimal(repr(as_float)) == value else str(value)
 
