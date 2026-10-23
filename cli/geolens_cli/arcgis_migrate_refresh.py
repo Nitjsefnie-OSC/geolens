@@ -106,20 +106,29 @@ def _operator_wrote_last(ctx: MigrationContext, dataset: Any) -> bool:
 def _find_run(
     ctx: MigrationContext, dataset_id: str, marker: Mapping[str, Any], **kwargs: Any
 ) -> Any | None:
-    """The refresh run *marker* names, by its id or its ingest job."""
+    """The refresh run *marker* names, by its id or its ingest job, looked for
+    through the dataset's whole history, newest first."""
     from geolens.api.datasets import (
         list_dataset_refresh_runs_datasets_dataset_id_refresh_runs_get as list_runs,
     )
 
-    page = ctx.geolens.call(
-        list_runs.sync_detailed, dataset_id=UUID(dataset_id), limit=RUN_PAGE, **kwargs
-    )
-    for run in page.runs:
-        if str(run.id) == marker.get("run") or (
-            marker.get("job") and str(_value(run.ingest_job_id)) == marker["job"]
-        ):
-            return run
-    return None
+    skip = 0
+    while True:
+        page = ctx.geolens.call(
+            list_runs.sync_detailed,
+            dataset_id=UUID(dataset_id),
+            skip=skip,
+            limit=RUN_PAGE,
+            **kwargs,
+        )
+        for run in page.runs:
+            if str(run.id) == marker.get("run") or (
+                marker.get("job") and str(_value(run.ingest_job_id)) == marker["job"]
+            ):
+                return run
+        skip += len(page.runs)
+        if not page.runs or skip >= page.total:
+            return None
 
 
 def _published_unchanged(

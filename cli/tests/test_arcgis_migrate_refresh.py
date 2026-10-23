@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -70,12 +71,15 @@ class FakeRefresh:
                 lambda seen, d=dataset: self.refresh(d, seen)
             )
             self.fake.routes[f"GET /datasets/{dataset}/refresh-runs"] = (
-                lambda seen, d=dataset: {
-                    "runs": self.runs.get(d, []),
-                    "total": len(self.runs.get(d, [])),
-                }
+                lambda seen, d=dataset: self.history(d, seen)
             )
         return self
+
+    def history(self, dataset: str, seen) -> dict:
+        query = dict(parse_qsl(urlsplit(seen.url).query))
+        skip, limit = int(query.get("skip", 0)), int(query.get("limit", 50))
+        runs = self.runs.get(dataset, [])
+        return {"runs": runs[skip : skip + limit], "total": len(runs)}
 
     def refresh(self, dataset: str, seen):
         self.bodies.append(seen.json())
@@ -333,6 +337,31 @@ def test_a_refresh_still_running_at_the_deadline_is_picked_up_by_the_next_run(
     assert result.exit_code == (0 if adopted else 1), result.output
     if adopted:
         assert _state(plan_file)["items"][A2]["refreshing"] == {}
+
+
+def test_a_refresh_an_earlier_run_left_is_found_behind_newer_runs(
+    runner, plan_file, geolens, monkeypatch
+):
+    monkeypatch.setattr(refresh_mod, "JOB_TIMEOUT", 0.05)
+    monkeypatch.setattr(refresh_mod, "JOB_POLL_INTERVAL", 0.01)
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service, outcome="running").allow(PARCELS)
+    _migrate(runner, plan_file, "--only", A2)
+    [run] = refresh.runs[PARCELS]
+    run.update(status="succeeded", finished_at=LATER)
+    service.fields[PARCELS] = {"updated_at": LATER}
+    newer = [
+        _run(PARCELS, _uuid("6e", f"{n:02d}"), "failed", trigger="scheduled")
+        for n in range(60)
+    ]
+    refresh.runs[PARCELS] = [*newer, run]
+    refresh.outcome = "succeeded"
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert len(refresh.bodies) == 2
+    assert _state(plan_file)["items"][A2]["refreshing"] == {}
 
 
 def test_a_rerun_writes_the_portals_new_item_metadata(runner, tmp_path, geolens):
