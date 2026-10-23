@@ -418,6 +418,28 @@ class TestConcurrency:
         assert third.status_code == 429, third.text
         assert third.json()["detail"]["code"] == "query_busy"
 
+    async def test_planning_that_times_out_is_a_query_timeout(
+        self, client: AsyncClient, points, monkeypatch
+    ):
+        """An exclusive lock on the table makes the planner wait past its timeout."""
+        monkeypatch.setattr(aggregate, "AGGREGATE_TIMEOUT_MS", 200)
+        engine = sqlalchemy.create_engine(settings.test_database_url_sync)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"LOCK TABLE data.{points.table_name} IN ACCESS EXCLUSIVE MODE"
+                    )
+                )
+                resp = await _aggregate(
+                    client, points.id, {"op": "count", "bbox": FIRST_THREE}
+                )
+        finally:
+            engine.dispose()
+
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "query_timeout"
+
 
 class TestCachePolicy:
     async def test_only_an_unfiltered_whole_layer_result_is_kept_long(

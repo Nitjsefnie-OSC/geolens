@@ -20,8 +20,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db.sqlstate import sqlstate
 from app.core.geo import extent_to_span_bbox
 from app.modules.catalog.datasets.domain.column_stats import (
     _NUMERIC_TYPES,
@@ -59,6 +61,7 @@ AGGREGATE_TIMEOUT_MS = 4_000
 _MAX_ITEMS = 50
 # Integers at or past this lose precision as JavaScript numbers.
 _JS_SAFE_INTEGER = 2**53
+_QUERY_CANCELED = "57014"
 # Two widgets of one caller may run at once; a third waits for the client's
 # retry. More would let a few callers hold every slot on a worker.
 _CALLER_CONCURRENCY = 2
@@ -503,6 +506,25 @@ async def _sandboxed(
     return await run(concurrency_key=keys[-1])
 
 
+async def _planned_rows(
+    db: AsyncSession, planned_source: str, bbox: Sequence[float], binds: list[Any]
+) -> int:
+    """The planner's row estimate for a view, under the aggregate timeout."""
+    await db.execute(text(f"SET LOCAL statement_timeout = {AGGREGATE_TIMEOUT_MS}"))
+    try:
+        return await planner_row_estimate(
+            db,
+            planned_source,
+            f"WHERE {_bbox_predicate(bbox, 't')}",
+            {},
+            lambda stmt: stmt.bindparams(*binds) if binds else stmt,
+        )
+    except DBAPIError as exc:
+        if sqlstate(exc) == _QUERY_CANCELED:
+            raise SandboxError("query_timeout", "Query timed out") from exc
+        raise
+
+
 async def _aggregate_rows(
     db: AsyncSession,
     request: AggregateRequest,
@@ -618,16 +640,7 @@ async def run_aggregate(
     async with _aggregate_slots:
         over_estimate = False
         if judge_view:
-            await db.execute(
-                text(f"SET LOCAL statement_timeout = {AGGREGATE_TIMEOUT_MS}")
-            )
-            estimate = await planner_row_estimate(
-                db,
-                planned_source,
-                f"WHERE {_bbox_predicate(bbox, 't')}",
-                {},
-                lambda stmt: stmt.bindparams(*binds) if binds else stmt,
-            )
+            estimate = await _planned_rows(db, planned_source, bbox, binds)
             over_estimate = estimate > MAX_VIEW_ROWS
         # Detached first: the rollback that returns the pooled connection
         # would expire every loaded instance, the caller's user included.
