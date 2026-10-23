@@ -689,42 +689,31 @@ async def test_a_failed_renewal_does_not_break_delivery(monkeypatch, sent):
 async def test_threaded_delivery_keeps_ownership_until_the_send_terminates(
     monkeypatch, fail_after_send
 ):
+    import smtplib
     import threading
 
     from app.core.config import settings
     from app.platform import notifications
     from app.platform.notifications.env_sink import EnvConfiguredNotificationSink
+    from tests.fixtures.smtp_transport import SMTPTransport
 
-    loop = asyncio.get_running_loop()
-    started, second_started = asyncio.Event(), asyncio.Event()
-    finished = asyncio.Queue()
-    release = threading.Event()
-    messages = []
-    attempts = []
+    active = 0
+    overlap = False
+    lock = threading.Lock()
 
-    class _GatedSMTP:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def send_message(self, message):
-            attempts.append(message)
-            loop.call_soon_threadsafe(
-                started.set if len(attempts) == 1 else second_started.set
-            )
-            if not release.wait(3):
-                raise TimeoutError("transport gate was not released")
-            messages.append(message)
-            if fail_after_send:
-                raise ConnectionError("SMTP failed after sending")
-
-        def quit(self):
-            loop.call_soon_threadsafe(finished.put_nowait, None)
+    class TrackedSMTP(smtplib.SMTP):
+        def send_message(self, *args, **kwargs):
+            nonlocal active, overlap
+            with lock:
+                active += 1
+                overlap |= active > 1
+            try:
+                return super().send_message(*args, **kwargs)
+            finally:
+                with lock:
+                    active -= 1
 
     monkeypatch.setattr(settings, "notifications_enabled", True)
-    monkeypatch.setattr(settings, "smtp_host", "unused.invalid")
-    monkeypatch.setattr(settings, "smtp_port", 25)
-    monkeypatch.setattr(settings, "smtp_use_tls", False)
-    monkeypatch.setattr(settings, "smtp_username", None)
     monkeypatch.setattr(settings, "notification_webhook_url", None)
     monkeypatch.setattr(
         notifications,
@@ -732,68 +721,56 @@ async def test_threaded_delivery_keeps_ownership_until_the_send_terminates(
         lambda: [EnvConfiguredNotificationSink()],
     )
     monkeypatch.setattr(events_mod, "notify", notifications.notify)
-    monkeypatch.setattr("smtplib.SMTP", _GatedSMTP)
-    monkeypatch.setattr(health_svc, "HEALTH_ALERT_DELIVERY_TIMEOUT", 0.03)
-    monkeypatch.setattr(health_svc, "HEALTH_ALERT_CLAIM_SECS", 0.09)
-    monkeypatch.setattr(health_svc, "HEALTH_ALERT_RETRY_SECS", 0.03)
+    monkeypatch.setattr(smtplib, "SMTP", TrackedSMTP)
+    monkeypatch.setattr(health_svc, "HEALTH_ALERT_DELIVERY_TIMEOUT", 0.2)
+    monkeypatch.setattr(health_svc, "HEALTH_ALERT_CLAIM_SECS", 0.7)
+    monkeypatch.setattr(health_svc, "HEALTH_ALERT_RETRY_SECS", 0.05)
 
-    first = await health_svc.claim_health_alert(["database"])
-    assert first is not None and first.shared
-    task = asyncio.create_task(
-        health_svc._deliver_health_alert(first.token, True, 0, "database", "degraded")
-    )
-    tasks = [task]
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1)
-        # Pass both the cancellation deadline and the original lease while the
-        # real SMTP worker is still gated: only renewal can retain ownership.
-        await asyncio.sleep(0.2)
-        waiting_for_worker = not task.done()
-        with _replica({}):
-            successor = await health_svc.claim_health_alert(["database"])
-        if successor is not None:
-            tasks.append(
-                asyncio.create_task(
-                    health_svc._deliver_health_alert(
-                        successor.token, True, 0, "database", "degraded"
-                    )
-                )
+    with SMTPTransport(data=True, fail=fail_after_send) as transport:
+        transport.configure(monkeypatch)
+        first = await health_svc.claim_health_alert(["database"])
+        assert first is not None and first.shared
+        task = asyncio.create_task(
+            health_svc._deliver_health_alert(
+                first.token, True, time.monotonic(), "database", "degraded"
             )
-            await asyncio.wait_for(second_started.wait(), timeout=1)
-    finally:
-        release.set()
-        await asyncio.gather(*tasks)
-        for _ in tasks:
-            await asyncio.wait_for(finished.get(), timeout=1)
+        )
+        try:
+            assert await asyncio.to_thread(transport.data.wait, 1)
+            with _replica({}):
+                assert await health_svc.claim_health_alert(["database"]) is None
+            # Pass the original lease while the peer is gated. A hard abort must
+            # have joined the first worker before the next replica can acquire.
+            await asyncio.sleep(0.75)
+            first_finished = task.done()
+            live_before_successor = active
+            with _replica({}):
+                successor = await health_svc.claim_health_alert(["database"])
+            transport.release_data.set()
+            await task
+            assert successor is not None
+            await health_svc._deliver_health_alert(
+                successor.token, True, time.monotonic(), "database", "degraded"
+            )
+        finally:
+            transport.release_data.set()
+            await task
 
-    assert len(messages) == 1, "a successor sent while the first SMTP worker was live"
-    assert waiting_for_worker
-    assert successor is None
-    remaining = get_cache()._store[health_svc._HEALTH_ALERT_KEY][1] - time.monotonic()
-    assert 0 < remaining <= health_svc.HEALTH_ALERT_RETRY_SECS
-    await asyncio.sleep(0.05)
-    with _replica({}):
-        retry = await health_svc.claim_health_alert(["database"])
-    assert retry is not None
-    retry_completed = True
-    try:
-        await health_svc._deliver_health_alert(
-            retry.token, True, 0, "database", "degraded"
+        assert len(transport.messages) == 1
+        assert not overlap, "a successor sent while the first SMTP worker was live"
+        assert first_finished and live_before_successor == 0
+        assert active == 0
+        remaining = (
+            get_cache()._store[health_svc._HEALTH_ALERT_KEY][1] - time.monotonic()
         )
-    except asyncio.CancelledError:
-        retry_completed = False
-    await asyncio.wait_for(finished.get(), timeout=1)
-    assert retry_completed, "a non-cancelled delivery must complete normally"
-    assert len(messages) == 2
-    remaining = get_cache()._store[health_svc._HEALTH_ALERT_KEY][1] - time.monotonic()
-    if fail_after_send:
-        assert 0 < remaining <= health_svc.HEALTH_ALERT_RETRY_SECS
-    else:
-        assert (
-            health_svc.HEALTH_ALERT_COOLDOWN_SECS - 1
-            < remaining
-            <= health_svc.HEALTH_ALERT_COOLDOWN_SECS
-        )
+        if fail_after_send:
+            assert 0 < remaining <= health_svc.HEALTH_ALERT_RETRY_SECS
+        else:
+            assert (
+                health_svc.HEALTH_ALERT_COOLDOWN_SECS - 1
+                < remaining
+                <= health_svc.HEALTH_ALERT_COOLDOWN_SECS
+            )
 
 
 async def test_success_renews_a_redis_claim_with_one_second_left(monkeypatch, sent):
@@ -816,3 +793,61 @@ async def test_success_renews_a_redis_claim_with_one_second_left(monkeypatch, se
         <= ttl
         <= health_svc.HEALTH_ALERT_COOLDOWN_SECS
     )
+
+
+async def test_no_overlapping_send_during_owner_cache_connection_failure(monkeypatch):
+    cache = get_cache()
+    compare_and_set = cache.compare_and_set
+    failed_owner = None
+
+    async def owner_outage(key, expected, value, ttl):
+        nonlocal failed_owner
+        if failed_owner is None:
+            failed_owner = expected
+        if expected == failed_owner:
+            raise ConnectionError("owner connection unavailable")
+        return await compare_and_set(key, expected, value, ttl)
+
+    monkeypatch.setattr(cache, "compare_and_set", owner_outage)
+    await test_threaded_delivery_keeps_ownership_until_the_send_terminates(
+        monkeypatch, False
+    )
+
+
+def test_claim_lease_covers_the_send_deadline_and_abort_cleanup():
+    from app.platform.notifications.smtp_channel import SMTP_ABORT_CLEANUP_SECS
+
+    assert health_svc.HEALTH_ALERT_CLAIM_SECS > (
+        health_svc.HEALTH_ALERT_DELIVERY_TIMEOUT
+        + SMTP_ABORT_CLEANUP_SECS
+        + health_svc.HEALTH_TIMEOUT
+    )
+
+
+async def test_a_background_send_cannot_restart_an_expired_delivery_budget(monkeypatch):
+    from app.core.config import settings
+    from app.platform import notifications
+    from app.platform.notifications.env_sink import EnvConfiguredNotificationSink
+    from tests.fixtures.smtp_transport import SMTPTransport
+
+    monkeypatch.setattr(settings, "notifications_enabled", True)
+    monkeypatch.setattr(settings, "notification_webhook_url", None)
+    monkeypatch.setattr(
+        notifications,
+        "get_notification_sinks",
+        lambda: [EnvConfiguredNotificationSink()],
+    )
+    monkeypatch.setattr(events_mod, "notify", notifications.notify)
+    with SMTPTransport() as transport:
+        transport.configure(monkeypatch)
+        claim = await health_svc.claim_health_alert(["database"])
+        assert claim is not None
+        await health_svc._deliver_health_alert(
+            claim.token,
+            True,
+            time.monotonic() - health_svc.HEALTH_ALERT_DELIVERY_TIMEOUT - 1,
+            "database",
+            "degraded",
+        )
+        assert transport.connections == 0
+        assert not transport.messages
