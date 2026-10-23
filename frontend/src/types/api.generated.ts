@@ -9029,6 +9029,11 @@ export interface components {
              * @description Admin only: transfer the dataset to this active user.
              */
             owner_id?: string | null;
+            /**
+             * Expected Updated At
+             * @description The dataset's `updated_at` the caller read. When set and the dataset has changed since, nothing is written and the answer is 409 with `detail.code` `stale_write`. Omit it to write unconditionally.
+             */
+            expected_updated_at?: string | null;
         };
         /**
          * DatasetRefreshRequest
@@ -9059,6 +9064,11 @@ export interface components {
             accept_blocked_run_id?: string | null;
             /** @description Structured credential for a protected service. Mutually exclusive with the token field. */
             auth?: components["schemas"]["ServiceAuthRequest"] | null;
+            /**
+             * Expected Data Revision
+             * @description The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service refreshes only; 422 for any other origin.
+             */
+            expected_data_revision?: number | null;
         };
         /**
          * DatasetRefreshResponse
@@ -9511,6 +9521,11 @@ export interface components {
             published_at?: string | null;
             /** Updated By */
             updated_by?: string | null;
+            /**
+             * Data Revision
+             * @description Counts writes to the dataset's features and columns. Owner and admin only; null for other readers.
+             */
+            data_revision?: number | null;
             /**
              * Record Type
              * @description Record type: 'vector_dataset' (spatial features), 'raster_dataset' (single COG), 'vrt_dataset' (VRT mosaic), 'table' (non-spatial tabular), 'map' (saved map), 'service' (catalogued remote service), 'collection' (flat dataset group), 'tiles3d_dataset' (3D Tiles tileset), 'pointcloud_dataset' (COPC point cloud).
@@ -11725,6 +11740,11 @@ export interface components {
              * @description Admin only: transfer the map to this active user.
              */
             owner_id: string;
+            /**
+             * Expected Updated At
+             * @description The map's `updated_at` the caller read. When set and the map has changed since, nothing is written and the answer is 409 with `detail.code` `stale_write`. Omit it to write unconditionally.
+             */
+            expected_updated_at?: string | null;
         };
         /** MapResponse */
         MapResponse: {
@@ -13735,6 +13755,11 @@ export interface components {
              * @description The preview's `review_fingerprint`, sent once a person has seen the changes it describes. A file replacement or service re-upload with review reasons publishes only when the worker's own fingerprint matches; otherwise its run ends `blocked`.
              */
             review_fingerprint?: string | null;
+            /**
+             * Expected Data Revision
+             * @description The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only.
+             */
+            expected_data_revision?: number | null;
         };
         /** ReuploadCommitResponse */
         ReuploadCommitResponse: {

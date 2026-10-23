@@ -12,6 +12,7 @@ passes through the redactor. The only host contacted is the plan's portal.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from urllib.parse import quote
 
 from . import arcgis_report as _report
 from .arcgis_migrate_session import ItemFailed, ItemResult, MigrationContext, StopRun
-from .arcgis_migrate_state import FAILED, ItemState, MigrationState
+from .arcgis_migrate_state import FAILED, ItemState, MigrationState, whole_number
 from .arcgis_portal import PortalClient, PortalError, redact_json
 from .arcgis_story_markdown import render_classic, render_storymap
 
@@ -101,6 +102,14 @@ def _private_dirs(path: Path) -> None:
             directory.mkdir(mode=0o700)
 
 
+def _stop_if_token_refused(exc: PortalError) -> None:
+    if exc.http_status in _TOKEN_STATUSES:
+        raise StopRun(
+            f"the portal refused the ArcGIS token ({exc}); it may have "
+            "expired. Rerun with a fresh token to resume."
+        ) from None
+
+
 def _slug(item_type: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", item_type.lower()).strip("-") or "item"
 
@@ -128,11 +137,7 @@ class _Export:
         self._staged = 0
 
     def note_error(self, what: str, exc: PortalError) -> None:
-        if exc.http_status in _TOKEN_STATUSES:
-            raise StopRun(
-                f"the portal refused the ArcGIS token ({exc}); it may have "
-                "expired. Rerun with a fresh token to resume."
-            ) from None
+        _stop_if_token_refused(exc)
         # The status or kind, not the error text, which repeats the request
         # path and with it a resource name.
         message = (
@@ -413,6 +418,94 @@ def export_item(
             shutil.rmtree(build, ignore_errors=True)
 
 
+def _modified(item: Any) -> int | None:
+    return whole_number(item.get("modified") if isinstance(item, dict) else None)
+
+
+def refresh_export(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
+) -> list[str]:
+    """Export a finished item again when the portal changed it since its bundle
+    was written; why the bundle may be out of date.
+
+    A bundle without a recorded change time, from before it was recorded,
+    counts as changed, and so does one missing from its path. A failed export
+    keeps the earlier bundle.
+    """
+    client = ctx.portal.client if ctx.portal is not None else None
+    if client is None:
+        return ["the run can't read this item from the portal to check it for changes"]
+    try:
+        modified = _modified(client.get_json(f"content/items/{item['id']}"))
+    except PortalError as exc:
+        _stop_if_token_refused(exc)
+        return [f"reading the item to check it for changes failed, {exc}"]
+    if modified is None:
+        return [
+            "the portal doesn't say when the item last changed, so its bundle "
+            "may be out of date"
+        ]
+    present = _bundle_in_place(ctx, item, entry)
+    recorded = whole_number((entry.export or {}).get("modified"))
+    if present and recorded is not None and modified <= recorded:
+        return []
+    why = (
+        "changed in the portal since it was exported"
+        if present
+        else "its bundle is missing"
+    )
+    try:
+        result = export_item(ctx, item, entry)
+    except ItemFailed as exc:
+        return [f"{why}, and exporting it again failed: {exc}"]
+    entry.notes = list(result.notes)
+    return []
+
+
+def _bundle_in_place(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
+) -> bool:
+    """Whether the item's bundle is at its path with every file the export
+    recorded, at its recorded size and SHA-256, once what a run killed mid-swap
+    left beside it is put back. A record without its file list or digests,
+    from before they were kept, counts as not in place."""
+    files = (entry.export or {}).get("files")
+    if (
+        ctx.export_dir is None
+        or not _ITEM_ID.fullmatch(item["id"])
+        or not isinstance(files, dict)
+        or not files
+    ):
+        return False
+    folder = ctx.export_dir / _slug(item["type"]) / item["id"]
+    try:
+        _recover_leftovers(folder)
+        return _bundle_files(folder) == files
+    except OSError:
+        return False
+
+
+def _bundle_files(folder: Path) -> dict[str, dict[str, Any]]:
+    """Every file in *folder*, by its path inside it, with its size and
+    SHA-256."""
+    return {
+        path.relative_to(folder).as_posix(): {
+            "size": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for path in folder.rglob("*")
+        if path.is_file()
+    }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _recover_leftovers(folder: Path) -> None:
     """Undo what a run that was killed mid-swap left beside *folder*.
 
@@ -498,6 +591,10 @@ def _export_into(
         "partial": export.partial,
         "errors": [redact_json(e, ctx.redact) for e in export.errors],
         "story": story,
+        # The portal's last change to the item, which a rerun compares.
+        "modified": _modified(full),
+        # What the bundle holds, which a rerun checks before trusting it.
+        "files": _bundle_files(folder) if swapped else {},
     }
     if swapped:
         # Otherwise the earlier bundle stays as it was, and so does its record.

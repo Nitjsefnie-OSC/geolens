@@ -1339,7 +1339,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Refresh strategies share access, admission and dispatch rules at this API
     # boundary, including task-capability selection and accepting a held run
     # by the door it came through, which records the capability it admitted under.
-    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1367,
+    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1384,
     # Config planning, signed dry runs, application and the embedding column
     # rebuild an applied width needs share one import workflow.
     "backend/app/platform/config_ops/service.py": 1465,
@@ -1348,7 +1348,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/platform/jobs/sweep.py": 1802,
     # Refresh admission, claim fencing, terminal transitions and the job-scoped
     # abandoned-run sweep stay domain-neutral.
-    "backend/app/platform/refresh/service.py": 1192,
+    "backend/app/platform/refresh/service.py": 1200,
     # Central settings and boot-validation debt, including the service-credential
     # http allowlist; split by configuration domain before raising further.
     "backend/app/core/config.py": 1503,
@@ -1360,7 +1360,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/processing/embeddings/backfill.py": 909,
     # Reupload preview, compatibility, the file and service review, and staged
     # commit share an endpoint lifecycle and the capability its jobs record.
-    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1673,
+    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1674,
     # VRT creation and regeneration share publication, member and submitter
     # re-authorization and its refusal, owed-object records and superseded-object
     # cleanup.
@@ -1389,7 +1389,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # its catalog writes.
     "backend/app/processing/ingest/tasks_postgis_refresh.py": 696,
     # Dataset request and verification response families share this public contract.
-    "backend/app/modules/catalog/datasets/domain/schemas.py": 1946,
+    "backend/app/modules/catalog/datasets/domain/schemas.py": 1987,
     # Records, datasets and their grant, translation and attribute children map
     # one catalog schema.
     "backend/app/modules/catalog/datasets/domain/models.py": 1003,

@@ -207,11 +207,14 @@ def build_commit_request(
     srid_override: Optional[int],
     expected_origin_kind: Optional[str] = None,
     review_fingerprint: Optional[str] = None,
+    expected_data_revision: Optional[int] = None,
 ) -> Any:
     """Build a ReuploadCommitRequest. No ``token``; replace is file-only.
 
     ``review_fingerprint`` is the preview's, sent only after a person
     confirmed that preview; it acknowledges the reasons the preview listed.
+    ``expected_data_revision`` is the dataset's data revision the caller
+    checked, so an edit after that check stops the replacement for review.
 
     ``expected_origin_kind`` is the origin ``origin_refusal_message``
     above read and allowed, sent back so the commit door can refuse if it is no
@@ -236,6 +239,8 @@ def build_commit_request(
     }
     if review_fingerprint:
         kwargs["review_fingerprint"] = review_fingerprint
+    if expected_data_revision is not None:
+        kwargs["expected_data_revision"] = expected_data_revision
     return _build_model(ReuploadCommitRequest, kwargs, "confirming a reviewed replacement")
 
 

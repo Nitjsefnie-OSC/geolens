@@ -16,18 +16,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from . import arcgis_report as _report
 from ._sdk_helpers import long_request_timeout
+from .arcgis_migrate_export import _modified, _stop_if_token_refused
 from .arcgis_migrate_files import JOB_KEY
 from .arcgis_migrate_session import (
+    GeoLens,
     GeoLensError,
     ItemFailed,
     ItemResult,
     MigrationContext,
     StopRun,
 )
-from .arcgis_migrate_state import DONE, EXISTS, FINISHED, ItemState
+from .arcgis_migrate_state import DONE, EXISTS, FINISHED, ItemState, whole_number
 from .arcgis_portal import PortalError, redact_json, sanitize_url
 
 LOSS_DIRNAME = "webmap-loss"
@@ -153,6 +156,85 @@ def _fetch(ctx: MigrationContext, item_id: str) -> dict[str, Any]:
     return redact_json(data, ctx.redact)
 
 
+def _read_modified(ctx: MigrationContext, item_id: str) -> int | None:
+    """The portal item's modified time, or None when it can't be read."""
+    if ctx.portal is None:
+        return None
+    try:
+        return _modified(ctx.portal.client.get_json(f"content/items/{item_id}"))
+    except PortalError as exc:
+        _stop_if_token_refused(exc)
+        return None
+
+
+def get_map(geolens: GeoLens, map_id: str) -> Any:
+    from geolens.api.maps import get_map_endpoint_maps_map_id_get as get
+
+    return geolens.call(get.sync_detailed, map_id=UUID(map_id))
+
+
+def _map_problem(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
+) -> str | None:
+    """Why the GeoLens map recorded for the item doesn't stand as migrated:
+    gone, unreadable, or with a visibility other than the plan's. A map isn't
+    updated by a rerun, so a difference is reported for the operator."""
+    gone = "the migrated map is gone from GeoLens"
+    if not entry.map_id:
+        return gone
+    try:
+        found = get_map(ctx.geolens, entry.map_id)
+    except ValueError:
+        return gone
+    except GeoLensError as exc:
+        if exc.status == 404:
+            return gone
+        return f"reading the migrated map from GeoLens failed, {exc}"
+    wanted = item["target"]["visibility"]
+    current = getattr(found.visibility, "value", found.visibility)
+    if current != wanted:
+        return (
+            f"the plan gives the web map visibility {wanted} but the GeoLens map "
+            f"is {current}; set it by hand or rerun with the plan matching"
+        )
+    return None
+
+
+def refresh_map(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
+) -> list[str]:
+    """Why a migrated web map may not match its portal item: gone from
+    GeoLens, shared differently than the plan says, changed in the portal
+    since it was read for the import, or with no way to tell. A web map isn't
+    translated again; the operator updates the GeoLens map."""
+    problem = _map_problem(ctx, item, entry)
+    if problem:
+        return [problem]
+    if ctx.portal is None:
+        return [
+            "the run can't read this web map from the portal to check it for changes"
+        ]
+    try:
+        modified = _modified(ctx.portal.client.get_json(f"content/items/{item['id']}"))
+    except PortalError as exc:
+        _stop_if_token_refused(exc)
+        return [f"reading the web map to check it for changes failed, {exc}"]
+    if modified is None:
+        return ["the portal doesn't say when the web map last changed"]
+    recorded = whole_number(entry.portal_modified)
+    if recorded is None:
+        return [
+            "the state doesn't record when the web map was read for its import, so "
+            "a change since can't be ruled out; compare the GeoLens map by hand"
+        ]
+    if modified > recorded:
+        return [
+            "the web map changed in the portal since it was migrated; web maps "
+            "aren't translated again, so update the GeoLens map by hand"
+        ]
+    return []
+
+
 def _write_loss(ctx: MigrationContext, item_id: str, report: Any) -> str:
     if ctx.export_dir is None:
         raise ItemFailed("the run has no folder for the loss report")
@@ -196,6 +278,7 @@ def import_map(
     )
     from geolens.models.map_visibility import check_map_visibility
 
+    modified = _read_modified(ctx, item["id"])
     webmap = _fetch(ctx, item["id"])
     matches = match_datasets(ctx, webmap)
     title = item["target"]["title"] or item["title"]
@@ -220,6 +303,7 @@ def import_map(
         raise ItemFailed(f"the web map import failed, {exc}") from None
 
     entry.map_id = str(result.map_.id)
+    entry.portal_modified = modified
     entry.layer_ids = {
         k: str(v) for k, v in result.layer_ids.additional_properties.items()
     }

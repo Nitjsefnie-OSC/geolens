@@ -75,6 +75,13 @@ def _services(geolens) -> None:
     geolens.routes["PATCH /maps/" + MAP_ID] = lambda seen: _map(
         seen.json().get("owner_id", OPERATOR)
     )
+    geolens.routes["GET /maps/" + MAP_ID] = lambda seen: {
+        **_map(),
+        # The map keeps the visibility its import asked for.
+        "visibility": ([s.json() for s in _sent(geolens)] or [{}])[-1].get(
+            "visibility", "private"
+        ),
+    }
 
 
 def _sent(geolens) -> list[Any]:
@@ -469,3 +476,124 @@ def test_a_null_layer_does_not_end_its_group():
     }
 
     assert match_datasets(ctx, webmap) == {"a": "ds", "b": "ds"}
+
+
+def _only_the_map(path) -> None:
+    plan = json.loads(path.read_text())
+    for item in plan["items"]:
+        if item["id"] != B1:
+            item["action"] = "skip"
+    path.write_text(json.dumps(plan))
+
+
+@pytest.mark.parametrize("change", ["portal", "old_state", None])
+def test_a_migrated_web_map_changed_in_the_portal_is_reported_at_cutover(
+    runner, plan_file, geolens, portal, change
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    _only_the_map(plan_file)
+    token = secrets.token_urlsafe(16)
+    result, _ = _migrate(runner, plan_file, "--token", token)
+    assert result.exit_code == 0, result.output
+    listed = portal.routes[f"content/items/{B1}"]
+    assert _state(plan_file)["items"][B1]["portal_modified"] == listed["modified"]
+    if change == "portal":
+        portal.routes[f"content/items/{B1}"] = {
+            **listed,
+            "modified": listed["modified"] + 60_000,
+        }
+    elif change == "old_state":
+        path = plan_file.parent / "arcgis-migration-state.json"
+        state = json.loads(path.read_text())
+        state["items"][B1]["portal_modified"] = None
+        path.write_text(json.dumps(state))
+
+    result, payload = _migrate(runner, plan_file, "--token", token, "--cutover")
+
+    assert len(_sent(geolens)) == 1
+    if change is None:
+        assert result.exit_code == 0, result.output
+        assert payload["cutover"]["marked"] is True
+        return
+    assert result.exit_code == 1
+    [reason] = payload["not_up_to_date"][B1]
+    assert ("changed in the portal" if change == "portal" else "doesn't record") in (
+        reason
+    )
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+
+
+@pytest.mark.parametrize("gone", ["deleted", "no_id"])
+def test_a_migrated_map_gone_from_geolens_blocks_cutover(
+    runner, plan_file, geolens, gone
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    _only_the_map(plan_file)
+    token = secrets.token_urlsafe(16)
+    _migrate(runner, plan_file, "--token", token)
+    if gone == "deleted":
+        geolens.routes["GET /maps/" + MAP_ID] = (
+            404,
+            {"title": "Not Found", "status": 404, "detail": "Map not found"},
+        )
+    else:
+        path = plan_file.parent / "arcgis-migration-state.json"
+        state = json.loads(path.read_text())
+        state["items"][B1]["map_id"] = None
+        path.write_text(json.dumps(state))
+
+    result, payload = _migrate(runner, plan_file, "--token", token, "--cutover")
+
+    assert result.exit_code == 1
+    assert payload["not_up_to_date"][B1] == ["the migrated map is gone from GeoLens"]
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+
+
+def test_a_migrated_map_shared_differently_than_the_plan_blocks_cutover(
+    runner, plan_file, geolens, portal
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    _only_the_map(plan_file)
+    token = secrets.token_urlsafe(16)
+    _migrate(runner, plan_file, "--token", token)
+    modified = _state(plan_file)["items"][B1]["portal_modified"]
+    plan = json.loads(plan_file.read_text())
+    for item in plan["items"]:
+        if item["id"] == B1:
+            item["target"]["visibility"] = "private"
+    plan_file.write_text(json.dumps(plan))
+    geolens.routes["GET /maps/" + MAP_ID] = {**_map(), "visibility": "public"}
+    before = len(geolens.seen)
+
+    result, payload = _migrate(runner, plan_file, "--token", token, "--cutover")
+
+    assert portal.routes[f"content/items/{B1}"]["modified"] == modified
+    assert result.exit_code == 1
+    assert payload["not_up_to_date"][B1] == [
+        "the plan gives the web map visibility private but the GeoLens map is "
+        "public; set it by hand or rerun with the plan matching"
+    ]
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+    assert not [s for s in geolens.seen[before:] if s.method in ("PATCH", "PUT")]
+
+
+@pytest.mark.parametrize("recorded", [True, "1790000000000", 1.5])
+def test_an_unusable_recorded_map_time_is_reported(
+    runner, plan_file, geolens, portal, recorded
+):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    token = secrets.token_urlsafe(16)
+    _migrate(runner, plan_file, "--only", B1, "--token", token)
+    path = plan_file.parent / "arcgis-migration-state.json"
+    state = json.loads(path.read_text())
+    state["items"][B1]["portal_modified"] = recorded
+    path.write_text(json.dumps(state))
+
+    result, payload = _migrate(runner, plan_file, "--only", B1, "--token", token)
+
+    assert result.exit_code == 1
+    assert "doesn't record" in payload["not_up_to_date"][B1][0]

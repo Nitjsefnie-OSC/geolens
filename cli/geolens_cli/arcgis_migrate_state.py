@@ -19,7 +19,10 @@ from . import arcgis_report as _report
 from .arcgis_portal import Redactor, redact_json
 
 STATE_FILENAME = "arcgis-migration-state.json"
-STATE_VERSION = "1"
+# v2 adds what a rerun compares and waits on; a CLI that reads only v1
+# refuses the file rather than rewriting it without them.
+STATE_VERSION = "2"
+_READABLE_VERSIONS = ("1", STATE_VERSION)
 
 PENDING = "pending"
 RUNNING = "running"
@@ -59,6 +62,21 @@ class StateError(Exception):
     """The state file can't be read, or belongs to another portal."""
 
 
+def whole_number(value: Any) -> int | None:
+    """*value* when it is an int, and not a bool, else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def aware_time(value: Any) -> datetime | None:
+    """*value* as a timezone-aware datetime when it is an ISO time with an
+    offset, else None."""
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return when if when is not None and when.tzinfo is not None else None
+
+
 def _now() -> str:
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
 
@@ -76,6 +94,9 @@ class ItemState:
     # Service layer (its id, or its name) -> the dataset imported from it, so
     # a rerun never imports a layer twice, even after its dataset changed owner.
     layer_datasets: dict[str, str] = field(default_factory=dict)
+    # Datasets GeoLens already held that the import reused, whose owner's
+    # edits from before the migration are taken as they are.
+    reused: list[str] = field(default_factory=list)
     # Layer -> its committed ingest job, until the job yields the dataset.
     layer_jobs: dict[str, str] = field(default_factory=dict)
     # The coordinate columns a CSV's pending upload job is committed with.
@@ -98,6 +119,9 @@ class ItemState:
     loss_report_path: str | None = None
     # A web map's loss payload from the import until its report file is written.
     pending_loss: dict[str, Any] | None = None
+    # The portal item's modified time when a web map was read for its import,
+    # which a rerun compares to report a map changed since.
+    portal_modified: int | None = None
     # Hash of the summary a file written before the baseline wrote; read only
     # when a dataset has no baseline.
     metadata_hash: str | None = None
@@ -105,6 +129,26 @@ class ItemState:
     # attribution, license, source_organization, keywords), so a rerun can tell
     # a field it wrote from one someone edited in GeoLens.
     metadata_baseline: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Dataset -> its GeoLens updated_at, feature count and data revision when
+    # this command last left it, so a rerun can tell a change made since.
+    last_update: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Dataset -> the refresh run ({"run": id}) or replacement upload job
+    # ({"job": id}) a run started, with the data revision it was sent with,
+    # until its outcome is settled.
+    refreshing: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Imported service layer -> whether the probe reported attachments (None:
+    # it didn't say); None until the service is probed by this version.
+    attachments: dict[str, bool | None] | None = None
+    # Why the item sits with --unmapped-owner instead of its plan owner.
+    owner_pending: str | None = None
+    # What of the item GeoLens doesn't import, such as a service's raster
+    # layers; cutover counts each as a loss.
+    left_behind: list[str] = field(default_factory=list)
+    # Dataset -> the visibility this command last gave it, so a rerun can
+    # tell a portal sharing change from an edit made in GeoLens.
+    visibility: dict[str, str] = field(default_factory=dict)
+    # Why the last rerun couldn't bring the item up to date.
+    stale: list[str] = field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -135,6 +179,8 @@ class MigrationState:
         # Collection name the plan asked for -> the collection this run made
         # for it, which may carry the portal's name as a prefix.
         self.collections: dict[str, str] = {}
+        # When `migrate --cutover` passed its checks, and the losses accepted.
+        self.cutover: dict[str, Any] | None = None
         self._redact = redact
         self._persist = persist
 
@@ -174,7 +220,7 @@ class MigrationState:
             ) from None
         try:
             data = json.loads(raw)
-            if data.get("schema_version") != STATE_VERSION:
+            if data.get("schema_version") not in _READABLE_VERSIONS:
                 raise ValueError("unknown schema_version")
             items = {
                 str(item_id): ItemState.from_dict(entry)
@@ -183,6 +229,9 @@ class MigrationState:
             collections = {
                 str(k): str(v) for k, v in data.get("collections", {}).items()
             }
+            cutover = data.get("cutover")
+            if cutover is not None and not isinstance(cutover, dict):
+                raise ValueError("cutover is not an object")
             recorded_portal = data["portal_url"]
             recorded_instance = data["geolens_instance"]
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -202,6 +251,7 @@ class MigrationState:
             )
         state.items = items
         state.collections = collections
+        state.cutover = cutover
         return state
 
     def _lock(self) -> None:
@@ -254,6 +304,7 @@ class MigrationState:
             "portal_url": self.portal_url,
             "geolens_instance": self.instance,
             "collections": self.collections,
+            "cutover": self.cutover,
             "items": {k: vars(v) for k, v in self.items.items()},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)

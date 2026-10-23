@@ -77,6 +77,7 @@ from app.platform.http.ranges import if_none_match_matches
 from app.platform.cache.tiles import invalidate_catalog_cache
 from app.modules.catalog.collections.service import get_dataset_collections
 from app.modules.catalog.features.service import lock_catalog_rows_for_write
+from app.modules.catalog.write_recheck import refuse_stale_write
 from app.modules.catalog.ownership import (
     require_transfer_admin,
     transfer_dataset_owner,
@@ -357,6 +358,16 @@ async def get_quicklook(
     return Response(content=data, media_type="image/png", headers=headers)
 
 
+async def _refuse_stale_write(
+    db: AsyncSession, dataset, meta: DatasetMetaUpdate
+) -> None:
+    await lock_catalog_rows_for_write(
+        db, dataset, with_raster_asset="is_dem" in meta.model_fields_set
+    )
+    await db.refresh(dataset.record, ["updated_at"])
+    refuse_stale_write(dataset.record.updated_at, meta.expected_updated_at)
+
+
 @router.patch("/{dataset_id}", response_model=DatasetResponse)
 async def update_dataset_metadata(
     dataset_id: uuid.UUID,
@@ -396,6 +407,9 @@ async def update_dataset_metadata(
     tile_columns_before = (
         list(dataset.tile_columns) if dataset.tile_columns is not None else None
     )
+
+    if meta.expected_updated_at is not None:
+        await _refuse_stale_write(db, dataset, meta)
 
     if owner_id is not None:
         # Before the metadata update, so its visibility and audience checks
@@ -445,7 +459,7 @@ async def update_dataset_metadata(
         )
     # A transfer has its own audit row, so a body naming only owner_id is
     # not also a metadata edit.
-    if meta.model_fields_set != {"owner_id"}:
+    if meta.model_fields_set - {"expected_updated_at"} != {"owner_id"}:
         await audit_emit(
             db,
             AuditEvent(
@@ -458,7 +472,9 @@ async def update_dataset_metadata(
                 # serialized with stdlib json.dumps, which cannot take the
                 # vintage dates and would roll back the UPDATE at flush.
                 details=meta.model_dump(
-                    mode="json", exclude_unset=True, exclude={"owner_id"}
+                    mode="json",
+                    exclude_unset=True,
+                    exclude={"owner_id", "expected_updated_at"},
                 ),
                 ip_address=request.client.host if request.client else None,
             ),

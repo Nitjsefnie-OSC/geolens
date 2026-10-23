@@ -1207,6 +1207,7 @@ async def reupload_commit(
             ingest_job_id=job.id,
             feature_count_before=dataset.feature_count,
             data_revision_baseline=start_revision,
+            expected_data_revision=request.expected_data_revision,
         )
     except DatasetBusyError as exc:
         # Nothing this request wrote is committed, so the job row it merged

@@ -25,11 +25,14 @@ from .arcgis_migrate_session import (
     ItemResult,
     MigrationContext,
     StopRun,
+    changed_before_handover,
+    operator_or_nobody_wrote_last,
 )
 from .arcgis_migrate_state import DONE, EXISTS, ItemState
 
 # ArcGIS sub-layer types that hold features GeoLens can import.
 IMPORTABLE_LAYER_TYPES = frozenset({"Feature Layer", "Table"})
+GROUP_LAYER = "Group Layer"
 MAX_TITLE = 500
 JOB_POLL_INTERVAL = 5.0
 JOB_TIMEOUT = 3600.0
@@ -149,6 +152,34 @@ def _layer_label(layer: Any) -> str:
     return title if isinstance(title, str) and title else str(layer.name)
 
 
+def attachment_flags(layers: Any) -> dict[str, bool | None]:
+    """Probed layer -> whether it has attachments, None where the service
+    doesn't say."""
+    flags: dict[str, bool | None] = {}
+    for layer in layers:
+        value = getattr(layer, "has_attachments", None)
+        flags[_layer_key(layer)] = value if isinstance(value, bool) else None
+    return flags
+
+
+def importable_layers(probe: Any) -> tuple[list[Any], list[str], list[str]]:
+    """The probed layers to import, a note for each one left out, and those of
+    the notes that are data left behind: every left-out layer but a group
+    layer, which holds no data of its own."""
+    layers = list(probe.layers)
+    selected = probe.selected_layer_id
+    if isinstance(selected, int | str):
+        layers = [layer for layer in layers if str(layer.layer_id) == str(selected)]
+    reasons = [(layer, _importable(layer)) for layer in layers]
+    notes = [reason for _layer, reason in reasons if reason]
+    lost = [
+        reason
+        for layer, reason in reasons
+        if reason and getattr(layer, "source_layer_type", None) != GROUP_LAYER
+    ]
+    return [layer for layer, reason in reasons if reason is None], notes, lost
+
+
 def _titles(base: str, layers: list[Any]) -> list[str]:
     """The dataset title for each of a service's layers, in order.
 
@@ -265,7 +296,7 @@ def _import_layer(
         del entry.layer_jobs[key]
         if dataset is not None:
             # The commit that made it may predate an edit of the plan.
-            _apply_target(ctx, dataset, title_visibility)
+            _apply_target(ctx, entry, dataset, title_visibility)
             entry.layer_datasets[key] = dataset
             return False
         ctx.save()
@@ -287,7 +318,9 @@ def _import_layer(
         existing = _existing_dataset(exc)
         if existing is None:
             raise ItemFailed(f"{title}: preview failed, {exc}") from None
-        _apply_target(ctx, existing, title_visibility)
+        if existing not in entry.reused:
+            entry.reused.append(existing)
+        _apply_target(ctx, entry, existing, title_visibility)
         entry.layer_datasets[key] = existing
         return True
     # Recorded before the commit is sent: if its answer is lost, a rerun
@@ -307,19 +340,38 @@ def _commit_body(title: str, visibility: str) -> Any:
     return CommitRequest(title=title, visibility=visibility)
 
 
-def _apply_target(ctx: MigrationContext, dataset: str, target: Any) -> None:
+def _apply_target(
+    ctx: MigrationContext, entry: ItemState, dataset: str, target: Any
+) -> None:
     """Give a dataset GeoLens already held the plan's title and visibility,
-    which a fresh import would have received at commit."""
+    which a fresh import would have received at commit. A dataset an earlier
+    attempt handed to its owner, which has a recorded last update, is left.
+
+    One this command imported is refused when somebody else wrote it last, so
+    this write doesn't make their edit the operator's. A reused dataset
+    predates the migration, and its owner's edits are taken as they are.
+    """
+    if dataset in entry.last_update:
+        return
+    from geolens.api.datasets import get_single_dataset_datasets_dataset_id_get as get
     from geolens.api.datasets import (
         update_dataset_metadata_datasets_dataset_id_patch as patch_dataset,
     )
     from geolens.models.dataset_meta import DatasetMeta
 
     try:
-        ctx.geolens.call(
+        read = ctx.geolens.call(get.sync_detailed, dataset_id=UUID(dataset))
+        if dataset not in entry.reused and not operator_or_nobody_wrote_last(ctx, read):
+            raise changed_before_handover(dataset)
+        ctx.geolens.write(
             patch_dataset.sync_detailed,
+            during=f"the plan's title and visibility were written to dataset {dataset}",
             dataset_id=UUID(dataset),
-            body=DatasetMeta(title=target.title, visibility=target.visibility),
+            body=DatasetMeta(
+                title=target.title,
+                visibility=target.visibility,
+                expected_updated_at=read.updated_at,
+            ),
         )
     except GeoLensError as exc:
         raise ItemFailed(
@@ -413,15 +465,10 @@ def import_layers(
         entry.layer_jobs.clear()
         entry.dataset_ids.clear()
     entry.service_url = row["url"]
-    layers = list(probe.layers)
-    selected = probe.selected_layer_id
-    if isinstance(selected, int | str):
-        layers = [layer for layer in layers if str(layer.layer_id) == str(selected)]
-    reasons = [(layer, _importable(layer)) for layer in layers]
-    notes = [reason for _layer, reason in reasons if reason]
-    wanted = [layer for layer, reason in reasons if reason is None]
+    wanted, notes, entry.left_behind = importable_layers(probe)
+    entry.attachments = attachment_flags(wanted)
     if not wanted:
-        # Done rather than skipped, so a rerun doesn't probe it again.
+        # Done rather than skipped: a rerun's probe reports a layer added later.
         return ItemResult(notes=[*notes, "the service has no layer to import"])
 
     base = item["target"]["title"] or item["title"]
@@ -432,7 +479,7 @@ def import_layers(
         if pinned:
             # The plan may have been edited since that layer was imported.
             target = _commit_body(title, item["target"]["visibility"])
-            _apply_target(ctx, pinned, target)
+            _apply_target(ctx, entry, pinned, target)
             continue
         found += _import_layer(
             ctx, row, probe, layer, title, item["target"]["visibility"], entry

@@ -42,9 +42,39 @@ and releases use semantic versioning.
   the plan. Plans now use schema v2, which records each item's defaults;
   `migrate` reads v1 and v2 plans, but a reader that validates against the v1
   schema rejects a v2 plan.
+- A rerun of `geolens arcgis migrate` now brings the items it migrated before
+  up to date: it refreshes each service item's datasets with the run's ArcGIS
+  credential, downloads each data file again and replaces its datasets,
+  exports an archive-only item again when the portal changed it, and writes
+  the item metadata again. A refresh that stops for review is reported
+  with the command that accepts it and is never accepted for you. A dataset
+  changed in GeoLens since the last run is reported and left alone, and each
+  request carries the data revision the CLI recorded. Private items need an
+  ArcGIS credential on every rerun, and the run exits 1 while any migrated
+  item isn't up to date. Its state file is now version 2, which an earlier CLI
+  refuses to read.
+- `GET /datasets/{id}` returns `data_revision` to the dataset's owner and
+  admins (null for other readers). It counts writes to the dataset's features
+  and columns. `POST /datasets/{id}/refresh` (service datasets) and
+  `POST /datasets/{id}/reupload/{job_id}/commit` take an optional
+  `expected_data_revision`; when it isn't the revision the run compares with,
+  the run stops for review with `live_data_changed` instead of publishing. A
+  refresh of anything but a service dataset answers 422 when it is set, and it
+  can't be combined with `accept_blocked_run_id`.
+- With `--unmapped-owner`, an item whose plan owner isn't a GeoLens user yet,
+  is inactive or has a role that can't receive it goes to that owner for now
+  instead of stopping the run, and a later run hands it over. A name that
+  matches no user was refused before.
 
 ### Added
 
+- `geolens arcgis migrate --cutover` marks the final run of a migration. It
+  refuses while plan items aren't done or up to date, while the plan wasn't
+  last merged from a complete `--scope org` inventory read by an organization
+  administrator, while a migrated layer has (or may have) attachments, and
+  while an item's owner doesn't resolve, unless each loss is accepted with
+  `--accept-unfinished-items`, `--accept-incomplete-inventory`,
+  `--accept-attachment-loss` or `--accept-unresolved-users`.
 - A vector dataset's OGC collection document (`GET /collections/{id}`) now has a
   `rel: "tiles"` link to its vector tile template, with `type`
   `application/vnd.mapbox-vector-tile` and `templated: true`. The tile token

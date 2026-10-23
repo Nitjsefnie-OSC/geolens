@@ -18,8 +18,10 @@ import heapq
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import click
 import typer
@@ -40,12 +42,23 @@ from .arcgis_migrate_export import (
     DEFAULT_CAP_MB,
     EXPORT_DIRNAME,
     export_item,
+    refresh_export,
     write_index,
 )
+from .arcgis_migrate_cutover import failing_checks, inventory_changes
 from .arcgis_migrate_report import build_run_report, write_run_report
 from .arcgis_migrate_files import FILE_TYPES, import_file
 from .arcgis_migrate_layers import import_layers
-from .arcgis_migrate_webmaps import import_map
+from .arcgis_migrate_refresh import (
+    Refresher,
+    changed_in_geolens,
+    get_dataset,
+    record,
+    refresh_file,
+    refresh_layers,
+    snapshot,
+)
+from .arcgis_migrate_webmaps import get_map, import_map, refresh_map
 from .arcgis_migrate_session import (
     GeoLens,
     GeoLensError,
@@ -54,6 +67,8 @@ from .arcgis_migrate_session import (
     MigrationContext,
     PortalAuth,
     StopRun,
+    changed_before_handover,
+    operator_or_nobody_wrote_last,
 )
 from .arcgis_migrate_state import (
     FAILED,
@@ -63,6 +78,7 @@ from .arcgis_migrate_state import (
     ItemState,
     MigrationState,
     StateError,
+    _now,
     release_locks,
 )
 from .publish import _web_origin
@@ -97,6 +113,7 @@ _PORTAL_EXIT = {
     "redirect": EXIT_USAGE,
 }
 EXIT_INTERRUPTED = 130
+CUTOVER_LINES = 10
 # Actions that read the inventory and, for a non-public item, the portal.
 _PORTAL_ACTIONS = (
     _plan.IMPORT_LAYERS,
@@ -118,6 +135,13 @@ HANDLERS: dict[str, Handler] = {
     _plan.IMPORT_FILE: import_file,
     _plan.EXPORT_ONLY: export_item,
     _plan.IMPORT_MAP: import_map,
+}
+# Action -> how a rerun brings a finished item of it up to date.
+REFRESHERS: dict[str, Refresher] = {
+    _plan.IMPORT_LAYERS: refresh_layers,
+    _plan.IMPORT_FILE: refresh_file,
+    _plan.EXPORT_ONLY: refresh_export,
+    _plan.IMPORT_MAP: refresh_map,
 }
 
 
@@ -142,6 +166,9 @@ class MigrateOptions:
     allow_insecure_http: bool = False
     trusted_hosts: list[str] = field(default_factory=list)
     export_cap_mb: int = DEFAULT_CAP_MB
+    cutover: bool = False
+    # The cutover checks whose loss the operator accepts (CHECKS names).
+    accept: frozenset[str] = frozenset()
 
 
 def order_items(items: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -233,6 +260,21 @@ def select_items(
         item
         for item in ordered
         if item["id"] in wanted and _needs_run(item, state.status(item["id"]), no_retry)
+    ]
+
+
+def select_refresh(
+    plan: Mapping[str, Any], state: MigrationState, only: list[str]
+) -> list[Mapping[str, Any]]:
+    """The finished plan items this run brings up to date, in plan order."""
+    return [
+        item
+        for item in plan["items"]
+        if item["action"] in REFRESHERS
+        and not item.get("removed")
+        and not item.get("unlisted")
+        and state.status(item["id"]) in FINISHED
+        and (not only or item["id"] in only)
     ]
 
 
@@ -336,6 +378,32 @@ class Owners:
     changed: list[dict[str, str]]
     roles_checked: bool
     warnings: list[str]
+    # Item -> why it goes to, or stays with, --unmapped-owner for now.
+    pending: dict[str, str] = field(default_factory=dict)
+    # Finished items whose plan owner doesn't name one GeoLens user.
+    unresolved: list[dict[str, str]] = field(default_factory=list)
+    # Finished items that wait for their owner, and who to hand some to now.
+    waiting: list[str] = field(default_factory=list)
+    handovers: dict[str, Owner] = field(default_factory=dict)
+
+
+def _pending_reason(
+    directory: _Directory, item: Mapping[str, Any], name: str, user: Any | None
+) -> str | None:
+    """Why *item* can't go to *user*, the GeoLens user its plan owner *name*
+    names, or None."""
+    if name and user is None:
+        return f"{name} is not a GeoLens user yet"
+    if user is None:
+        return f"ArcGIS user {item['owner']} has no GeoLens owner in owner_map"
+    return directory.inactive(user)
+
+
+def _promotion(directory: _Directory, user: Any, permission: str) -> str | None:
+    grant = directory.missing_grant(user, permission)
+    if grant is None:
+        return None
+    return f"{grant}; promote {user.username} to editor in GeoLens to hand it over"
 
 
 def resolve_owners(
@@ -347,21 +415,19 @@ def resolve_owners(
 ) -> Owners:
     """The GeoLens owner of every importing item, or a ``UsageError``.
 
-    An empty mapping or an inactive owner falls back to *unmapped_owner* when
-    it is given. A name that matches no GeoLens user is always refused, since
-    it is most likely a typo. An owner whose roles don't grant the permission
-    the transfer needs is kept with a warning: the server has the last word,
-    and a refused transfer fails only that item.
+    An item whose plan owner is empty, not a GeoLens user yet, inactive or,
+    when the role matrix is known, without the permission the transfer needs
+    goes to *unmapped_owner* for now and is recorded as pending, so a later
+    run hands it over. Without *unmapped_owner* those are refused, except a
+    missing permission, which is a warning: the server has the last word, and
+    a refused transfer fails only that item.
     """
     directory = _Directory(_list_users(geolens), _role_permissions(geolens))
     fallback = directory.find(unmapped_owner) if unmapped_owner else None
     problems: set[str] = set()
     if unmapped_owner and fallback is None:
         problems.add(f"--unmapped-owner {unmapped_owner} is not a GeoLens user")
-
-    by_item: dict[str, Owner] = {}
-    reassigned: list[str] = []
-    warnings: list[str] = []
+    owners = Owners({}, [], [], directory.roles is not None, [])
     for item in to_run:
         permission = TRANSFER_PERMISSION.get(item["action"])
         # An unlisted item is left pending without an import, so it needs no owner.
@@ -369,13 +435,12 @@ def resolve_owners(
             continue
         name = _target_name(item, plan)
         user = directory.find(name) if name else None
-        if name and user is None:
+        if name and user is None and fallback is None:
             problems.add(f"{name} (owner of {item['id']}) is not a GeoLens user")
             continue
-        if user is None:
-            reason = f"ArcGIS user {item['owner']} has no GeoLens owner in owner_map"
-        else:
-            reason = directory.inactive(user)
+        reason = _pending_reason(directory, item, name, user)
+        if reason is None and fallback is not None:
+            reason = _promotion(directory, user, permission)
         if reason is not None:
             if fallback is None:
                 problems.add(reason)
@@ -384,49 +449,81 @@ def resolve_owners(
             if fallback_reason:
                 problems.add(f"--unmapped-owner: {fallback_reason}")
                 continue
-            reassigned.append(f"{item['id']}: {reason}")
+            owners.reassigned.append(f"{item['id']}: {reason}")
+            owners.pending[item["id"]] = reason
             user = fallback
-        by_item[item["id"]] = Owner(str(user.id), user.username)
+        owners.by_item[item["id"]] = Owner(str(user.id), user.username)
         grant = directory.missing_grant(user, permission)
         if grant:
-            warnings.append(f"{item['id']}: {grant}")
+            owners.warnings.append(f"{item['id']}: {grant}")
     if problems:
         hint = "" if unmapped_owner else " Fix owner_map, or pass --unmapped-owner."
         raise UsageError(
             "can't assign owners: " + "; ".join(sorted(problems)) + "." + hint
         )
-    changed = _changed_owners(directory, plan, to_run, state)
-    return Owners(by_item, reassigned, changed, directory.roles is not None, warnings)
+    _finished_owners(directory, plan, to_run, state, fallback, owners)
+    return owners
 
 
-def _changed_owners(
+def _finished_owners(
     directory: _Directory,
     plan: Mapping[str, Any],
     to_run: list[Mapping[str, Any]],
     state: MigrationState,
-) -> list[dict[str, str]]:
-    """Migrated items whose plan now names a different owner."""
+    fallback: Any | None,
+    owners: Owners,
+) -> None:
+    """Sort the migrated items this run doesn't import by how their owner
+    stands: a pending one to hand over, one whose plan now names another or
+    no single GeoLens user."""
     running = {item["id"] for item in to_run}
-    changed = []
     for item in plan["items"]:
         entry = state.items.get(item["id"])
+        permission = TRANSFER_PERMISSION.get(item["action"])
         if (
             item["id"] in running
             or item.get("removed")
+            or permission is None
             or entry is None
             or entry.status not in FINISHED
+            or not entry.owner_id
         ):
             continue
+        name = _target_name(item, plan)
         try:
-            user = directory.find(_target_name(item, plan))
-        except UsageError:
+            user = directory.find(name) if name else None
+        except UsageError as exc:
+            owners.unresolved.append({"item": item["id"], "reason": str(exc)})
             continue
-        if user is not None and entry.owner_id and str(user.id) != entry.owner_id:
-            changed.append({"item": item["id"], "owner": user.username})
-    return changed
+        if entry.owner_pending:
+            owners.waiting.append(item["id"])
+            reason = _pending_reason(directory, item, name, user) or _promotion(
+                directory, user, permission
+            )
+            target = user if reason is None else fallback
+            if reason is not None:
+                owners.pending[item["id"]] = reason
+            if (
+                target is not None
+                and directory.inactive(target) is None
+                and str(target.id) != entry.owner_id
+            ):
+                owners.handovers[item["id"]] = Owner(str(target.id), target.username)
+        elif user is None:
+            owners.unresolved.append(
+                {
+                    "item": item["id"],
+                    "reason": f"its plan owner {name} is not a GeoLens user"
+                    if name
+                    else "its plan owner is empty",
+                }
+            )
+        elif str(user.id) != entry.owner_id:
+            owners.changed.append({"item": item["id"], "owner": user.username})
 
 
-def _require_admin(geolens: GeoLens) -> None:
+def _require_admin(geolens: GeoLens) -> str:
+    """The admin operator's user id; ``UsageError`` for anyone else."""
     from geolens.api.auth import me_auth_me_get
 
     me = geolens.call(me_auth_me_get.sync_detailed)
@@ -435,32 +532,137 @@ def _require_admin(geolens: GeoLens) -> None:
             "migrate needs a GeoLens admin session: it reads the user list and "
             "transfers ownership. Run `geolens login` as an admin."
         )
+    return str(me.id)
 
 
-def transfer(geolens: GeoLens, entry: ItemState, owner: Owner) -> None:
-    """Hand every dataset and the map recorded for an item to *owner*."""
-    from uuid import UUID
+def _check_cutover(opts: MigrateOptions) -> None:
+    if opts.accept and not opts.cutover:
+        raise UsageError("the --accept-* options go with --cutover")
+    if opts.cutover and opts.only:
+        raise UsageError("--cutover is the final run of the whole plan; drop --only")
 
+
+def mark_cutover(
+    opts: MigrateOptions,
+    plan: Mapping[str, Any],
+    state: MigrationState,
+    owners: Owners,
+    summary: RunSummary,
+    portal: PortalClient | None = None,
+) -> dict[str, Any] | None:
+    """With --cutover, the checks that fail and whether the run is marked as
+    the final one: only when it finished and every failing check is accepted.
+    Outside a dry run the portal is asked whether anything changed since the
+    plan's inventory was read."""
+    if not opts.cutover:
+        return None
+    changed = (
+        None if opts.dry_run else inventory_changes(portal, plan, datetime.now(tz=UTC))
+    )
+    # An item whose plan now names another owner stays with the old one.
+    moved = [
+        {
+            "item": change["item"],
+            "reason": f"its plan owner is now {change['owner']}, who hasn't "
+            "been given it",
+        }
+        for change in owners.changed
+    ]
+    failing = failing_checks(plan, state, [*owners.unresolved, *moved], changed)
+    accepted = [c["check"] for c in failing if c["check"] in opts.accept]
+    refused = [c["check"] for c in failing if c["check"] not in opts.accept]
+    marked = not refused and summary.stopped is None and not opts.dry_run
+    if marked:
+        state.cutover = {"at": _now(), "accepted": accepted}
+        state.save()
+    return {
+        "marked": marked,
+        "refused": refused,
+        "accepted": accepted,
+        "checks": failing,
+    }
+
+
+def transfer_dataset(
+    geolens: GeoLens, dataset_id: str, owner: Owner, read: Any = None
+) -> Any:
+    """Hand one dataset to *owner* unless it changed since *read*, the dataset
+    as last read (read now when None); the dataset as the transfer left it."""
+    from geolens.api.datasets import get_single_dataset_datasets_dataset_id_get as get
     from geolens.api.datasets import (
         update_dataset_metadata_datasets_dataset_id_patch as patch_dataset,
     )
-    from geolens.api.maps import patch_map_endpoint_maps_map_id_patch as patch_map
     from geolens.models.dataset_meta import DatasetMeta
+
+    if read is None:
+        read = geolens.call(get.sync_detailed, dataset_id=UUID(dataset_id))
+    return geolens.write(
+        patch_dataset.sync_detailed,
+        during=f"dataset {dataset_id} was handed over",
+        dataset_id=UUID(dataset_id),
+        body=DatasetMeta(owner_id=UUID(owner.id), expected_updated_at=read.updated_at),
+    )
+
+
+def _transfer_map(geolens: GeoLens, map_id: str, owner: Owner) -> None:
+    from geolens.api.maps import patch_map_endpoint_maps_map_id_patch as patch_map
     from geolens.models.map_patch import MapPatch
 
-    owner_id = UUID(owner.id)
+    read = get_map(geolens, map_id)
+    geolens.write(
+        patch_map.sync_detailed,
+        during=f"map {map_id} was handed over",
+        map_id=UUID(map_id),
+        body=MapPatch(owner_id=UUID(owner.id), expected_updated_at=read.updated_at),
+    )
+
+
+def _import_revisions(ctx: MigrationContext, dataset_ids: list[str]) -> dict:
+    """Each dataset's data revision as the import left it, read before this
+    command writes to it; one somebody else wrote last is refused, so their
+    edit isn't taken as the import's."""
+    revisions = {}
+    for dataset_id in dataset_ids:
+        read = get_dataset(ctx, dataset_id)
+        if not operator_or_nobody_wrote_last(ctx, read):
+            raise changed_before_handover(dataset_id)
+        revisions[dataset_id] = snapshot(read)["data_revision"]
+    return revisions
+
+
+def transfer(
+    ctx: MigrationContext,
+    entry: ItemState,
+    owner: Owner,
+    revisions: Mapping[str, Any],
+) -> None:
+    """Hand every dataset and the map recorded for an item to *owner*,
+    recording and saving each dataset's transfer answer as its baseline as it
+    lands, so a later failure keeps the transfers made before it.
+
+    A dataset this import has not handed over goes only while the operator or
+    nobody wrote it last and its data revision is still the one in
+    *revisions*. One an earlier attempt handed over is left with an owner it
+    already has, and otherwise moves only while it is as that transfer left it.
+    """
     for dataset_id in entry.dataset_ids:
-        geolens.call(
-            patch_dataset.sync_detailed,
-            dataset_id=UUID(dataset_id),
-            body=DatasetMeta(owner_id=owner_id),
+        read = get_dataset(ctx, dataset_id)
+        if dataset_id in entry.last_update:
+            if str(read.created_by) == owner.id:
+                continue
+            reason = changed_in_geolens(ctx, entry, dataset_id, read)
+            if reason:
+                raise ItemFailed(f"dataset {dataset_id} was {reason}")
+        elif not operator_or_nobody_wrote_last(ctx, read) or snapshot(read)[
+            "data_revision"
+        ] != revisions.get(dataset_id):
+            raise changed_before_handover(dataset_id)
+        record(
+            entry, dataset_id, transfer_dataset(ctx.geolens, dataset_id, owner, read)
         )
+        ctx.save()
     if entry.map_id:
-        geolens.call(
-            patch_map.sync_detailed,
-            map_id=UUID(entry.map_id),
-            body=MapPatch(owner_id=owner_id),
-        )
+        _transfer_map(ctx.geolens, entry.map_id, owner)
 
 
 @dataclass
@@ -469,6 +671,10 @@ class RunSummary:
     unlisted: list[str] = field(default_factory=list)
     waiting: list[dict[str, Any]] = field(default_factory=list)
     stopped: str | None = None
+    # Finished items this run brought up to date, or meant to.
+    refreshed: list[str] = field(default_factory=list)
+    handed_over: list[dict[str, str]] = field(default_factory=list)
+    handover_failed: list[str] = field(default_factory=list)
 
 
 def _unmet(
@@ -491,6 +697,7 @@ def _migrate_one(
     item: Mapping[str, Any],
     handler: Handler,
     owner: Owner | None,
+    pending: str | None = None,
 ) -> None:
     entry = state.start(item["id"])
     try:
@@ -498,14 +705,22 @@ def _migrate_one(
         entry.notes = [state.clean(note) for note in result.notes]
         state.save()
         if owner is not None:
-            apply_item_metadata(ctx, item, entry)
+            # Datasets an earlier attempt handed over are no longer written.
+            fresh = [d for d in entry.dataset_ids if d not in entry.last_update]
+            revisions = _import_revisions(ctx, fresh)
+            entry.visibility = dict.fromkeys(
+                entry.dataset_ids, item["target"]["visibility"]
+            )
+            apply_item_metadata(ctx, item, entry, fresh)
             entry.notes.extend(
                 state.clean(n) for n in file_into_collections(ctx, item, entry)
             )
             # Even to the operator: a run that failed part way may have handed
             # some of the item's objects to another owner already.
-            transfer(ctx.geolens, entry, owner)
+            transfer(ctx, entry, owner, revisions)
             entry.owner_id = owner.id
+            entry.owner_pending = pending
+            ctx.save()
     except (ItemFailed, GeoLensError) as exc:
         state.finish(item["id"], FAILED, str(exc))
         return
@@ -521,15 +736,86 @@ def _migrate_one(
     state.finish(item["id"], result.status)
 
 
+def _hand_over_one(ctx: MigrationContext, entry: ItemState, owner: Owner) -> None:
+    """Transfer the item to *owner* one dataset at a time.
+
+    A dataset *owner* already has, given by an earlier run that stopped part
+    way or by someone in GeoLens, is left as it is. Each transfer is recorded
+    as this command's own write, so a rerun resumes with the rest.
+    """
+    for dataset_id in entry.dataset_ids:
+        dataset = get_dataset(ctx, dataset_id)
+        if str(dataset.created_by) == owner.id:
+            continue
+        reason = changed_in_geolens(ctx, entry, dataset_id, dataset)
+        if reason:
+            raise ItemFailed(f"dataset {dataset_id} was {reason}")
+        record(
+            entry, dataset_id, transfer_dataset(ctx.geolens, dataset_id, owner, dataset)
+        )
+        ctx.save()
+    if entry.map_id:
+        _transfer_map(ctx.geolens, entry.map_id, owner)
+    entry.owner_id = owner.id
+
+
+def hand_over(
+    ctx: MigrationContext, state: MigrationState, owners: Owners, summary: RunSummary
+) -> None:
+    """Hand each migrated item that waits for its owner to the owner it can go
+    to now, unless GeoLens changed one of its datasets since the last run."""
+    for item_id in owners.waiting:
+        entry = state.items[item_id]
+        owner = owners.handovers.get(item_id)
+        if owner is not None:
+            try:
+                _hand_over_one(ctx, entry, owner)
+            except (ItemFailed, GeoLensError) as exc:
+                summary.handover_failed.append(
+                    state.clean(f"{item_id}: not handed to {owner.username}, {exc}")
+                )
+                continue
+            summary.handed_over.append({"item": item_id, "owner": owner.username})
+        elif entry.owner_pending == owners.pending.get(item_id):
+            continue
+        entry.owner_pending = owners.pending.get(item_id)
+        state.save()
+
+
+def refresh_finished(
+    ctx: MigrationContext,
+    state: MigrationState,
+    items: Sequence[Mapping[str, Any]],
+    summary: RunSummary,
+) -> None:
+    """Bring each finished item up to date and record why any isn't."""
+    for item in items:
+        entry = state.items[item["id"]]
+        summary.refreshed.append(item["id"])
+        try:
+            reasons = REFRESHERS[item["action"]](ctx, item, entry)
+        except StopRun as exc:
+            entry.stale = [state.clean(str(exc))]
+            summary.stopped = entry.stale[0]
+            break
+        entry.stale = [state.clean(reason) for reason in reasons]
+        state.save()
+
+
 def run_items(
     ctx: MigrationContext,
     plan: Mapping[str, Any],
     state: MigrationState,
     to_run: list[Mapping[str, Any]],
     owners: Mapping[str, Owner],
+    refresh: Sequence[Mapping[str, Any]] = (),
+    pending: Mapping[str, str] | None = None,
+    summary: RunSummary | None = None,
 ) -> RunSummary:
+    """Run the items to import, then bring the finished *refresh* items up to
+    date unless the run stopped."""
     by_id = {item["id"]: item for item in plan["items"]}
-    summary = RunSummary()
+    summary = summary or RunSummary()
     for item in to_run:
         if item["action"] == _plan.SKIP:
             state.finish(item["id"], SKIPPED, save=False)
@@ -546,13 +832,45 @@ def run_items(
             summary.waiting.append({"item": item["id"], "waiting_on": unmet})
             continue
         try:
-            _migrate_one(ctx, state, item, handler, owners.get(item["id"]))
+            _migrate_one(
+                ctx,
+                state,
+                item,
+                handler,
+                owners.get(item["id"]),
+                (pending or {}).get(item["id"]),
+            )
         except StopRun:
             summary.stopped = state.item(item["id"]).error
             break
+    if summary.stopped is None:
+        refresh_finished(ctx, state, refresh, summary)
     state.save()
     write_index(ctx, plan, state)
     return summary
+
+
+def _report_files(
+    state: MigrationState,
+    plan: Mapping[str, Any],
+    owners: Owners,
+    redact: Redactor,
+    stopped: str | None,
+    cutover: Mapping[str, Any] | None = None,
+) -> tuple[Path, Path]:
+    return write_run_report(
+        state.path.parent,
+        build_run_report(
+            plan,
+            state,
+            runnable=HANDLERS,
+            owner_changes=owners.changed,
+            owner_unresolved=owners.unresolved,
+            stopped=stopped,
+            cutover=cutover,
+        ),
+        redact,
+    )
 
 
 def _report(
@@ -564,6 +882,7 @@ def _report(
     owners: Owners,
     summary: RunSummary,
     redact: Redactor,
+    cutover: Mapping[str, Any] | None = None,
 ) -> int:
     rows = [
         {
@@ -589,21 +908,18 @@ def _report(
     failed = [
         item["id"] for item in plan["items"] if state.status(item["id"]) == FAILED
     ]
+    stale = {
+        item_id: list(state.items[item_id].stale)
+        for item_id in summary.refreshed
+        if state.items[item_id].stale
+    }
     ran = {item["id"] for item in to_run}
     report_files: tuple[Path, Path] | None = None
     report_failed = False
     if not opts.dry_run:
         try:
-            report_files = write_run_report(
-                state.path.parent,
-                build_run_report(
-                    plan,
-                    state,
-                    runnable=HANDLERS,
-                    owner_changes=owners.changed,
-                    stopped=summary.stopped,
-                ),
-                redact,
+            report_files = _report_files(
+                state, plan, owners, redact, summary.stopped, cutover
             )
         except OSError as exc:
             report_failed = True
@@ -616,12 +932,19 @@ def _report(
         "counts": dict(sorted(counts.items())),
         "owner_reassigned": owners.reassigned,
         "owner_changed": owners.changed,
+        "owner_pending": owners.pending,
+        "owner_unresolved": owners.unresolved,
         "owner_roles_checked": owners.roles_checked,
         "owner_warnings": owners.warnings,
+        "handed_over": summary.handed_over,
+        "handover_failed": summary.handover_failed,
         "not_available": summary.unavailable,
         "unlisted": summary.unlisted,
         "waiting": summary.waiting,
+        "refreshed": summary.refreshed,
+        "not_up_to_date": stale,
         "stopped": summary.stopped,
+        "cutover": cutover,
         "report": [str(p) for p in report_files] if report_files else None,
         "failed": failed,
     }
@@ -642,20 +965,12 @@ def _report(
             if item_id not in ran:
                 # Failed before, left out of this run: the exit code counts it.
                 fmt.error(f"{item_id}: {state.item(item_id).error or 'failed'}")
-        for line in owners.reassigned:
-            fmt.warn(f"owner fell back to --unmapped-owner for {line}")
-        for line in owners.warnings:
-            fmt.warn(f"{line}; GeoLens may refuse the transfer")
-        for change in owners.changed:
-            fmt.warn(
-                f"{change['item']} was migrated before its owner changed to "
-                f"{change['owner']}; it was not imported again. Transfer it by hand."
-            )
-        if not owners.roles_checked:
-            fmt.warn(
-                "the instance's role permissions couldn't be read, so owners were "
-                "checked for an active account only"
-            )
+        _print_owners(fmt, owners, summary)
+        verb = "Would bring" if opts.dry_run else "Brought"
+        fmt.info(f"{verb} {len(summary.refreshed)} migrated item(s) up to date.")
+        for item_id, reasons in stale.items():
+            for reason in reasons:
+                fmt.error(f"{item_id} is not up to date: {reason}")
         if summary.unavailable:
             fmt.warn(
                 f"{len(summary.unavailable)} item(s) use an action this version "
@@ -671,6 +986,9 @@ def _report(
             fmt.warn(f"{wait['item']} waits on {', '.join(wait['waiting_on'])}")
         if summary.stopped:
             fmt.error(f"stopped: {summary.stopped}")
+        _print_cutover(fmt, cutover, opts.dry_run)
+        if state.cutover and not opts.cutover:
+            fmt.warn(f"this migration was cut over at {state.cutover['at']}")
         if not opts.dry_run:
             fmt.info(f"State: {state.path}")
             if report_files:
@@ -679,8 +997,67 @@ def _report(
                 fmt.error(
                     f"{len(failed)} item(s) failed; see {report_files[1] if report_files else state.path}"
                 )
-    left = summary.unavailable or summary.unlisted or summary.waiting or summary.stopped
+    left = (
+        summary.unavailable
+        or summary.unlisted
+        or summary.waiting
+        or summary.stopped
+        or stale
+        or summary.handover_failed
+        or (cutover is not None and cutover["refused"])
+    )
     return EXIT_GENERIC if failed or left or report_failed else EXIT_OK
+
+
+def _print_owners(fmt: _output.Formatter, owners: Owners, summary: RunSummary) -> None:
+    for line in owners.reassigned:
+        fmt.warn(f"owner fell back to --unmapped-owner for {line}")
+    for line in owners.warnings:
+        fmt.warn(f"{line}; GeoLens may refuse the transfer")
+    for change in owners.changed:
+        fmt.warn(
+            f"{change['item']} was migrated before its owner changed to "
+            f"{change['owner']}; it was not imported again. Transfer it by hand."
+        )
+    for unresolved in owners.unresolved:
+        fmt.warn(f"{unresolved['item']}: {unresolved['reason']}")
+    for handed in summary.handed_over:
+        fmt.info(f"{handed['item']} handed to {handed['owner']}")
+    for line in summary.handover_failed:
+        fmt.error(line)
+    for item_id, reason in owners.pending.items():
+        if item_id not in owners.by_item:
+            fmt.warn(f"{item_id} still waits for its owner: {reason}")
+    if not owners.roles_checked:
+        fmt.warn(
+            "the instance's role permissions couldn't be read, so owners were "
+            "checked for an active account only"
+        )
+
+
+def _print_cutover(
+    fmt: _output.Formatter, cutover: Mapping[str, Any] | None, dry_run: bool
+) -> None:
+    if cutover is None:
+        return
+    for check in cutover["checks"]:
+        accepted = check["check"] in cutover["accepted"]
+        say = fmt.warn if accepted else fmt.error
+        for found in check["items"][:CUTOVER_LINES]:
+            say(f"{check['check']}: {found['item']}: {found['reason']}")
+        more = len(check["items"]) - CUTOVER_LINES
+        if more > 0:
+            say(f"{check['check']}: {more} more; see the report")
+    if cutover["refused"]:
+        flags = " ".join(f"--accept-{name}" for name in cutover["refused"])
+        fmt.error(
+            "cutover refused: fix what is listed and run again, or accept the "
+            f"loss with {flags}"
+        )
+    elif cutover["marked"]:
+        fmt.success("cutover marked: this run is the migration's final one")
+    elif dry_run:
+        fmt.info("cutover checks pass as the state stands")
 
 
 def run_cli(
@@ -746,14 +1123,19 @@ def _inventory_rows(
 
 
 def _resumes_without_download(entry: ItemState | None) -> bool:
-    """Whether a data file's state already holds what its import continues
-    from (a pending upload, a committed job, a fan-out or a dataset), so the
-    rerun does not download it from the portal."""
-    return entry is not None and bool(
-        entry.layer_datasets
-        or entry.layer_jobs
-        or entry.fan_out
-        or entry.pending_upload
+    """Whether an unfinished data file's state already holds what its import
+    continues from (a pending upload, a committed job, a fan-out or a dataset),
+    so the rerun does not download it from the portal. A finished one is
+    downloaded again to bring it up to date."""
+    return (
+        entry is not None
+        and entry.status not in FINISHED
+        and bool(
+            entry.layer_datasets
+            or entry.layer_jobs
+            or entry.fan_out
+            or entry.pending_upload
+        )
     )
 
 
@@ -767,8 +1149,8 @@ def _portal_client(
 ) -> tuple[PortalClient, str | None] | None:
     """A client for the plan's portal holding the run's token or password.
 
-    None when no item to import needs one; a ``UsageError`` when one does and
-    no credential was given.
+    None when no item to import or bring up to date needs one; a
+    ``UsageError`` when one does and no credential was given.
     """
     wanted = [
         i
@@ -789,12 +1171,14 @@ def _portal_client(
         )
         and not (
             item["action"] == _plan.IMPORT_MAP
+            and state.status(item["id"]) not in FINISHED
             and getattr(state.items.get(item["id"]), "map_id", None)
         )
     )
     files = any(i["action"] != _plan.IMPORT_LAYERS for i in wanted)
     supplied = bool(opts.token or opts.token_stdin or opts.username)
-    if not private and not (files and supplied):
+    # The cutover searches the organization, which takes a credential.
+    if not private and not ((files or opts.cutover) and supplied):
         # A public data file is still downloaded from the portal, anonymously
         # unless the operator gave a credential (a portal can require one for
         # public sharing).
@@ -815,7 +1199,7 @@ def _portal_client(
         )
         if token is None and password is None:
             raise UsageError(
-                f"{private} item(s) to import are not public: pass --token, "
+                f"{private} item(s) to import or bring up to date are not public: pass --token, "
                 "ARCGIS_TOKEN, --token-stdin or --username"
             )
         root = portal_root(
@@ -849,28 +1233,6 @@ def _portal_base(url: str) -> str:
         return url.rstrip("/")
 
 
-def _write_partial_report(
-    plan: Mapping[str, Any],
-    state: MigrationState,
-    redact: Redactor,
-    stopped: str,
-    owner_changes: Sequence[Mapping[str, str]] = (),
-) -> tuple[Path, Path]:
-    """The report of a run that ended early, so it is not left stale."""
-    state.save()
-    return write_run_report(
-        state.path.parent,
-        build_run_report(
-            plan,
-            state,
-            runnable=HANDLERS,
-            owner_changes=owner_changes,
-            stopped=stopped,
-        ),
-        redact,
-    )
-
-
 def _run(
     fmt: _output.Formatter,
     opts: MigrateOptions,
@@ -880,6 +1242,7 @@ def _run(
 ) -> int:
     try:
         _check_hosts(opts.trusted_hosts)
+        _check_cutover(opts)
         plan = _plan.load_plan(opts.plan_path)
         state_path = opts.state_path or opts.plan_path.parent / STATE_FILENAME
         state = MigrationState.load(
@@ -890,11 +1253,13 @@ def _run(
             persist=not opts.dry_run,
         )
         to_run = select_items(plan, state, opts.only, opts.no_retry)
-        rows, portal_info = _inventory_rows(plan, opts.plan_path, to_run)
+        refresh = select_refresh(plan, state, opts.only)
+        touched = [*to_run, *refresh]
+        rows, portal_info = _inventory_rows(plan, opts.plan_path, touched)
         portal = (
             None
             if opts.dry_run
-            else _portal_client(opts, plan, to_run, rows, state, redact)
+            else _portal_client(opts, plan, touched, rows, state, redact)
         )
     except (_plan.PlanError, StateError, UsageError) as exc:
         fmt.error(str(exc))
@@ -903,7 +1268,7 @@ def _run(
     sdk = sdk_factory()
     geolens = GeoLens(sdk, instance, redact)
     try:
-        _require_admin(geolens)
+        operator_id = _require_admin(geolens)
         owners = resolve_owners(geolens, plan, to_run, state, opts.unmapped_owner)
     except UsageError as exc:
         fmt.error(str(exc))
@@ -915,18 +1280,21 @@ def _run(
         return EXIT_SERVER if exc.status >= 500 else EXIT_GENERIC
 
     if opts.dry_run:
-        unavailable = [
-            item["id"]
-            for item in to_run
-            if item["action"] != _plan.SKIP
-            and not item.get("unlisted")
-            and item["action"] not in HANDLERS
-        ]
-        unlisted = [
-            item["id"]
-            for item in to_run
-            if item["action"] != _plan.SKIP and item.get("unlisted")
-        ]
+        summary = RunSummary(
+            unavailable=[
+                item["id"]
+                for item in to_run
+                if item["action"] != _plan.SKIP
+                and not item.get("unlisted")
+                and item["action"] not in HANDLERS
+            ],
+            unlisted=[
+                item["id"]
+                for item in to_run
+                if item["action"] != _plan.SKIP and item.get("unlisted")
+            ],
+            refreshed=[item["id"] for item in refresh],
+        )
         return _report(
             fmt,
             opts,
@@ -934,8 +1302,9 @@ def _run(
             state,
             to_run,
             owners,
-            RunSummary(unavailable=unavailable, unlisted=unlisted),
+            summary,
             redact,
+            mark_cutover(opts, plan, state, owners, summary),
         )
     auth = None
     if portal is not None:
@@ -964,12 +1333,17 @@ def _run(
         aliases={i["id"]: i["alias_of"] for i in plan["items"] if i.get("alias_of")},
         portal_root=_portal_base(plan["portal"]["url"]),
         redact=redact,
+        operator_id=operator_id,
     )
     # Any way out of the loop but a normal return leaves the report to the
     # finally block, so it is never stale.
     stopped: str | None = "stopped by an unexpected error"
     try:
-        summary = run_items(ctx, plan, state, to_run, owners.by_item)
+        summary = RunSummary()
+        hand_over(ctx, state, owners, summary)
+        run_items(
+            ctx, plan, state, to_run, owners.by_item, refresh, owners.pending, summary
+        )
         stopped = None
     except KeyboardInterrupt:
         stopped = "interrupted"
@@ -983,11 +1357,22 @@ def _run(
     finally:
         if stopped is not None:
             try:
-                _json_path, md_path = _write_partial_report(
-                    plan, state, redact, stopped, owners.changed
+                state.save()
+                _json_path, md_path = _report_files(
+                    state, plan, owners, redact, stopped
                 )
                 fmt.info(f"Report: {md_path}")
             except OSError as exc:
                 # Not allowed to replace the exit outcome this run is leaving by.
                 fmt.warn(f"couldn't write the report: {exc.strerror or exc}")
-    return _report(fmt, opts, plan, state, to_run, owners, summary, redact)
+    return _report(
+        fmt,
+        opts,
+        plan,
+        state,
+        to_run,
+        owners,
+        summary,
+        redact,
+        mark_cutover(opts, plan, state, owners, summary, auth.client if auth else None),
+    )

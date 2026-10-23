@@ -284,6 +284,7 @@ def dataset_to_response(
         # reader keeps `origin` (above) and the freshness/health fields below.
         origin_uri=dataset.origin_uri if can_view_provenance else None,
         origin_ref=dataset.origin_ref if can_view_provenance else None,
+        data_revision=dataset.data_revision if can_view_provenance else None,
         last_refreshed_at=dataset.last_refreshed_at,
         last_checked_at=dataset.last_checked_at,
         # NULL is the stored spelling of "never determined"; "unknown" is the
