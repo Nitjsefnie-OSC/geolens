@@ -304,9 +304,6 @@ def test_a_refresh_that_stops_for_review_is_reported_not_accepted(
         ({"updated_by": ALICE}, False),
         # The operator's own feature edit after the refresh published.
         ({"updated_by": layers.OPERATOR, "data_revision": 1}, False),
-        # A server without revisions: compared with the run's end.
-        ({"data_revision": None, "updated_at": LATER}, True),
-        ({"data_revision": None, "updated_at": EDITED}, False),
     ],
 )
 def test_a_refresh_still_running_at_the_deadline_is_picked_up_by_the_next_run(
@@ -659,6 +656,77 @@ def test_a_file_dataset_rebound_to_a_service_is_not_replaced(
     assert result.exit_code == 1
     assert not any(s.url.endswith("/reupload") for s in geolens.seen)
     assert payload["not_up_to_date"][D3]
+
+
+def test_a_geolens_without_data_revisions_gets_no_refresh(runner, plan_file, geolens):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+    service.fields[PARCELS] = {"data_revision": None}
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    assert refresh.bodies == []
+    [reason] = payload["not_up_to_date"][A2]
+    assert "upgrade GeoLens to bring migrated datasets up to date safely" in reason
+
+
+def test_the_record_stays_the_published_one_when_the_metadata_write_races_an_edit(
+    runner, plan_file, geolens
+):
+    service = _migrated(runner, plan_file, geolens)
+    FakeRefresh(geolens, service).allow(PARCELS)
+    _set_snippet(plan_file, A2, "New summary")
+    patch = geolens.routes[f"PATCH /datasets/{PARCELS}"]
+
+    def patch_while_alice_edits(seen):
+        reply = patch(seen)
+        service.fields[PARCELS].update(ALICE_EDIT)
+        return reply
+
+    geolens.routes[f"PATCH /datasets/{PARCELS}"] = patch_while_alice_edits
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.summaries[PARCELS].startswith("New summary")
+    assert _state(plan_file)["items"][A2]["last_update"][PARCELS] == {
+        "updated_at": "2026-10-02T00:00:00+00:00",
+        "feature_count": 0,
+        "data_revision": 0,
+    }
+
+
+def test_a_replacement_made_in_geolens_during_the_upload_is_not_overwritten(
+    runner, tmp_path, geolens, portal
+):
+    imported = files.FakeFiles(geolens)
+    plan_file = files._plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    [dataset] = _state(plan_file)["items"][D3]["dataset_ids"]
+    job = _uuid("0c", "01")
+
+    def upload(seen):
+        # A swap moves updated_at and updated_by, not the data revision.
+        imported.helper.fields.setdefault(dataset, {}).update(
+            {"updated_at": EDITED, "updated_by": ALICE}
+        )
+        return (201, {"job_id": job, "message": "ok", "status": "pending"})
+
+    geolens.routes.update(
+        {
+            f"POST /datasets/{dataset}/reupload": upload,
+            f"POST /datasets/{dataset}/reupload/{job}/preview": _preview(job),
+        }
+    )
+
+    result, payload = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert not any(s.url.endswith("/commit") for s in geolens.seen)
+    [reason] = payload["not_up_to_date"][D3]
+    assert "changed in GeoLens during the upload" in reason
+    assert _state(plan_file)["items"][D3]["refreshing"] == {}
 
 
 # Cutover

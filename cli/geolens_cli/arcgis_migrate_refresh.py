@@ -122,18 +122,16 @@ def _find_run(
 
 
 def _published_unchanged(
-    ctx: MigrationContext, dataset: Any, run: Any, expected: int | None
+    ctx: MigrationContext, dataset: Any, expected: int | None
 ) -> bool:
-    """Whether *dataset* is as the succeeded *run* published it: the operator
-    wrote it last and its data revision is the one the run was sent with, or,
-    from a server without revisions, it changed no later than the run ended."""
-    if not _operator_wrote_last(ctx, dataset):
-        return False
+    """Whether *dataset* is as a succeeded run published it: the operator
+    wrote it last and its data revision is the one the run was sent with."""
     revision = _revision(dataset)
-    if revision is not None and expected is not None:
-        return revision == expected
-    finished = _value(run.finished_at)
-    return finished is not None and dataset.updated_at <= finished
+    return (
+        _operator_wrote_last(ctx, dataset)
+        and revision is not None
+        and revision == expected
+    )
 
 
 def changed_in_geolens(
@@ -153,7 +151,7 @@ def changed_in_geolens(
         if str(run.status) not in _ENDED:
             return "a refresh an earlier run started is still running"
         if str(run.status) == "succeeded" and _published_unchanged(
-            ctx, dataset, run, marker.get("revision")
+            ctx, dataset, marker.get("revision")
         ):
             return None
     seen = entry.last_update.get(dataset_id)
@@ -346,13 +344,20 @@ def _start_replace(
                 job_id=upload.job_id,
                 body=_replace.build_preview_request(layer),
             )
+        problem = None
         if layer is None and _replace.layer_summaries(previewed):
-            del entry.refreshing[dataset_id]
-            ctx.save()
-            return (
+            problem = (
                 "the file now holds several layers; replace it by hand with "
                 f"geolens replace {dataset_id} --layer <name>"
             )
+        # A swap made in GeoLens during the upload, which doesn't move the
+        # data revision the commit sends, would otherwise be replaced.
+        elif snapshot(get_dataset(ctx, dataset_id)) != snapshot(dataset):
+            problem = "changed in GeoLens during the upload; it was left as it is"
+        if problem:
+            del entry.refreshing[dataset_id]
+            ctx.save()
+            return problem
         ctx.geolens.call(
             commit.sync_detailed,
             dataset_id=UUID(dataset_id),
@@ -419,6 +424,12 @@ def _bring_one(
         if exc.status != 404:
             raise
         return "deleted in GeoLens; it was left as it is"
+    if _revision(dataset) is None:
+        return (
+            "this GeoLens doesn't report data revisions, so edits made in it "
+            "can't all be told apart; upgrade GeoLens to bring migrated datasets "
+            "up to date safely"
+        )
     reason = changed_in_geolens(ctx, entry, dataset_id, dataset)
     if reason:
         return f"{reason}; it was left as it is"
@@ -432,7 +443,7 @@ def _bring_one(
     if problem:
         return _settle_unrecorded(ctx, entry, dataset_id, problem)
     published = get_dataset(ctx, dataset_id)
-    if not _published_unchanged(ctx, published, run, revision):
+    if not _published_unchanged(ctx, published, revision):
         return _settle_unrecorded(
             ctx,
             entry,
