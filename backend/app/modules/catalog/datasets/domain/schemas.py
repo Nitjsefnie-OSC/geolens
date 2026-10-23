@@ -1031,15 +1031,6 @@ _EXPECTED_DATA_REVISION_DESCRIPTION = (
 )
 
 
-def _reject_expected_revision_with_acceptance(model: Any) -> Any:
-    if model.expected_data_revision is not None and model.accept_blocked_run_id:
-        raise ValueError(
-            "expected_data_revision can't be combined with accept_blocked_run_id: "
-            "an acceptance compares with the revision of the run it accepts"
-        )
-    return model
-
-
 class ReuploadCommitRequest(BaseModel):
     srid_override: int | None = Field(default=None, ge=1, le=998999)
     expected_origin_kind: OriginKind | None = Field(
@@ -1128,12 +1119,18 @@ class DatasetRefreshRequest(BaseModel):
         default=None,
         ge=0,
         description=_EXPECTED_DATA_REVISION_DESCRIPTION
-        + " Service refreshes only; 422 for other origins.",
+        + " Service refreshes only; 422 for any other origin.",
     )
     _reject_auth_conflict = model_validator(mode="after")(reject_service_auth_conflict)
-    _reject_expected_revision_with_acceptance = model_validator(mode="after")(
-        _reject_expected_revision_with_acceptance
-    )
+
+    @model_validator(mode="after")
+    def _reject_expected_revision_with_acceptance(self) -> "DatasetRefreshRequest":
+        if self.expected_data_revision is not None and self.accept_blocked_run_id:
+            raise ValueError(
+                "expected_data_revision can't be combined with accept_blocked_run_id: "
+                "an acceptance compares with the revision of the run it accepts"
+            )
+        return self
 
 
 class DatasetRefreshResponse(BaseModel):

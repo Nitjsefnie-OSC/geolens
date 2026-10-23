@@ -51,8 +51,8 @@ and releases use semantic versioning.
   `POST /datasets/{id}/reupload/{job_id}/commit` take an optional
   `expected_data_revision`; when it isn't the revision the run compares with,
   the run stops for review with `live_data_changed` instead of publishing. A
-  refresh of a registered table or STAC item answers 422 when it is set, and
-  it can't be combined with `accept_blocked_run_id`.
+  refresh of anything but a service dataset answers 422 when it is set, and it
+  can't be combined with `accept_blocked_run_id`.
 - With `--unmapped-owner`, an item whose plan owner isn't a GeoLens user yet,
   is inactive or has a role that can't receive it goes to that owner for now
   instead of stopping the run, and a later run hands it over. A name that

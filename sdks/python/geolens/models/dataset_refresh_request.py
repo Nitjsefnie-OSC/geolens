@@ -47,7 +47,7 @@ class DatasetRefreshRequest:
             expected_data_revision (int | None | Unset): The dataset's `data_revision` the caller last saw. When it differs
                 from the revision this replacement is compared with, every write counts as later, so the run stops for review
                 with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service
-                refreshes only; 422 for other origins.
+                refreshes only; 422 for any other origin.
     """
 
     token: None | str | Unset = UNSET

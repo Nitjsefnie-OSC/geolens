@@ -8753,7 +8753,7 @@ export interface components {
             auth?: components["schemas"]["ServiceAuthRequest"] | null;
             /**
              * Expected Data Revision
-             * @description The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service refreshes only; 422 for other origins.
+             * @description The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service refreshes only; 422 for any other origin.
              */
             expected_data_revision?: number | null;
         };

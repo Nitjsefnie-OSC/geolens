@@ -245,16 +245,14 @@ def _resolve_service_origin(dataset) -> _ServiceOrigin:
 def _refuse_expected_revision_off_service(
     body: DatasetRefreshRequest, origin_kind: str | None
 ) -> None:
-    """422 for an expected revision on a refresh that replaces no data."""
-    if body.expected_data_revision is not None and origin_kind in ("postgis", "stac"):
+    """422 for an expected revision on anything but a service refresh, the
+    only refresh that replaces the dataset's data from a fetch."""
+    if body.expected_data_revision is not None and origin_kind != "service":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "expected_data_revision_not_applicable",
-                "message": (
-                    "Only a service refresh replaces the dataset's data, so "
-                    "only it takes expected_data_revision."
-                ),
+                "message": "Only a service refresh takes expected_data_revision.",
             },
         )
 
@@ -1022,6 +1020,7 @@ async def refresh_dataset(
     # with it. Unnamed kinds fall through to the service path, whose
     # resolver answers `refresh_not_applicable` for originless kinds.
     origin_kind = classify_origin(dataset.source_format, dataset.record.record_type)
+    _refuse_expected_revision_off_service(body, origin_kind)
     # The blocked run's door, not the dataset's origin: a file replacement of a
     # service dataset is an upload run.
     if (
@@ -1047,7 +1046,6 @@ async def refresh_dataset(
     reupload_binding = await held_reupload_binding(
         db, dataset_id=dataset_id, run_id=body.accept_blocked_run_id
     )
-    _refuse_expected_revision_off_service(body, origin_kind)
     if origin_kind == "postgis":
         return await _dispatch_postgis_refresh(
             db,

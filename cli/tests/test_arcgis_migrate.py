@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import contextmanager
 import secrets
 import stat
 from pathlib import Path
@@ -154,10 +153,9 @@ def refreshed(monkeypatch):
     """Refreshers that record the finished items a rerun brings up to date."""
     calls: list[str] = []
 
-    @contextmanager
     def refresher(ctx, item, entry):
         calls.append(item["id"])
-        yield [], None
+        return []
 
     for action in migrate.REFRESHERS:
         monkeypatch.setitem(migrate.REFRESHERS, action, refresher)

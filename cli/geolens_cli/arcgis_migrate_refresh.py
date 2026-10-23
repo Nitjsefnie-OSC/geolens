@@ -16,9 +16,9 @@ GeoLens stops the publication for review if the data changes after that.
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -61,12 +61,7 @@ RUN_PAGE = 50
 # dataset id, its GeoLens record and the data revision to send. Returns why it
 # couldn't start, or None.
 Starter = Callable[[str, Any, "int | None"], "str | None"]
-# Sets an item up for its datasets' requests: the problems found on the way,
-# and the starter, or None when nothing can be sent.
-Refresher = Callable[
-    [MigrationContext, Mapping[str, Any], ItemState],
-    AbstractContextManager[tuple[list[str], "Starter | None"]],
-]
+Refresher = Callable[[MigrationContext, Mapping[str, Any], ItemState], list[str]]
 
 
 def get_dataset(ctx: MigrationContext, dataset_id: str) -> Any:
@@ -153,14 +148,12 @@ def changed_in_geolens(
     finished.
     """
     marker = entry.refreshing.get(dataset_id)
-    if marker:
-        run = _find_run(ctx, dataset_id, marker)
-        if run is not None and str(run.status) not in _ENDED:
+    run = _find_run(ctx, dataset_id, marker) if marker else None
+    if run is not None:
+        if str(run.status) not in _ENDED:
             return "a refresh an earlier run started is still running"
-        if (
-            run is not None
-            and str(run.status) == "succeeded"
-            and _published_unchanged(ctx, dataset, run, marker.get("revision"))
+        if str(run.status) == "succeeded" and _published_unchanged(
+            ctx, dataset, run, marker.get("revision")
         ):
             return None
     seen = entry.last_update.get(dataset_id)
@@ -232,10 +225,6 @@ def _origin_url(dataset: Any) -> str | None:
     return url if isinstance(url, str) and url else None
 
 
-def _expected(revision: int | None) -> dict[str, int]:
-    return {} if revision is None else {"expected_data_revision": revision}
-
-
 def _start_refresh(
     ctx: MigrationContext,
     row: Mapping[str, Any],
@@ -248,6 +237,7 @@ def _start_refresh(
         refresh_dataset_datasets_dataset_id_refresh_post as refresh,
     )
     from geolens.models.dataset_refresh_request import DatasetRefreshRequest
+    from geolens.types import UNSET
 
     # The token goes where the dataset's stored source points, which the
     # trust check must judge rather than the inventory's URL.
@@ -260,7 +250,9 @@ def _start_refresh(
             row,
             url or row["url"],
             refresh.sync_detailed,
-            body=DatasetRefreshRequest(**_expected(revision)),
+            body=DatasetRefreshRequest(
+                expected_data_revision=UNSET if revision is None else revision
+            ),
             dataset_id=UUID(dataset_id),
             expected=202,
         )
@@ -273,10 +265,9 @@ def _start_refresh(
     return None
 
 
-@contextmanager
 def refresh_layers(
     ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
-) -> Iterator[tuple[list[str], Starter | None]]:
+) -> list[str]:
     """Probe a service item, record which layers have attachments and report
     layers added since it was migrated, then refresh each dataset from its
     stored source."""
@@ -285,17 +276,12 @@ def refresh_layers(
 
     row = ctx.inventory.get(item["id"])
     if row is None or not row.get("url"):
-        yield ["the inventory has no service URL for the item"], None
-        return
+        return ["the inventory has no service URL for the item"]
     if entry.service_url not in (None, row["url"]):
-        yield (
-            [
-                "its service URL changed in the portal since it was migrated, so its "
-                "datasets were not refreshed from the old one"
-            ],
-            None,
-        )
-        return
+        return [
+            "its service URL changed in the portal since it was migrated, so its "
+            "datasets were not refreshed from the old one"
+        ]
     try:
         with long_request_timeout(ctx.geolens.client):
             probe = _send(
@@ -306,11 +292,9 @@ def refresh_layers(
                 body=ProbeRequest(url=row["url"]),
             )
     except GeoLensError as exc:
-        yield [f"probe failed, {exc}"], None
-        return
+        return [f"probe failed, {exc}"]
     except ItemFailed as exc:
-        yield [str(exc)], None
-        return
+        return [str(exc)]
     flags = attachment_flags(probe.layers)
     entry.attachments = {key: flags.get(key) for key in entry.layer_datasets}
     ctx.save()
@@ -321,11 +305,8 @@ def refresh_layers(
         for layer in wanted
         if _layer_key(layer) not in entry.layer_datasets
     ]
-    yield (
-        added,
-        lambda dataset_id, dataset, revision: _start_refresh(
-            ctx, row, entry, dataset_id, dataset, revision
-        ),
+    return added + _bring_each(
+        ctx, item, entry, partial(_start_refresh, ctx, row, entry)
     )
 
 
@@ -334,9 +315,8 @@ def _start_replace(
     entry: ItemState,
     dataset_id: str,
     dataset: Any,
-    path: Path,
-    layer: str | None,
     revision: int | None,
+    path: Path,
 ) -> str | None:
     from geolens.api.datasets_reupload import (
         reupload_commit_datasets_dataset_id_reupload_job_id_commit_post as commit,
@@ -346,6 +326,8 @@ def _start_replace(
     refusal = _replace.origin_refusal_message(_value(dataset.origin))
     if refusal is not None:
         return refusal
+    key = next(k for k, d in entry.layer_datasets.items() if d == dataset_id)
+    layer = None if key == JOB_KEY else _layer_name(key)
     try:
         upload = ctx.geolens.call(
             _replace.upload_file,
@@ -371,18 +353,16 @@ def _start_replace(
                 "the file now holds several layers; replace it by hand with "
                 f"geolens replace {dataset_id} --layer <name>"
             )
-        body = _replace.build_commit_request(
-            layer_name=layer,
-            srid_override=None,
-            expected_origin_kind=_replace.captured_origin_kind(dataset),
-        )
-        for name, value in _expected(revision).items():
-            setattr(body, name, value)
         ctx.geolens.call(
             commit.sync_detailed,
             dataset_id=UUID(dataset_id),
             job_id=upload.job_id,
-            body=body,
+            body=_replace.build_commit_request(
+                layer_name=layer,
+                srid_override=None,
+                expected_origin_kind=_replace.captured_origin_kind(dataset),
+                expected_data_revision=revision,
+            ),
             expected=_replace.COMMIT_OK_STATUS,
         )
     except GeoLensError as exc:
@@ -390,52 +370,32 @@ def _start_replace(
     return None
 
 
-@contextmanager
 def refresh_file(
     ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState
-) -> Iterator[tuple[list[str], Starter | None]]:
+) -> list[str]:
     """Download a data file item again, then replace each of its datasets with
     it, one layer each for a multi-layer file."""
     extension = EXTENSIONS.get(item["type"])
     row = ctx.inventory.get(item["id"])
     if extension is None or row is None:
-        yield ["the item is not in the inventory the plan was built from"], None
-        return
-    layers = {dataset: key for key, dataset in entry.layer_datasets.items()}
+        return ["the item is not in the inventory the plan was built from"]
     limit = _limit(ctx)
     size = row.get("size_bytes")
     if isinstance(size, int) and size > limit:
-        yield (
-            [
-                f"not replaced: the file is {_megabytes(size)}, over the instance's "
-                f"upload limit of {_megabytes(limit)}"
-            ],
-            None,
-        )
-        return
+        return [
+            f"not replaced: the file is {_megabytes(size)}, over the instance's "
+            f"upload limit of {_megabytes(limit)}"
+        ]
     with tempfile.TemporaryDirectory(prefix="geolens-arcgis-") as tmp:
         path = Path(tmp) / _filename(item, extension)
         try:
             _download(ctx, item["id"], path, limit)
         except _Skipped as skipped:
-            yield [f"not replaced: {skipped}"], None
-            return
+            return [f"not replaced: {skipped}"]
         except ItemFailed as exc:
-            yield [str(exc)], None
-            return
-        yield (
-            [],
-            lambda dataset_id, dataset, revision: _start_replace(
-                ctx,
-                entry,
-                dataset_id,
-                dataset,
-                path,
-                None
-                if layers[dataset_id] == JOB_KEY
-                else _layer_name(layers[dataset_id]),
-                revision,
-            ),
+            return [str(exc)]
+        return _bring_each(
+            ctx, item, entry, partial(_start_replace, ctx, entry, path=path)
         )
 
 
@@ -469,14 +429,16 @@ def _bring_one(
     run, problem = _wait_for_run(ctx, entry, dataset_id)
     if run is None:
         return problem
-    if problem is None:
-        published = get_dataset(ctx, dataset_id)
-        if not _published_unchanged(ctx, published, run, revision):
-            problem = "changed in GeoLens while its refresh ran; it was left as it is"
     if problem:
-        del entry.refreshing[dataset_id]
-        ctx.save()
-        return problem
+        return _settle_unrecorded(ctx, entry, dataset_id, problem)
+    published = get_dataset(ctx, dataset_id)
+    if not _published_unchanged(ctx, published, run, revision):
+        return _settle_unrecorded(
+            ctx,
+            entry,
+            dataset_id,
+            "changed in GeoLens while its refresh ran; it was left as it is",
+        )
     _record(entry, dataset_id, published)
     ctx.save()
     apply_item_metadata(ctx, item, entry, [dataset_id])
@@ -485,6 +447,30 @@ def _bring_one(
         _record(entry, dataset_id, after)
         ctx.save()
     return None
+
+
+def _settle_unrecorded(
+    ctx: MigrationContext, entry: ItemState, dataset_id: str, problem: str
+) -> str:
+    """Drop the marker of an ended run whose result isn't recorded, so the
+    next run compares with the record from before it."""
+    del entry.refreshing[dataset_id]
+    ctx.save()
+    return problem
+
+
+def _bring_each(
+    ctx: MigrationContext, item: Mapping[str, Any], entry: ItemState, start: Starter
+) -> list[str]:
+    problems = []
+    for dataset_id in dict.fromkeys(entry.layer_datasets.values()):
+        try:
+            problem = _bring_one(ctx, item, entry, dataset_id, start)
+        except (ItemFailed, GeoLensError) as exc:
+            problem = str(exc)
+        if problem:
+            problems.append(f"dataset {dataset_id}: {problem}")
+    return problems
 
 
 def bring_up_to_date(
@@ -497,14 +483,4 @@ def bring_up_to_date(
     them, or the item, is not."""
     if not entry.layer_datasets:
         return []
-    with refresher(ctx, item, entry) as (problems, start):
-        if start is None:
-            return problems
-        for dataset_id in dict.fromkeys(entry.layer_datasets.values()):
-            try:
-                problem = _bring_one(ctx, item, entry, dataset_id, start)
-            except (ItemFailed, GeoLensError) as exc:
-                problem = str(exc)
-            if problem:
-                problems.append(f"dataset {dataset_id}: {problem}")
-    return problems
+    return refresher(ctx, item, entry)
