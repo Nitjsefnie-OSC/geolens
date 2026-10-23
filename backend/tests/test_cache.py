@@ -772,3 +772,130 @@ async def test_an_expired_override_is_not_replayed(cb_redis):
     assert await cb_redis.get("embed_token:abc") is None
     assert not cb_redis._pending_authoritative
     assert await cb_redis._client.get("embed_token:abc") is None
+
+
+@pytest.fixture(params=["memory", "redis"])
+def conditional_cache(request, redis_cache):
+    return InMemoryCacheProvider() if request.param == "memory" else redis_cache
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+@pytest.mark.parametrize(
+    "state", ["matching", "different", "missing", "expired", "null"]
+)
+async def test_conditional_cache_only_changes_a_live_matching_value(
+    conditional_cache, operation, state
+):
+    cache = conditional_cache
+    expected = None if state in {"missing", "null"} else "owner"
+    original = None if state == "null" else "other" if state == "different" else "owner"
+    if state != "missing":
+        await cache.set("claim", original)
+    if state == "expired":
+        if isinstance(cache, RedisCacheProvider):
+            await cache._client.pexpire("claim", 0)
+        else:
+            cache._store["claim"] = (original, time.monotonic() - 1)
+    args = (
+        ("claim", expected, "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", expected)
+    )
+    changed = await getattr(cache, operation)(*args)
+    matches = state in {"matching", "null"}
+    assert changed is matches
+    want = (
+        "renewed"
+        if matches and operation == "compare_and_set"
+        else None
+        if matches or state in {"missing", "expired"}
+        else original
+    )
+    assert await cache.get("claim") == want
+    if matches and operation == "compare_and_set":
+        if isinstance(cache, RedisCacheProvider):
+            assert 0 < await cache._client.ttl("claim") <= 60
+        else:
+            assert 0 < cache._store["claim"][1] - time.monotonic() <= 60
+
+
+@pytest.mark.asyncio
+async def test_memory_compare_and_set_reports_a_rejected_value():
+    cache = InMemoryCacheProvider(max_bytes=20)
+    await cache.set("claim", "owner")
+    assert await cache.compare_and_set("claim", "owner", "x" * 21) is False
+    assert await cache.get("claim") is None
+    assert cache._bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_conditional_operations_use_the_active_store(
+    redis_cache, operation
+):
+    cache = redis_cache
+    cache._failure_count = cache._max_failures
+    cache._circuit_open_until = time.monotonic() + 30
+    await cache._fallback.set("claim", "owner")
+    await cache._client.set("claim", '"another-replica"')
+    args = (
+        ("claim", "owner", "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", "owner")
+    )
+    assert await getattr(cache, operation)(*args) is True
+    assert await cache._fallback.get("claim") == (
+        "renewed" if operation == "compare_and_set" else None
+    )
+    assert await cache._client.get("claim") == '"another-replica"'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_conditional_error_is_not_replayed_or_applied_locally(
+    redis_cache, monkeypatch, operation
+):
+    cache = redis_cache
+    await cache.set("claim", "owner")
+    await cache._fallback.set("claim", "local")
+    monkeypatch.setattr(cache._client, "eval", AsyncMock(side_effect=ConnectionError))
+    args = (
+        ("claim", "owner", "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", "owner")
+    )
+    assert await getattr(cache, operation)(*args) is False
+    assert cache._failure_count == 1
+    assert await cache._fallback.get("claim") == "local"
+    assert cache._pending_authoritative == {}
+    assert await cache.get("claim") == "owner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_conditional_operation_cannot_change_a_racing_owner(
+    redis_cache, monkeypatch, operation
+):
+    cache = redis_cache
+    await cache.set("claim", "owner")
+    original_get, original_eval = cache._client.get, cache._client.eval
+
+    async def read_then_replace(key):
+        value = await original_get(key)
+        await cache.set(key, "successor")
+        return value
+
+    async def replace_then_compare(*args):
+        await cache.set("claim", "successor")
+        return await original_eval(*args)
+
+    monkeypatch.setattr(cache._client, "get", read_then_replace)
+    monkeypatch.setattr(cache._client, "eval", replace_then_compare)
+    args = (
+        ("claim", "owner", "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", "owner")
+    )
+    assert await getattr(cache, operation)(*args) is False
+    assert await original_get("claim") == '"successor"'
