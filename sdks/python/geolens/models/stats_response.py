@@ -26,7 +26,8 @@ class StatsResponse:
         op (Literal['stats']):
         result (StatsResult): The requested statistics; one over no rows is null.
 
-            A value a float cannot carry (NaN, infinity) comes back as text.
+            ``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it
+            exactly, else text. ``avg`` is a float, or text for NaN and infinity.
         approximate (bool | Unset): Always false: a view too wide to count exactly is refused. Default: False.
     """
 

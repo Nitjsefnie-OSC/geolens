@@ -10354,9 +10354,15 @@ export interface components {
         };
         /** GroupValue */
         GroupValue: {
-            /** Key */
+            /**
+             * Key
+             * @description The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.
+             */
             key: string | number | boolean | null;
-            /** Value */
+            /**
+             * Value
+             * @description Exact for count, sum, min and max, as for a key; avg is a float.
+             */
             value: number | string | null;
         };
         /** GroupWrite */
@@ -15135,7 +15141,8 @@ export interface components {
          * StatsResult
          * @description The requested statistics; one over no rows is null.
          *
-         *     A value a float cannot carry (NaN, infinity) comes back as text.
+         *     ``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it
+         *     exactly, else text. ``avg`` is a float, or text for NaN and infinity.
          */
         StatsResult: {
             /** Count */
@@ -15731,7 +15738,10 @@ export interface components {
         };
         /** ValueCount */
         ValueCount: {
-            /** Value */
+            /**
+             * Value
+             * @description The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.
+             */
             value: string | number | boolean | null;
             /** Count */
             count: number;

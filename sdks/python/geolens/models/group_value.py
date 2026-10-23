@@ -17,8 +17,9 @@ T = TypeVar("T", bound="GroupValue")
 class GroupValue:
     """
     Attributes:
-        key (bool | float | int | None | str):
-        value (float | int | None | str):
+        key (bool | float | int | None | str): The column's value. A number JSON cannot carry exactly, such as an
+            integer beyond 2^53 or NaN, comes back as text.
+        value (float | int | None | str): Exact for count, sum, min and max, as for a key; avg is a float.
     """
 
     key: bool | float | int | None | str

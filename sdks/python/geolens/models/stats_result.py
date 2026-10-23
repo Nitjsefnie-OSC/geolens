@@ -18,21 +18,22 @@ T = TypeVar("T", bound="StatsResult")
 class StatsResult:
     """The requested statistics; one over no rows is null.
 
-    A value a float cannot carry (NaN, infinity) comes back as text.
+    ``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it
+    exactly, else text. ``avg`` is a float, or text for NaN and infinity.
 
         Attributes:
             count (int | None | Unset):
-            sum_ (float | None | str | Unset):
+            sum_ (float | int | None | str | Unset):
             avg (float | None | str | Unset):
-            min_ (float | None | str | Unset):
-            max_ (float | None | str | Unset):
+            min_ (float | int | None | str | Unset):
+            max_ (float | int | None | str | Unset):
     """
 
     count: int | None | Unset = UNSET
-    sum_: float | None | str | Unset = UNSET
+    sum_: float | int | None | str | Unset = UNSET
     avg: float | None | str | Unset = UNSET
-    min_: float | None | str | Unset = UNSET
-    max_: float | None | str | Unset = UNSET
+    min_: float | int | None | str | Unset = UNSET
+    max_: float | int | None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,7 +43,7 @@ class StatsResult:
         else:
             count = self.count
 
-        sum_: float | None | str | Unset
+        sum_: float | int | None | str | Unset
         if isinstance(self.sum_, Unset):
             sum_ = UNSET
         else:
@@ -54,13 +55,13 @@ class StatsResult:
         else:
             avg = self.avg
 
-        min_: float | None | str | Unset
+        min_: float | int | None | str | Unset
         if isinstance(self.min_, Unset):
             min_ = UNSET
         else:
             min_ = self.min_
 
-        max_: float | None | str | Unset
+        max_: float | int | None | str | Unset
         if isinstance(self.max_, Unset):
             max_ = UNSET
         else:
@@ -95,12 +96,12 @@ class StatsResult:
 
         count = _parse_count(d.pop("count", UNSET))
 
-        def _parse_sum_(data: object) -> float | None | str | Unset:
+        def _parse_sum_(data: object) -> float | int | None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(float | None | str | Unset, data)
+            return cast(float | int | None | str | Unset, data)
 
         sum_ = _parse_sum_(d.pop("sum", UNSET))
 
@@ -113,21 +114,21 @@ class StatsResult:
 
         avg = _parse_avg(d.pop("avg", UNSET))
 
-        def _parse_min_(data: object) -> float | None | str | Unset:
+        def _parse_min_(data: object) -> float | int | None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(float | None | str | Unset, data)
+            return cast(float | int | None | str | Unset, data)
 
         min_ = _parse_min_(d.pop("min", UNSET))
 
-        def _parse_max_(data: object) -> float | None | str | Unset:
+        def _parse_max_(data: object) -> float | int | None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(float | None | str | Unset, data)
+            return cast(float | int | None | str | Unset, data)
 
         max_ = _parse_max_(d.pop("max", UNSET))
 

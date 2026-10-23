@@ -17,7 +17,8 @@ T = TypeVar("T", bound="ValueCount")
 class ValueCount:
     """
     Attributes:
-        value (bool | float | int | None | str):
+        value (bool | float | int | None | str): The column's value. A number JSON cannot carry exactly, such as an
+            integer beyond 2^53 or NaN, comes back as text.
         count (int):
     """
 

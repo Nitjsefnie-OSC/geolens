@@ -5689,10 +5689,14 @@ export type GroupResponse = {
 export type GroupValue = {
     /**
      * Key
+     *
+     * The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.
      */
     key: string | number | number | boolean | null;
     /**
      * Value
+     *
+     * Exact for count, sum, min and max, as for a key; avg is a float.
      */
     value: number | number | string | null;
 };
@@ -12073,7 +12077,8 @@ export type StatsResponse = {
  *
  * The requested statistics; one over no rows is null.
  *
- * A value a float cannot carry (NaN, infinity) comes back as text.
+ * ``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it
+ * exactly, else text. ``avg`` is a float, or text for NaN and infinity.
  */
 export type StatsResult = {
     /**
@@ -12083,7 +12088,7 @@ export type StatsResult = {
     /**
      * Sum
      */
-    sum?: number | string | null;
+    sum?: number | number | string | null;
     /**
      * Avg
      */
@@ -12091,11 +12096,11 @@ export type StatsResult = {
     /**
      * Min
      */
-    min?: number | string | null;
+    min?: number | number | string | null;
     /**
      * Max
      */
-    max?: number | string | null;
+    max?: number | number | string | null;
 };
 
 /**
@@ -12853,6 +12858,8 @@ export type ValidationResultResponse = {
 export type ValueCount = {
     /**
      * Value
+     *
+     * The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.
      */
     value: string | number | number | boolean | null;
     /**

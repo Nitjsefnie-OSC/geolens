@@ -41,14 +41,15 @@ async def _points(session: AsyncSession, **dataset_fields):
     """Points 1-8 with pop = 10 * i; 1-6 are ``keep`` and 7-8 ``drop``.
 
     ``note`` holds a 3,000-character value per row; ``score`` is NaN on point
-    1, null on point 2 and ``i`` elsewhere.
+    1, null on point 2 and ``i`` elsewhere; ``big`` is 2^53 on point 1,
+    2^53 + 1 on point 2 and ``i`` elsewhere.
     """
     admin_id = await get_user_id(session, "admin")
     table = f"agg_{uuid.uuid4().hex[:10]}"
     await session.execute(
         text(
             f"CREATE TABLE data.{table} (gid SERIAL PRIMARY KEY, kind TEXT,"
-            " pop INTEGER, note TEXT, score DOUBLE PRECISION,"
+            " pop INTEGER, note TEXT, score DOUBLE PRECISION, big NUMERIC,"
             " geom geometry(Point, 4326),"
             " geom_4326 geometry(Point, 4326))"
         )
@@ -56,10 +57,13 @@ async def _points(session: AsyncSession, **dataset_fields):
     await session.execute(text(f"GRANT SELECT ON data.{table} TO geolens_reader"))
     await session.execute(
         text(
-            f"INSERT INTO data.{table} (kind, pop, note, score, geom, geom_4326)"  # noqa: S608
+            f"INSERT INTO data.{table}"  # noqa: S608
+            " (kind, pop, note, score, big, geom, geom_4326)"
             " SELECT CASE WHEN i <= 6 THEN 'keep' ELSE 'drop' END, i * 10,"
             " repeat('x', 3000) || i,"
             " CASE i WHEN 1 THEN 'NaN'::float8 WHEN 2 THEN NULL ELSE i END,"
+            " CASE i WHEN 1 THEN 9007199254740992 WHEN 2 THEN 9007199254740993"
+            " ELSE i END,"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326),"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326)"
             " FROM generate_series(1, 8) AS i"
@@ -158,6 +162,29 @@ class TestOperations:
         values = [entry["value"] for entry in resp.json()["result"]["values"]]
         assert values.count(None) == 1
         assert values.count("NaN") == 1
+
+    async def test_numeric_keys_and_extremes_keep_their_precision(
+        self, client: AsyncClient, points
+    ):
+        counted = await _aggregate(
+            client, points.id, {"op": "value_counts", "column": "big", "limit": 50}
+        )
+        grouped = await _aggregate(
+            client,
+            points.id,
+            {"op": "group_by", "group_column": "big", "stat": "max", "column": "big"},
+        )
+        stats = await _aggregate(
+            client, points.id, {"op": "stats", "column": "big", "stats": ["max", "min"]}
+        )
+
+        values = [v["value"] for v in counted.json()["result"]["values"]]
+        assert "9007199254740992" in values and "9007199254740993" in values
+        assert 3 in values
+        top = grouped.json()["result"]["groups"][0]
+        assert top == {"key": "9007199254740993", "value": "9007199254740993"}
+        assert stats.json()["result"]["max"] == "9007199254740993"
+        assert stats.json()["result"]["min"] == 3
 
     async def test_the_live_columns_are_read_once(
         self, client: AsyncClient, points, monkeypatch

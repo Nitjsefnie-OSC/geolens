@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import math
+from decimal import Decimal
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
@@ -56,6 +57,8 @@ from app.platform.sandbox.schemas import SandboxError
 MAX_VIEW_ROWS = 500_000
 AGGREGATE_TIMEOUT_MS = 4_000
 _MAX_ITEMS = 50
+# Integers at or past this lose precision as JavaScript numbers.
+_JS_SAFE_INTEGER = 2**53
 # Two widgets of one caller may run at once; a third waits for the client's
 # retry. More would let a few callers hold every slot on a worker.
 _CALLER_CONCURRENCY = 2
@@ -163,18 +166,25 @@ class CountResult(BaseModel):
 class StatsResult(BaseModel):
     """The requested statistics; one over no rows is null.
 
-    A value a float cannot carry (NaN, infinity) comes back as text.
+    ``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it
+    exactly, else text. ``avg`` is a float, or text for NaN and infinity.
     """
 
     count: int | None = None
-    sum: float | str | None = None
+    sum: int | float | str | None = None
     avg: float | str | None = None
-    min: float | str | None = None
-    max: float | str | None = None
+    min: int | float | str | None = None
+    max: int | float | str | None = None
+
+
+_EXACT_KEY = (
+    "The column's value. A number JSON cannot carry exactly, such as an integer "
+    "beyond 2^53 or NaN, comes back as text."
+)
 
 
 class ValueCount(BaseModel):
-    value: Scalar
+    value: Scalar = Field(description=_EXACT_KEY)
     count: int
 
 
@@ -196,8 +206,10 @@ class HistogramResult(BaseModel):
 
 
 class GroupValue(BaseModel):
-    key: Scalar
-    value: float | int | str | None
+    key: Scalar = Field(description=_EXACT_KEY)
+    value: float | int | str | None = Field(
+        description="Exact for count, sum, min and max, as for a key; avg is a float."
+    )
 
 
 class GroupByResult(BaseModel):
@@ -315,9 +327,12 @@ def _stat_sql(stat: str, column: str) -> str:
 
 
 def _stat_value(stat: str, value: Any) -> Any:
+    """Counts as integers, averages as floats, and sums and extremes exactly."""
     if value is None:
         return None
-    return int(value) if stat == "count" else _json_number(value)
+    if stat == "count":
+        return int(value)
+    return _json_number(value) if stat == "avg" else _exact(value)
 
 
 def build_aggregate_sql(
@@ -404,13 +419,29 @@ def _histogram(rows: Sequence[Sequence[Any]], bins: int) -> HistogramResult:
     )
 
 
-def _key(value: Any) -> Any:
-    """A category key as JSON; a non-finite float keeps PostgreSQL's spelling."""
-    if isinstance(value, float) and not math.isfinite(value):
+def _exact(value: Any) -> Any:
+    """A value as JSON without losing precision.
+
+    An integer within JavaScript's safe range, a float that reads back as the
+    same number, or else PostgreSQL's text for it.
+    """
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
         return (
             "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
         )
-    return _json_number(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if abs(value) < _JS_SAFE_INTEGER else str(value)
+    if not isinstance(value, Decimal):
+        return value
+    if not value.is_finite():
+        return str(value)
+    if value == value.to_integral_value():
+        integer = int(value)
+        return integer if abs(integer) < _JS_SAFE_INTEGER else str(integer)
+    as_float = float(value)
+    return as_float if Decimal(repr(as_float)) == value else str(value)
 
 
 def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseModel:
@@ -424,7 +455,7 @@ def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseMod
             }
         )
     if request.op == "value_counts":
-        listed = [ValueCount(value=_key(r[0]), count=int(r[1])) for r in rows]
+        listed = [ValueCount(value=_exact(r[0]), count=int(r[1])) for r in rows]
         total = int(rows[0][2]) if rows else 0
         return ValueCountsResult(
             values=listed, other_count=total - sum(v.count for v in listed)
@@ -434,8 +465,8 @@ def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseMod
     return GroupByResult(
         groups=[
             GroupValue(
-                key=_key(r[0]),
-                value=_json_number(r[1]),
+                key=_exact(r[0]),
+                value=_stat_value(request.stat, r[1]),
             )
             for r in rows
         ]

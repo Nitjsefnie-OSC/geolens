@@ -9573,6 +9573,7 @@
                 "type": "null"
               }
             ],
+            "description": "The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.",
             "title": "Key"
           },
           "value": {
@@ -9590,6 +9591,7 @@
                 "type": "null"
               }
             ],
+            "description": "Exact for count, sum, min and max, as for a key; avg is a float.",
             "title": "Value"
           }
         },
@@ -20623,7 +20625,7 @@
         "type": "object"
       },
       "StatsResult": {
-        "description": "The requested statistics; one over no rows is null.\n\nA value a float cannot carry (NaN, infinity) comes back as text.",
+        "description": "The requested statistics; one over no rows is null.\n\n``sum``, ``min`` and ``max`` are exact: a number when JSON can carry it\nexactly, else text. ``avg`` is a float, or text for NaN and infinity.",
         "properties": {
           "count": {
             "anyOf": [
@@ -20638,6 +20640,9 @@
           },
           "sum": {
             "anyOf": [
+              {
+                "type": "integer"
+              },
               {
                 "type": "number"
               },
@@ -20667,6 +20672,9 @@
           "min": {
             "anyOf": [
               {
+                "type": "integer"
+              },
+              {
                 "type": "number"
               },
               {
@@ -20680,6 +20688,9 @@
           },
           "max": {
             "anyOf": [
+              {
+                "type": "integer"
+              },
               {
                 "type": "number"
               },
@@ -21865,6 +21876,7 @@
                 "type": "null"
               }
             ],
+            "description": "The column's value. A number JSON cannot carry exactly, such as an integer beyond 2^53 or NaN, comes back as text.",
             "title": "Value"
           },
           "count": {
