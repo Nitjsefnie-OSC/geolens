@@ -294,16 +294,19 @@ ALLOWLIST: dict[str, str] = {
     ),
     # Owner-or-policy: creator passes, everyone else goes through
     # _can_access_another_users_job (the effective permission matrix), and a
-    # refusal is a 403 recorded as a permission denial.
+    # refusal answers 404 "Job not found", identical to an unknown id,
+    # and is still recorded as a permission denial.
     "app.platform.jobs.router.get_job_status": (
-        "owner-or-policy via _may_read_job; 403 on denial"
+        "owner-or-policy via _may_read_job; a refused id is "
+        'reported as 404 "Job not found", identical to an unknown id'
     ),
     "app.platform.jobs.router.get_job_statuses": (
         "owner-or-policy via _may_read_job; a refused id is "
         "reported as not_found, identical to an unknown id"
     ),
     "app.platform.jobs.router.retry_job": (
-        "owner-or-policy via _can_access_another_users_job; 403 on denial"
+        "owner-or-policy via _can_access_another_users_job; a refused id is "
+        'reported as 404 "Job not found", identical to an unknown id'
     ),
     # All four ingest doors load the job through get_job_or_404, which is
     # creator-or-admin and raises 404/403 before the handler sees the row.
@@ -1377,7 +1380,8 @@ def test_every_provenance_detail_route_decides_who_sees_it() -> None:
             "can_view_dataset_provenance (graded: full payload for the "
             "dataset's owner or an admin, a redacted projection for every "
             "other reader) or _can_access_another_users_job (owner-or-policy, "
-            "403 on denial). A dataset-visibility check alone is not an "
+            '404 "Job not found" on denial, identical to an unknown id). '
+            "A dataset-visibility check alone is not an "
             "answer: it admits any signed-in reader of a published public or "
             "internal dataset. Only for routes unguarded by design, add a "
             "PROVENANCE_ALLOWLIST entry in this file with a one-line "
