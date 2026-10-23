@@ -87,7 +87,7 @@ A migration ends with one last run after the portal stops changing, marked with 
 2. Run `inventory --scope org` again as an organization administrator, then `plan` on it, so the plan holds everything the portal has now.
 3. Run `migrate --dry-run --cutover` to see what the cutover would refuse, and fix what you can: retry failed items, map owners, promote owners to editor, accept or fix refreshes that stopped for review.
 4. Run `migrate --cutover` with the same credentials as before. It runs like any rerun, then checks what wouldn't carry over and marks the run as the final one only when nothing is left, or when you accept each loss:
-   - `--accept-unfinished-items`: a plan item isn't done (failed, skipped, can't run yet, waits on another item or is unlisted) or isn't up to date (its refresh failed or stopped for review, or GeoLens changed it). Items set to `skip` and items gone from the portal don't count.
+   - `--accept-unfinished-items`: a plan item isn't done (failed, skipped, can't run yet or waits on another item), is unlisted (even a finished one, since a rerun doesn't bring it up to date) or isn't up to date (its refresh failed or stopped for review, or GeoLens changed it). Items set to `skip` and items gone from the portal don't count.
    - `--accept-incomplete-inventory`: the plan wasn't last merged from a complete `--scope org` inventory read by an organization administrator, so it may miss portal items.
    - `--accept-attachment-loss`: a migrated layer has attachments, or its service doesn't say. GeoLens doesn't import attachments yet.
    - `--accept-unresolved-users`: an item still waits for its owner, or its plan owner doesn't name one GeoLens user.

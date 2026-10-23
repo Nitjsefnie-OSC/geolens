@@ -962,6 +962,33 @@ def test_cutover_refuses_unfinished_items_until_accepted(runner, plan_file, geol
     assert result.exit_code == 1
 
 
+def test_cutover_counts_a_finished_item_a_partial_merge_left_unlisted(
+    runner, plan_file, geolens
+):
+    _edit_plan(plan_file, (A2,))
+    FakeImport(geolens, [_layer(0, "Parcels", has_attachments=False)])
+    result, _ = _migrate(runner, plan_file)
+    assert result.exit_code == 0, result.output
+    plan = json.loads(plan_file.read_text())
+    plan["inventory"]["complete"] = False
+    for item in plan["items"]:
+        if item["id"] == A2:
+            item["unlisted"] = True
+    plan_file.write_text(json.dumps(plan))
+
+    result, payload = _migrate(
+        runner, plan_file, "--cutover", "--accept-incomplete-inventory"
+    )
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["refused"] == ["unfinished-items"]
+    [check] = [
+        c for c in payload["cutover"]["checks"] if c["check"] == "unfinished-items"
+    ]
+    assert check["items"] == [{"item": A2, "reason": "unlisted"}]
+    assert _state(plan_file)["cutover"] is None
+
+
 def test_cutover_counts_an_item_left_out_of_date_as_unfinished(
     runner, plan_file, geolens
 ):

@@ -34,7 +34,10 @@ def _unfinished(plan: Mapping[str, Any], state: MigrationState) -> list[dict[str
             continue
         entry = state.items.get(item["id"])
         status = state.status(item["id"])
-        if status not in FINISHED:
+        # A finished item the last merge didn't list isn't brought up to date.
+        if item.get("unlisted"):
+            out.append({"item": item["id"], "reason": "unlisted"})
+        elif status not in FINISHED:
             out.append({"item": item["id"], "reason": status})
         for reason in entry.stale if entry else []:
             out.append({"item": item["id"], "reason": reason})
