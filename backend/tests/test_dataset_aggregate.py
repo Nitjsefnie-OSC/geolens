@@ -8,7 +8,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog.datasets.domain import aggregate
-from tests.factories import create_dataset, create_raster_dataset, get_user_id
+from tests.factories import (
+    create_dataset,
+    create_raster_dataset,
+    create_user,
+    get_user_id,
+)
+from tests.test_api_key_scope_875 import _remove_keys_minted_by_the_test  # noqa: F401
 from tests.test_embed_token_creator_access import _embed
 
 pytestmark = pytest.mark.anyio
@@ -281,3 +287,32 @@ class TestAccess:
         resp = await _aggregate(client, raster.id, {"op": "count"}, admin_auth_header)
 
         assert resp.status_code == 404, resp.text
+
+
+class TestApiKeys:
+    @pytest.mark.parametrize("scope", ["read_only", "publish"])
+    async def test_a_scoped_key_reads_what_its_user_may_read(
+        self,
+        client: AsyncClient,
+        admin_auth_header: dict,
+        points,
+        private_points,
+        scope,
+    ):
+        """A private dataset its user cannot read stays 404 through the key."""
+        headers, _user_id = await create_user(client, admin_auth_header, "editor")
+        minted = await client.post(
+            "/auth/api-keys/",
+            json={"name": f"{scope} key", "scope": scope},
+            headers=headers,
+        )
+        assert minted.status_code == 201, minted.text
+        key = {"X-Api-Key": minted.json()["key"]}
+        body = {"op": "count", "filter": KEEP}
+
+        public = await _aggregate(client, points.id, body, key)
+        private = await _aggregate(client, private_points.id, body, key)
+
+        assert public.status_code == 200, public.text
+        assert public.json()["result"] == {"count": 6}
+        assert private.status_code == 404, private.text
