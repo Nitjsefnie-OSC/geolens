@@ -179,12 +179,19 @@ class AdminService:
         return result.scalar() or 0
 
     @staticmethod
-    def _is_viable_admin(user: User) -> bool:
-        return (
-            user.status == "active"
-            and user.is_active
-            and "admin" in {role.name for role in user.roles}
-        )
+    def _is_active(user: User) -> bool:
+        return user.status == "active" and user.is_active
+
+    @classmethod
+    def _is_viable_admin(cls, user: User) -> bool:
+        return cls._is_active(user) and "admin" in {role.name for role in user.roles}
+
+    async def _retire_member_tiles(self, user: User) -> None:
+        """Retire tile URLs ``user`` signed through its groups, when it is
+        active and about to stop being so; an inactive account signed none
+        since it last left active."""
+        if self._is_active(user):
+            await bump_publication_versions_for_member(self.db, user.id)
 
     @staticmethod
     def _user_audit_snapshot(user: User) -> dict[str, Any]:
@@ -311,7 +318,7 @@ class AdminService:
 
         await self._ensure_not_last_admin(user, "deactivate", lock_held=True)
 
-        await bump_publication_versions_for_member(self.db, user_id)
+        await self._retire_member_tiles(user)
         user.status = "deactivated"
         user.is_active = False
         await self.db.flush()
@@ -413,9 +420,9 @@ class AdminService:
         if target_status is not None:
             set_status = partial(self._set_status, user, target_status)
             if target_status != "active":
-                await bump_publication_versions_for_member(self.db, user_id)
+                await self._retire_member_tiles(user)
                 await set_status()
-            elif user.status != "active" or not user.is_active:
+            elif not self._is_active(user):
                 await reactivate_member_access(self.db, user_id, set_status)
 
         if updates.role is not None:
@@ -776,7 +783,7 @@ class AdminService:
         username = user.username
 
         await bump_publication_versions_for_owner(self.db, user_id)
-        await bump_publication_versions_for_member(self.db, user_id)
+        await self._retire_member_tiles(user)
         await self.db.execute(delete(UserRole).where(UserRole.user_id == user_id))
         await self.db.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
 

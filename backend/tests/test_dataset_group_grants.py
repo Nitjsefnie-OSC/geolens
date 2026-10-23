@@ -206,6 +206,34 @@ async def test_ending_a_members_account_retires_tiles_they_signed(
     assert stale.status_code == 403, stale.text
 
 
+@pytest.mark.parametrize("path", ["deactivate", "patch"])
+async def test_ending_an_already_inactive_account_keeps_signed_tiles(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    shared: _Shared,
+    test_db_session,
+    path: str,
+):
+    """Only leaving active moves who reads, so a repeat retires nobody's tiles."""
+    url = f"/admin/users/{shared.member_id}"
+
+    async def end():
+        if path == "deactivate":
+            return await client.post(f"{url}/deactivate/", headers=admin_auth_header)
+        return await client.patch(
+            url, json={"status": "suspended"}, headers=admin_auth_header
+        )
+
+    version = select(Dataset.publication_version).where(Dataset.id == shared.dataset.id)
+    assert (await end()).status_code == 200
+    before = await test_db_session.scalar(version)
+
+    repeated = await end()
+
+    assert repeated.status_code == 200, repeated.text
+    assert await test_db_session.scalar(version) == before
+
+
 async def test_adding_a_member_grants_reads_and_rolls_the_publication_version(
     client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
 ):
