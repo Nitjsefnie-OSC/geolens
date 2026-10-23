@@ -299,3 +299,23 @@ def test_a_failed_loss_report_write_is_finished_on_retry(
     assert entry["pending_loss"] is None
     assert any("County roads" in note for note in entry["notes"])
     assert (plan_file.parent / entry["loss_report_path"]).exists()
+
+
+HILLSHADE = "https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer"
+
+
+def test_only_this_maps_basemap_entry_is_sent(runner, plan_file, geolens):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    plan = json.loads(plan_file.read_text())
+    plan["basemap_map"] = {
+        f"https://tiles.example.org/{n}": "light" for n in range(150)
+    }
+    plan["basemap_map"][HILLSHADE] = "dark"
+    plan_file.write_text(json.dumps(plan))
+
+    result, _ = _run(runner, plan_file)
+
+    assert result.exit_code == 0, result.output
+    [request] = [s.json() for s in _sent(geolens)]
+    assert request["basemap_map"] == {HILLSHADE: "dark"}

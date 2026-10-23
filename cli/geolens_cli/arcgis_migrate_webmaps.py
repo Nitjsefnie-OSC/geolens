@@ -86,6 +86,23 @@ def match_datasets(ctx: MigrationContext, webmap: Mapping[str, Any]) -> dict[str
     return matches
 
 
+def _basemap_entries(
+    ctx: MigrationContext, webmap: Mapping[str, Any]
+) -> dict[str, str]:
+    """The plan's basemap mapping for this web map's first basemap layer; the
+    server reads no other entry and caps how many a request may carry."""
+    base = webmap.get("baseMap")
+    layers = base.get("baseMapLayers") if isinstance(base, dict) else None
+    first = layers[0] if isinstance(layers, list) and layers else None
+    if not isinstance(first, dict):
+        return {}
+    return {
+        key: ctx.basemap_map[key]
+        for key in (first.get("url"), first.get("styleUrl"))
+        if isinstance(key, str) and key in ctx.basemap_map
+    }
+
+
 def _fetch(ctx: MigrationContext, item_id: str) -> dict[str, Any]:
     if ctx.portal is None:
         raise ItemFailed("the run can't read this item from the portal")
@@ -150,7 +167,9 @@ def import_map(
         name=title[:255],
         title=item["title"][:255],
         visibility=check_map_visibility(item["target"]["visibility"]),
-        basemap_map=ArcgisWebmapImportRequestBasemapMap.from_dict(ctx.basemap_map),
+        basemap_map=ArcgisWebmapImportRequestBasemapMap.from_dict(
+            _basemap_entries(ctx, webmap)
+        ),
         dataset_matches=ArcgisWebmapImportRequestDatasetMatches.from_dict(matches),
     )
     try:
