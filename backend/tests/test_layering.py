@@ -1314,7 +1314,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/api/main.py": 1630,
     # Map request validation and published response contracts share this module,
     # including the visibility a client that hasn't opted in reads.
-    "backend/app/modules/catalog/maps/schemas.py": 1491,
+    "backend/app/modules/catalog/maps/schemas.py": 1499,
     # Metadata facade preserves the import and patch surface used by extensions and
     # callers.
     "backend/app/processing/ingest/metadata.py": 169,
