@@ -292,6 +292,7 @@ ALLOWLIST: dict[str, str] = {
         "ops-gated (manage_users / manage_tenants); acts on the stale set, "
         "returns counts and no job content"
     ),
+    # On the single-job status/retry routes:
     # Owner-or-policy: creator passes, everyone else goes through
     # _can_access_another_users_job (the effective permission matrix), and a
     # refusal answers 404 "Job not found", identical to an unknown id.
