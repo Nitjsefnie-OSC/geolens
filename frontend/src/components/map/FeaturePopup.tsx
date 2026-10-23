@@ -429,6 +429,10 @@ function ValueDisplay({
         rel="noopener noreferrer"
         className="text-primary underline break-all"
         onClick={(e) => e.stopPropagation()}
+        // Preserve native link activation inside the copyable property row.
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+        }}
       >
         {!expanded ? truncateGraphemes(value, MAX_VALUE_LENGTH) : value}
       </a>

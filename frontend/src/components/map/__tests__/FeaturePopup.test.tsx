@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@/test/test-utils';
+import { act, fireEvent, render, screen } from '@/test/test-utils';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { FeaturePopup, type FeatureInfo } from '../FeaturePopup';
 
@@ -118,6 +119,50 @@ describe('FeaturePopup — EASY-11 rich-text rendering', () => {
     expect(screen.queryByRole('link')).toBeNull();
     // The text content appears as plain text
     expect(screen.getByText('javascript:alert(1)')).toBeInTheDocument();
+  });
+});
+
+describe('FeaturePopup keyboard activation', () => {
+  it('leaves Enter on the YouTube link uncanceled without copying the value', async () => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    render(
+      <FeaturePopup
+        longitude={0}
+        latitude={0}
+        features={[makeFeature({ properties: { video: 'https://youtu.be/dQw4w9WgXcQ' } })]}
+        onClose={vi.fn()}
+      />,
+    );
+    const anchor = screen.getByRole('link', { name: 'https://youtu.be/dQw4w9WgXcQ' });
+    anchor.focus();
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+
+    await act(async () => { fireEvent(anchor, enter); });
+
+    expect(enter.defaultPrevented).toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', ' '])('copies the value when the property row receives %j', async (key) => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    render(
+      <FeaturePopup
+        longitude={0}
+        latitude={0}
+        features={[makeFeature({ properties: { video: 'https://youtu.be/dQw4w9WgXcQ' } })]}
+        onClose={vi.fn()}
+      />,
+    );
+    const row = screen.getByRole('button', { name: /Video/ });
+    row.focus();
+    const activation = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+
+    await act(async () => { fireEvent(row, activation); });
+
+    expect(activation.defaultPrevented).toBe(true);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('https://youtu.be/dQw4w9WgXcQ');
   });
 });
 
