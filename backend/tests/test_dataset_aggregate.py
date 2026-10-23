@@ -226,14 +226,15 @@ class TestOperations:
             {"lower": 0.0, "upper": 1e308, "count": 5},
         ]
 
-    async def test_double_extremes_keep_every_stored_digit(
+    async def test_double_values_keep_every_stored_digit(
         self, client: AsyncClient, test_db_session, points
     ):
         await test_db_session.execute(
             text(
                 f"UPDATE data.{points.table_name}"  # noqa: S608
                 " SET score = CASE gid WHEN 3 THEN 0.30000000000000004::float8"
-                " ELSE 1234567.123456789::float8 END WHERE gid IN (3, 4)"
+                " WHEN 4 THEN 1234567.123456789::float8 ELSE 0.3::float8 END"
+                " WHERE gid IN (3, 4, 5)"
             )
         )
         await test_db_session.commit()
@@ -267,11 +268,46 @@ class TestOperations:
             },
         )
 
+        near = {
+            "op": "or",
+            "args": [
+                {"op": "=", "args": [{"property": "pop"}, 30]},
+                {"op": "=", "args": [{"property": "pop"}, 50]},
+            ],
+        }
+        histogram = await _aggregate(
+            client,
+            points.id,
+            {"op": "histogram", "column": "score", "bins": 2, "filter": near},
+        )
+        counted = await _aggregate(
+            client,
+            points.id,
+            {"op": "value_counts", "column": "score", "filter": near},
+        )
+        keyed = await _aggregate(
+            client,
+            points.id,
+            {
+                "op": "group_by",
+                "group_column": "score",
+                "stat": "count",
+                "filter": near,
+            },
+        )
+
         assert stats.json()["result"]["min"] == 0.30000000000000004
         assert stats.json()["result"]["max"] == 1234567.123456789
         assert grouped.json()["result"]["groups"] == [
             {"key": "keep", "value": 0.30000000000000004}
         ]
+        bins = histogram.json()["result"]["bins"]
+        assert [b["count"] for b in bins] == [1, 1]
+        assert (bins[0]["lower"], bins[-1]["upper"]) == (0.3, 0.30000000000000004)
+        values = {v["value"] for v in counted.json()["result"]["values"]}
+        assert values == {0.3, 0.30000000000000004}
+        keys = {g["key"] for g in keyed.json()["result"]["groups"]}
+        assert keys == {0.3, 0.30000000000000004}
 
     async def test_a_deeply_nested_filter_is_an_invalid_filter(
         self, client: AsyncClient, points

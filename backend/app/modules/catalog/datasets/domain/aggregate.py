@@ -326,13 +326,20 @@ def _column_type(columns: dict[str, str], name: str, *, numeric: bool) -> str:
     return data_type
 
 
-def _stat_sql(stat: str, column: str, data_type: str) -> str:
-    quoted = _sql_quote_ident(column)
-    if stat == "count":
-        return f"count({quoted})"
-    # float8 holds every real and double exactly; numeric keeps 15 digits of one.
+def _number_sql(column: str, data_type: str) -> str:
+    """A numeric column as a number to aggregate, without losing a stored digit.
+
+    float8 holds every real and double exactly, where a numeric cast keeps 15
+    digits of one. money needs numeric to aggregate at all.
+    """
     cast = "float8" if data_type in _FLOAT_TYPES else "numeric"
-    return f"{stat}({quoted}::{cast})"
+    return f"{_sql_quote_ident(column)}::{cast}"
+
+
+def _stat_sql(stat: str, column: str, data_type: str) -> str:
+    if stat == "count":
+        return f"count({_sql_quote_ident(column)})"
+    return f"{stat}({_number_sql(column, data_type)})"
 
 
 def _stat_value(stat: str, value: Any) -> Any:
@@ -380,11 +387,13 @@ def build_aggregate_sql(
             f" GROUP BY 1 ORDER BY 2 DESC, 1 NULLS LAST LIMIT {request.limit}"
         )
     if request.op == "histogram":
-        _column_type(columns, request.column, numeric=True)
+        number = _number_sql(
+            request.column, _column_type(columns, request.column, numeric=True)
+        )
         quoted = _sql_quote_ident(request.column)
         bins = request.bins
         return (
-            f"WITH _v AS (SELECT {quoted}::numeric::float8 AS x"
+            f"WITH _v AS (SELECT {number}::float8 AS x"
             f"{from_where(f'{quoted} IS NOT NULL')}),"
             " _f AS (SELECT x FROM _v"
             " WHERE x > '-Infinity'::float8 AND x < 'Infinity'::float8),"
