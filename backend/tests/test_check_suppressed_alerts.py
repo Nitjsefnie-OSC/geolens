@@ -58,7 +58,9 @@ def test_open_alert_without_a_suppression_is_left_alone() -> None:
     assert checker.stuck_alerts(sarif, [_alert(7, 200), _alert(8, 300)]) == []
 
 
-def test_stuck_alert_is_dismissed_with_marker_and_audit_log(monkeypatch, capsys) -> None:
+def test_stuck_alert_is_dismissed_with_marker_and_audit_log(
+    monkeypatch, capsys
+) -> None:
     sarif = {"runs": [{"results": [_result(148, suppressed=True)]}]}
     monkeypatch.setattr(checker, "_load_sarif", lambda path: sarif)
     monkeypatch.setattr(checker, "_open_alerts", lambda repo: [_alert(136, 148)])
@@ -74,11 +76,17 @@ def test_stuck_alert_is_dismissed_with_marker_and_audit_log(monkeypatch, capsys)
     assert calls == [
         (
             [
-                "gh", "api", "--method", "PUT",
+                "gh",
+                "api",
+                "--method",
+                "PUT",
                 "repos/owner/repo/code-scanning/alerts/136",
-                "-f", "state=dismissed",
-                "-f", "dismissed_reason=wont_fix",
-                "-f", "dismissed_comment=Suppressed in source by # codeql[py/sql-injection].",
+                "-f",
+                "state=dismissed",
+                "-f",
+                "dismissed_reason=wont_fix",
+                "-f",
+                "dismissed_comment=Suppressed in source by # codeql[py/sql-injection].",
             ],
             {"check": True, "capture_output": True, "text": True},
         )
@@ -116,7 +124,9 @@ def test_non_stuck_alerts_are_not_dismissed(monkeypatch) -> None:
         ]
     }
     monkeypatch.setattr(checker, "_load_sarif", lambda path: sarif)
-    monkeypatch.setattr(checker, "_open_alerts", lambda repo: [_alert(7, 200), _alert(8, 300)])
+    monkeypatch.setattr(
+        checker, "_open_alerts", lambda repo: [_alert(7, 200), _alert(8, 300)]
+    )
     calls = []
 
     def run(argv, **kwargs):
@@ -124,5 +134,7 @@ def test_non_stuck_alerts_are_not_dismissed(monkeypatch) -> None:
         raise AssertionError("no dismissal expected")
 
     monkeypatch.setattr(checker.subprocess, "run", run)
-    assert checker.main(["check_suppressed_alerts.py", "results.sarif", "owner/repo"]) == 0
+    assert (
+        checker.main(["check_suppressed_alerts.py", "results.sarif", "owner/repo"]) == 0
+    )
     assert calls == []
