@@ -357,11 +357,15 @@ def _categorical(
     for info, sym in classes:
         value = info.get("value")
         key = None if value is None else str(value)
-        if key is None or key in seen or len(categories) >= MAX_CLASSES:
+        if key is None or len(categories) >= MAX_CLASSES:
             dropped += 1
             continue
-        seen.add(key)
         typed = _typed_value(value, (numeric_fields or {}).get(field_name))
+        paint_key = _js_string(typed)
+        if paint_key in seen:
+            dropped += 1
+            continue
+        seen.add(paint_key)
         label = info.get("label")
         categories.append(
             {
@@ -370,7 +374,7 @@ def _categorical(
                 "color": _class_color(sym),
             }
         )
-        pairs += [_js_string(typed), _css_color(sym)]
+        pairs += [paint_key, _css_color(sym)]
     if dropped:
         loss.add(path, "renderer_class_dropped", f"{dropped} classes")
     if not categories:

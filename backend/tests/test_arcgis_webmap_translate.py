@@ -401,6 +401,25 @@ class TestUniqueValueRenderer:
         assert isinstance(layer.style_config["categories"][0]["value"], float)
         assert layer.paint["fill-color"][3][2] == "123456789012345680000"
 
+    def test_values_with_the_same_paint_key_collapse_to_one_class(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "N",
+            "uniqueValueInfos": [
+                {"value": "1", "symbol": _fill([255, 0, 0, 255])},
+                {"value": "1.0", "symbol": _fill([0, 0, 255, 255])},
+            ],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "N", "type": "esriFieldTypeInteger"}
+        ]
+        result = _translate(webmap)
+        layer = result.layers[0]
+        assert [c["value"] for c in layer.style_config["categories"]] == [1]
+        assert layer.paint["fill-color"][3][2:4] == ["1", "#ff0000"]
+        assert _kinds(result) == {"renderer_class_dropped"}
+
     def test_oid_values_are_stored_as_numbers(self) -> None:
         renderer = {
             "type": "uniqueValue",
