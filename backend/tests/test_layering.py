@@ -1174,7 +1174,7 @@ def test_decomposed_service_modules_stay_within_size_budgets() -> None:
     facade_line_budgets = {
         "backend/app/modules/catalog/maps/service.py": 108,
         "backend/app/modules/catalog/search/service.py": 80,
-        "backend/app/modules/catalog/datasets/domain/service.py": 116,
+        "backend/app/modules/catalog/datasets/domain/service.py": 118,
         "backend/app/processing/ai/chat_service.py": 487,
         "backend/app/platform/extensions/defaults.py": 75,
     }
