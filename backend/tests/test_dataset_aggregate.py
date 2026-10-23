@@ -309,6 +309,42 @@ class TestOperations:
         keys = {g["key"] for g in keyed.json()["result"]["groups"]}
         assert keys == {0.3, 0.30000000000000004}
 
+    async def test_far_future_timestamps_stay_distinct_keys(
+        self, client: AsyncClient, test_db_session, points
+    ):
+        table = points.table_name
+        await test_db_session.execute(
+            text(f"ALTER TABLE data.{table} ADD COLUMN seen TIMESTAMPTZ")
+        )
+        await test_db_session.execute(
+            text(
+                f"UPDATE data.{table} SET seen = CASE gid"  # noqa: S608
+                " WHEN 1 THEN '10000-01-01 00:00:00+00'::timestamptz"
+                " WHEN 2 THEN '10001-06-01 00:00:00+00'::timestamptz"
+                " ELSE 'infinity'::timestamptz END WHERE gid IN (1, 2, 3)"
+            )
+        )
+        await test_db_session.commit()
+        expected = {
+            "10000-01-01T00:00:00+00:00": 1,
+            "10001-06-01T00:00:00+00:00": 1,
+            "infinity": 1,
+        }
+
+        counted = await _aggregate(
+            client, points.id, {"op": "value_counts", "column": "seen"}
+        )
+        grouped = await _aggregate(
+            client,
+            points.id,
+            {"op": "group_by", "group_column": "seen", "stat": "count"},
+        )
+
+        values = counted.json()["result"]["values"]
+        groups = grouped.json()["result"]["groups"]
+        assert {v["value"]: v["count"] for v in values if v["value"]} == expected
+        assert {g["key"]: g["value"] for g in groups if g["key"]} == expected
+
     async def test_a_deeply_nested_filter_is_an_invalid_filter(
         self, client: AsyncClient, points
     ):

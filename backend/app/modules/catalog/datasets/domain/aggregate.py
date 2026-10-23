@@ -52,6 +52,7 @@ from app.platform.cache import (
 from app.platform.extensions import get_catalog_port
 from app.platform.sandbox.executor import execute_safe
 from app.platform.sandbox.schemas import SandboxError
+from app.platform.timestamptz_text import utc_timestamptz_text
 
 # A 500k-row view took 0.4-0.7 s per aggregate on a 2M-row point table in a
 # laptop's Docker PostgreSQL, well inside the timeout. Raise it once a
@@ -336,6 +337,27 @@ def _number_sql(column: str, data_type: str) -> str:
     return f"{_sql_quote_ident(column)}::{cast}"
 
 
+def _key_sql(column: str, data_type: str) -> tuple[str, str]:
+    """What a category groups on, and its returned key over the grouped ``_g._k``.
+
+    A timestamptz groups on its value and is written afterwards in UTC text
+    with the full year, since the tile text folds every year past 9999 into
+    ``infinity``. Other types group on their JSON-ready form.
+    """
+    quoted = _sql_quote_ident(column)
+    if data_type != "timestamp with time zone":
+        return value_expr(quoted, data_type), "_g._k"
+    utc = "(_g._k AT TIME ZONE 'UTC')"
+    far_future = (
+        f"to_char({utc}, 'YYYY-MM-DD\"T\"HH24:MI:SS')"
+        f" || rtrim(rtrim(to_char({utc}, '.US'), '0'), '.') || '+00:00'"
+    )
+    return quoted, (
+        f"CASE WHEN isfinite(_g._k) AND {utc} >= '10000-01-01' THEN {far_future}"
+        f" ELSE {utc_timestamptz_text('_g._k')} END"
+    )
+
+
 def _stat_sql(stat: str, column: str, data_type: str) -> str:
     if stat == "count":
         return f"count({_sql_quote_ident(column)})"
@@ -377,14 +399,15 @@ def build_aggregate_sql(
         )
         return f"SELECT {selects}{from_where()}"
     if request.op == "value_counts":
-        key = value_expr(
-            _sql_quote_ident(request.column),
-            _column_type(columns, request.column, numeric=False),
+        group, key = _key_sql(
+            request.column, _column_type(columns, request.column, numeric=False)
         )
         return (
-            f"SELECT {key} AS _k, count(*) AS _n, sum(count(*)) OVER () AS _total"
+            f"SELECT {key} AS _k, _g._n, _g._total FROM ("
+            f"SELECT {group} AS _k, count(*) AS _n, sum(count(*)) OVER () AS _total"
             f"{from_where()}"
             f" GROUP BY 1 ORDER BY 2 DESC, 1 NULLS LAST LIMIT {request.limit}"
+            ") AS _g ORDER BY _g._n DESC, _g._k NULLS LAST"
         )
     if request.op == "histogram":
         number = _number_sql(
@@ -402,8 +425,8 @@ def build_aggregate_sql(
             f" ELSE least(width_bucket(_f.x, _r.lo, _r.hi, {bins}), {bins}) END AS _b,"
             " count(*) AS _n FROM _f CROSS JOIN _r GROUP BY 1, 2, 3 ORDER BY 3"
         )
-    key = value_expr(
-        _sql_quote_ident(request.group_column),
+    group, key = _key_sql(
+        request.group_column,
         _column_type(columns, request.group_column, numeric=False),
     )
     if request.stat == "count":
@@ -412,8 +435,10 @@ def build_aggregate_sql(
         data_type = _column_type(columns, request.column, numeric=True)
         value = _stat_sql(request.stat, request.column, data_type)
     return (
-        f"SELECT {key} AS _k, {value} AS _v{from_where()}"
+        f"SELECT {key} AS _k, _g._v FROM ("
+        f"SELECT {group} AS _k, {value} AS _v{from_where()}"
         f" GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1 NULLS LAST LIMIT {request.limit}"
+        ") AS _g ORDER BY _g._v DESC NULLS LAST, _g._k NULLS LAST"
     )
 
 
