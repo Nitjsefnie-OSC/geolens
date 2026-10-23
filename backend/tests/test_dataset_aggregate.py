@@ -2,8 +2,11 @@
 
 import asyncio
 import contextlib
+import sys
 import uuid
+from pathlib import Path
 
+import httpx
 import pytest
 import sqlalchemy
 from httpx import AsyncClient
@@ -177,6 +180,32 @@ class TestOperations:
 
         assert resp.status_code == 200, resp.text
         assert len(reads) == 1
+
+    @pytest.mark.parametrize(
+        ("body", "expected"), OPERATIONS, ids=[body["op"] for body, _ in OPERATIONS]
+    )
+    async def test_the_python_sdk_reads_each_result_as_its_operations(
+        self, client: AsyncClient, points, body, expected
+    ):
+        sdk = Path(__file__).resolve().parents[2] / "sdks" / "python"
+        if not (sdk / "geolens" / "client.py").is_file():
+            pytest.skip("the Python SDK source tree is not present")
+        if str(sdk) not in sys.path:
+            sys.path.insert(0, str(sdk))
+        from geolens.api.datasets_analysis import (
+            aggregate_endpoint_datasets_dataset_id_aggregate_post as endpoint,
+        )
+        from geolens.client import Client
+
+        resp = await _aggregate(client, points.id, body)
+        parsed = endpoint._parse_response(
+            client=Client(base_url="http://sdk.test"),
+            response=httpx.Response(200, content=resp.content),
+        )
+
+        result_type = "".join(part.title() for part in body["op"].split("_"))
+        assert type(parsed.result).__name__ == f"{result_type}Result"
+        assert parsed.result.to_dict() == expected
 
     async def test_a_view_counts_only_the_features_inside_it(
         self, client: AsyncClient, points

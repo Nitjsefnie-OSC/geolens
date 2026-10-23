@@ -909,59 +909,6 @@
         "title": "AdminUserCreate",
         "type": "object"
       },
-      "AggregateResponse": {
-        "properties": {
-          "op": {
-            "enum": [
-              "count",
-              "stats",
-              "value_counts",
-              "histogram",
-              "group_by"
-            ],
-            "title": "Op",
-            "type": "string"
-          },
-          "result": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CountResult"
-              },
-              {
-                "$ref": "#/components/schemas/StatsResult"
-              },
-              {
-                "$ref": "#/components/schemas/ValueCountsResult"
-              },
-              {
-                "$ref": "#/components/schemas/HistogramResult"
-              },
-              {
-                "$ref": "#/components/schemas/GroupByResult"
-              }
-            ],
-            "title": "Result"
-          },
-          "approximate": {
-            "const": false,
-            "default": false,
-            "description": "Always false: a view too wide to count exactly is refused.",
-            "title": "Approximate",
-            "type": "boolean"
-          },
-          "cached": {
-            "title": "Cached",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "op",
-          "result",
-          "cached"
-        ],
-        "title": "AggregateResponse",
-        "type": "object"
-      },
       "AlterColumnTypeRequest": {
         "properties": {
           "new_type": {
@@ -5433,6 +5380,36 @@
         "title": "CountRequest",
         "type": "object"
       },
+      "CountResponse": {
+        "properties": {
+          "approximate": {
+            "const": false,
+            "default": false,
+            "description": "Always false: a view too wide to count exactly is refused.",
+            "title": "Approximate",
+            "type": "boolean"
+          },
+          "cached": {
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "op": {
+            "const": "count",
+            "title": "Op",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/CountResult"
+          }
+        },
+        "required": [
+          "cached",
+          "op",
+          "result"
+        ],
+        "title": "CountResponse",
+        "type": "object"
+      },
       "CountResult": {
         "properties": {
           "count": {
@@ -9422,6 +9399,36 @@
         "title": "GroupByRequest",
         "type": "object"
       },
+      "GroupByResponse": {
+        "properties": {
+          "approximate": {
+            "const": false,
+            "default": false,
+            "description": "Always false: a view too wide to count exactly is refused.",
+            "title": "Approximate",
+            "type": "boolean"
+          },
+          "cached": {
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "op": {
+            "const": "group_by",
+            "title": "Op",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/GroupByResult"
+          }
+        },
+        "required": [
+          "cached",
+          "op",
+          "result"
+        ],
+        "title": "GroupByResponse",
+        "type": "object"
+      },
       "GroupByResult": {
         "properties": {
           "groups": {
@@ -9727,6 +9734,36 @@
           "column"
         ],
         "title": "HistogramRequest",
+        "type": "object"
+      },
+      "HistogramResponse": {
+        "properties": {
+          "approximate": {
+            "const": false,
+            "default": false,
+            "description": "Always false: a view too wide to count exactly is refused.",
+            "title": "Approximate",
+            "type": "boolean"
+          },
+          "cached": {
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "op": {
+            "const": "histogram",
+            "title": "Op",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/HistogramResult"
+          }
+        },
+        "required": [
+          "cached",
+          "op",
+          "result"
+        ],
+        "title": "HistogramResponse",
         "type": "object"
       },
       "HistogramResult": {
@@ -20555,6 +20592,36 @@
         "title": "StatsRequest",
         "type": "object"
       },
+      "StatsResponse": {
+        "properties": {
+          "approximate": {
+            "const": false,
+            "default": false,
+            "description": "Always false: a view too wide to count exactly is refused.",
+            "title": "Approximate",
+            "type": "boolean"
+          },
+          "cached": {
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "op": {
+            "const": "stats",
+            "title": "Op",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/StatsResult"
+          }
+        },
+        "required": [
+          "cached",
+          "op",
+          "result"
+        ],
+        "title": "StatsResponse",
+        "type": "object"
+      },
       "StatsResult": {
         "description": "The requested statistics; one over no rows is null.\n\nA value a float cannot carry (NaN, infinity) comes back as text.",
         "properties": {
@@ -21869,6 +21936,36 @@
           "column"
         ],
         "title": "ValueCountsRequest",
+        "type": "object"
+      },
+      "ValueCountsResponse": {
+        "properties": {
+          "approximate": {
+            "const": false,
+            "default": false,
+            "description": "Always false: a view too wide to count exactly is refused.",
+            "title": "Approximate",
+            "type": "boolean"
+          },
+          "cached": {
+            "title": "Cached",
+            "type": "boolean"
+          },
+          "op": {
+            "const": "value_counts",
+            "title": "Op",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ValueCountsResult"
+          }
+        },
+        "required": [
+          "cached",
+          "op",
+          "result"
+        ],
+        "title": "ValueCountsResponse",
         "type": "object"
       },
       "ValueCountsResult": {
@@ -38105,7 +38202,34 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AggregateResponse"
+                  "discriminator": {
+                    "mapping": {
+                      "count": "#/components/schemas/CountResponse",
+                      "group_by": "#/components/schemas/GroupByResponse",
+                      "histogram": "#/components/schemas/HistogramResponse",
+                      "stats": "#/components/schemas/StatsResponse",
+                      "value_counts": "#/components/schemas/ValueCountsResponse"
+                    },
+                    "propertyName": "op"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CountResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StatsResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ValueCountsResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HistogramResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GroupByResponse"
+                    }
+                  ],
+                  "title": "Response Aggregate Endpoint Datasets  Dataset Id  Aggregate  Post"
                 }
               }
             },

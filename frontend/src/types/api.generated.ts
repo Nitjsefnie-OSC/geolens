@@ -6506,25 +6506,6 @@ export interface components {
              */
             role: string;
         };
-        /** AggregateResponse */
-        AggregateResponse: {
-            /**
-             * Op
-             * @enum {string}
-             */
-            op: "count" | "stats" | "value_counts" | "histogram" | "group_by";
-            /** Result */
-            result: components["schemas"]["CountResult"] | components["schemas"]["StatsResult"] | components["schemas"]["ValueCountsResult"] | components["schemas"]["HistogramResult"] | components["schemas"]["GroupByResult"];
-            /**
-             * Approximate
-             * @description Always false: a view too wide to count exactly is refused.
-             * @default false
-             * @constant
-             */
-            approximate: false;
-            /** Cached */
-            cached: boolean;
-        };
         /** AlterColumnTypeRequest */
         AlterColumnTypeRequest: {
             /**
@@ -8495,6 +8476,24 @@ export interface components {
              */
             op: "count";
         };
+        /** CountResponse */
+        CountResponse: {
+            /**
+             * Approximate
+             * @description Always false: a view too wide to count exactly is refused.
+             * @default false
+             * @constant
+             */
+            approximate: false;
+            /** Cached */
+            cached: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "count";
+            result: components["schemas"]["CountResult"];
+        };
         /** CountResult */
         CountResult: {
             /** Count */
@@ -10262,6 +10261,24 @@ export interface components {
              */
             limit: number;
         };
+        /** GroupByResponse */
+        GroupByResponse: {
+            /**
+             * Approximate
+             * @description Always false: a view too wide to count exactly is refused.
+             * @default false
+             * @constant
+             */
+            approximate: false;
+            /** Cached */
+            cached: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "group_by";
+            result: components["schemas"]["GroupByResult"];
+        };
         /** GroupByResult */
         GroupByResult: {
             /**
@@ -10399,6 +10416,24 @@ export interface components {
              * @default 10
              */
             bins: number;
+        };
+        /** HistogramResponse */
+        HistogramResponse: {
+            /**
+             * Approximate
+             * @description Always false: a view too wide to count exactly is refused.
+             * @default false
+             * @constant
+             */
+            approximate: false;
+            /** Cached */
+            cached: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "histogram";
+            result: components["schemas"]["HistogramResult"];
         };
         /** HistogramResult */
         HistogramResult: {
@@ -15078,6 +15113,24 @@ export interface components {
             /** Stats */
             stats: ("count" | "sum" | "avg" | "min" | "max")[];
         };
+        /** StatsResponse */
+        StatsResponse: {
+            /**
+             * Approximate
+             * @description Always false: a view too wide to count exactly is refused.
+             * @default false
+             * @constant
+             */
+            approximate: false;
+            /** Cached */
+            cached: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "stats";
+            result: components["schemas"]["StatsResult"];
+        };
         /**
          * StatsResult
          * @description The requested statistics; one over no rows is null.
@@ -15709,6 +15762,24 @@ export interface components {
              * @default 10
              */
             limit: number;
+        };
+        /** ValueCountsResponse */
+        ValueCountsResponse: {
+            /**
+             * Approximate
+             * @description Always false: a view too wide to count exactly is refused.
+             * @default false
+             * @constant
+             */
+            approximate: false;
+            /** Cached */
+            cached: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "value_counts";
+            result: components["schemas"]["ValueCountsResult"];
         };
         /** ValueCountsResult */
         ValueCountsResult: {
@@ -26284,7 +26355,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AggregateResponse"];
+                    "application/json": components["schemas"]["CountResponse"] | components["schemas"]["StatsResponse"] | components["schemas"]["ValueCountsResponse"] | components["schemas"]["HistogramResponse"] | components["schemas"]["GroupByResponse"];
                 };
             };
             /** @description Bad request — invalid query parameters or payload */

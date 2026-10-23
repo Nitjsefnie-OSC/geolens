@@ -8,13 +8,17 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.aggregate_response import AggregateResponse
 from ...models.count_request import CountRequest
+from ...models.count_response import CountResponse
 from ...models.group_by_request import GroupByRequest
+from ...models.group_by_response import GroupByResponse
 from ...models.histogram_request import HistogramRequest
+from ...models.histogram_response import HistogramResponse
 from ...models.problem_detail import ProblemDetail
 from ...models.stats_request import StatsRequest
+from ...models.stats_response import StatsResponse
 from ...models.value_counts_request import ValueCountsRequest
+from ...models.value_counts_response import ValueCountsResponse
 from ...types import Unset
 from uuid import UUID
 
@@ -59,9 +63,65 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> AggregateResponse | ProblemDetail | None:
+) -> (
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+    | None
+):
     if response.status_code == 200:
-        response_200 = AggregateResponse.from_dict(response.json())
+
+        def _parse_response_200(
+            data: object,
+        ) -> (
+            CountResponse
+            | GroupByResponse
+            | HistogramResponse
+            | StatsResponse
+            | ValueCountsResponse
+        ):
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                response_200_type_0 = CountResponse.from_dict(data)
+
+                return response_200_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                response_200_type_1 = StatsResponse.from_dict(data)
+
+                return response_200_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                response_200_type_2 = ValueCountsResponse.from_dict(data)
+
+                return response_200_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                response_200_type_3 = HistogramResponse.from_dict(data)
+
+                return response_200_type_3
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            if not isinstance(data, dict):
+                raise TypeError()
+            response_200_type_4 = GroupByResponse.from_dict(data)
+
+            return response_200_type_4
+
+        response_200 = _parse_response_200(response.json())
 
         return response_200
 
@@ -113,7 +173,14 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[AggregateResponse | ProblemDetail]:
+) -> Response[
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -132,7 +199,14 @@ def sync_detailed(
     | StatsRequest
     | ValueCountsRequest,
     x_embed_token: None | str | Unset = UNSET,
-) -> Response[AggregateResponse | ProblemDetail]:
+) -> Response[
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+]:
     """Aggregate Endpoint
 
      Compute one exact aggregate over a dataset's rows, for a widget.
@@ -163,7 +237,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[AggregateResponse | ProblemDetail]
+        Response[CountResponse | GroupByResponse | HistogramResponse | StatsResponse | ValueCountsResponse | ProblemDetail]
     """
 
     kwargs = _get_kwargs(
@@ -189,7 +263,15 @@ def sync(
     | StatsRequest
     | ValueCountsRequest,
     x_embed_token: None | str | Unset = UNSET,
-) -> AggregateResponse | ProblemDetail | None:
+) -> (
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+    | None
+):
     """Aggregate Endpoint
 
      Compute one exact aggregate over a dataset's rows, for a widget.
@@ -220,7 +302,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        AggregateResponse | ProblemDetail
+        CountResponse | GroupByResponse | HistogramResponse | StatsResponse | ValueCountsResponse | ProblemDetail
     """
 
     return sync_detailed(
@@ -241,7 +323,14 @@ async def asyncio_detailed(
     | StatsRequest
     | ValueCountsRequest,
     x_embed_token: None | str | Unset = UNSET,
-) -> Response[AggregateResponse | ProblemDetail]:
+) -> Response[
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+]:
     """Aggregate Endpoint
 
      Compute one exact aggregate over a dataset's rows, for a widget.
@@ -272,7 +361,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[AggregateResponse | ProblemDetail]
+        Response[CountResponse | GroupByResponse | HistogramResponse | StatsResponse | ValueCountsResponse | ProblemDetail]
     """
 
     kwargs = _get_kwargs(
@@ -296,7 +385,15 @@ async def asyncio(
     | StatsRequest
     | ValueCountsRequest,
     x_embed_token: None | str | Unset = UNSET,
-) -> AggregateResponse | ProblemDetail | None:
+) -> (
+    CountResponse
+    | GroupByResponse
+    | HistogramResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | ProblemDetail
+    | None
+):
     """Aggregate Endpoint
 
      Compute one exact aggregate over a dataset's rows, for a widget.
@@ -327,7 +424,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        AggregateResponse | ProblemDetail
+        CountResponse | GroupByResponse | HistogramResponse | StatsResponse | ValueCountsResponse | ProblemDetail
     """
 
     return (

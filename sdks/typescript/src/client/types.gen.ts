@@ -556,30 +556,6 @@ export type AdminUserCreate = {
 };
 
 /**
- * AggregateResponse
- */
-export type AggregateResponse = {
-    /**
-     * Op
-     */
-    op: 'count' | 'stats' | 'value_counts' | 'histogram' | 'group_by';
-    /**
-     * Result
-     */
-    result: CountResult | StatsResult | ValueCountsResult | HistogramResult | GroupByResult;
-    /**
-     * Approximate
-     *
-     * Always false: a view too wide to count exactly is refused.
-     */
-    approximate?: false;
-    /**
-     * Cached
-     */
-    cached: boolean;
-};
-
-/**
  * AlterColumnTypeRequest
  */
 export type AlterColumnTypeRequest = {
@@ -3266,6 +3242,27 @@ export type CountRequest = {
 };
 
 /**
+ * CountResponse
+ */
+export type CountResponse = {
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+    /**
+     * Op
+     */
+    op: 'count';
+    result: CountResult;
+};
+
+/**
  * CountResult
  */
 export type CountResult = {
@@ -5570,6 +5567,27 @@ export type GroupByRequest = {
 };
 
 /**
+ * GroupByResponse
+ */
+export type GroupByResponse = {
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+    /**
+     * Op
+     */
+    op: 'group_by';
+    result: GroupByResult;
+};
+
+/**
  * GroupByResult
  */
 export type GroupByResult = {
@@ -5768,6 +5786,27 @@ export type HistogramRequest = {
      * Bins
      */
     bins?: number;
+};
+
+/**
+ * HistogramResponse
+ */
+export type HistogramResponse = {
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+    /**
+     * Op
+     */
+    op: 'histogram';
+    result: HistogramResult;
 };
 
 /**
@@ -12009,6 +12048,27 @@ export type StatsRequest = {
 };
 
 /**
+ * StatsResponse
+ */
+export type StatsResponse = {
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+    /**
+     * Op
+     */
+    op: 'stats';
+    result: StatsResult;
+};
+
+/**
  * StatsResult
  *
  * The requested statistics; one over no rows is null.
@@ -12836,6 +12896,27 @@ export type ValueCountsRequest = {
      * Limit
      */
     limit?: number;
+};
+
+/**
+ * ValueCountsResponse
+ */
+export type ValueCountsResponse = {
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+    /**
+     * Op
+     */
+    op: 'value_counts';
+    result: ValueCountsResult;
 };
 
 /**
@@ -19749,9 +19830,21 @@ export type AggregateEndpointDatasetsDatasetIdAggregatePostError = AggregateEndp
 
 export type AggregateEndpointDatasetsDatasetIdAggregatePostResponses = {
     /**
+     * Response Aggregate Endpoint Datasets  Dataset Id  Aggregate  Post
+     *
      * Successful Response
      */
-    200: AggregateResponse;
+    200: ({
+        op: 'count';
+    } & CountResponse) | ({
+        op: 'stats';
+    } & StatsResponse) | ({
+        op: 'value_counts';
+    } & ValueCountsResponse) | ({
+        op: 'histogram';
+    } & HistogramResponse) | ({
+        op: 'group_by';
+    } & GroupByResponse);
 };
 
 export type AggregateEndpointDatasetsDatasetIdAggregatePostResponse = AggregateEndpointDatasetsDatasetIdAggregatePostResponses[keyof AggregateEndpointDatasetsDatasetIdAggregatePostResponses];

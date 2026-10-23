@@ -18,8 +18,6 @@ from .admin_password_reset import AdminPasswordReset
 from .admin_share_token_list_response import AdminShareTokenListResponse
 from .admin_share_token_response import AdminShareTokenResponse
 from .admin_user_create import AdminUserCreate
-from .aggregate_response import AggregateResponse
-from .aggregate_response_op import AggregateResponseOp
 from .ai_availability_response import AIAvailabilityResponse
 from .ai_probe_check import AIProbeCheck
 from .ai_probe_report import AIProbeReport
@@ -210,6 +208,7 @@ from .contact_update import ContactUpdate
 from .contact_update_extra_json_type_0 import ContactUpdateExtraJsonType0
 from .count_request import CountRequest
 from .count_request_filter_type_0 import CountRequestFilterType0
+from .count_response import CountResponse
 from .count_result import CountResult
 from .create_empty_dataset_request import CreateEmptyDatasetRequest
 from .create_feature_datasets_dataset_id_features_post_geo_json_feature import (
@@ -476,6 +475,7 @@ from .get_single_feature_datasets_dataset_id_features_gid_get_geo_json_feature_p
 from .group_by_request import GroupByRequest
 from .group_by_request_filter_type_0 import GroupByRequestFilterType0
 from .group_by_request_stat import GroupByRequestStat
+from .group_by_response import GroupByResponse
 from .group_by_result import GroupByResult
 from .group_list_response import GroupListResponse
 from .group_member_list_response import GroupMemberListResponse
@@ -488,6 +488,7 @@ from .health_response_providers import HealthResponseProviders
 from .histogram_bin import HistogramBin
 from .histogram_request import HistogramRequest
 from .histogram_request_filter_type_0 import HistogramRequestFilterType0
+from .histogram_response import HistogramResponse
 from .histogram_result import HistogramResult
 from .import_configuration_config_ops_import_post_mode import (
     ImportConfigurationConfigOpsImportPostMode,
@@ -921,6 +922,7 @@ from .stale_cleanup_response import StaleCleanupResponse
 from .stats_request import StatsRequest
 from .stats_request_filter_type_0 import StatsRequestFilterType0
 from .stats_request_stats_item import StatsRequestStatsItem
+from .stats_response import StatsResponse
 from .stats_result import StatsResult
 from .status_update import StatusUpdate
 from .status_update_response import StatusUpdateResponse
@@ -968,6 +970,7 @@ from .validation_result_response_quality_score_type_0 import (
 from .value_count import ValueCount
 from .value_counts_request import ValueCountsRequest
 from .value_counts_request_filter_type_0 import ValueCountsRequestFilterType0
+from .value_counts_response import ValueCountsResponse
 from .value_counts_result import ValueCountsResult
 from .vector_tile_token import VectorTileToken
 from .verify_email_request import VerifyEmailRequest
@@ -1008,8 +1011,6 @@ __all__ = (
     "AdminShareTokenListResponse",
     "AdminShareTokenResponse",
     "AdminUserCreate",
-    "AggregateResponse",
-    "AggregateResponseOp",
     "AIAvailabilityResponse",
     "AIProbeCheck",
     "AIProbeReport",
@@ -1166,6 +1167,7 @@ __all__ = (
     "ContactUpdateExtraJsonType0",
     "CountRequest",
     "CountRequestFilterType0",
+    "CountResponse",
     "CountResult",
     "CreateEmptyDatasetRequest",
     "CreateFeatureDatasetsDatasetIdFeaturesPostGeoJSONFeature",
@@ -1310,6 +1312,7 @@ __all__ = (
     "GroupByRequest",
     "GroupByRequestFilterType0",
     "GroupByRequestStat",
+    "GroupByResponse",
     "GroupByResult",
     "GroupListResponse",
     "GroupMemberListResponse",
@@ -1322,6 +1325,7 @@ __all__ = (
     "HistogramBin",
     "HistogramRequest",
     "HistogramRequestFilterType0",
+    "HistogramResponse",
     "HistogramResult",
     "ImportConfigurationConfigOpsImportPostMode",
     "ImportResult",
@@ -1625,6 +1629,7 @@ __all__ = (
     "StatsRequest",
     "StatsRequestFilterType0",
     "StatsRequestStatsItem",
+    "StatsResponse",
     "StatsResult",
     "StatusUpdate",
     "StatusUpdateResponse",
@@ -1666,6 +1671,7 @@ __all__ = (
     "ValueCount",
     "ValueCountsRequest",
     "ValueCountsRequestFilterType0",
+    "ValueCountsResponse",
     "ValueCountsResult",
     "VectorTileToken",
     "VerifyEmailRequest",

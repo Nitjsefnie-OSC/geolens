@@ -204,24 +204,58 @@ class GroupByResult(BaseModel):
     groups: list[GroupValue] = Field(description="Largest value first.")
 
 
-_RESULT_MODELS: dict[str, type[BaseModel]] = {
-    "count": CountResult,
-    "stats": StatsResult,
-    "value_counts": ValueCountsResult,
-    "histogram": HistogramResult,
-    "group_by": GroupByResult,
-}
-
-
-class AggregateResponse(BaseModel):
-    op: Literal["count", "stats", "value_counts", "histogram", "group_by"]
-    result: (
-        CountResult | StatsResult | ValueCountsResult | HistogramResult | GroupByResult
-    )
+class _ResponseBase(BaseModel):
     approximate: Literal[False] = Field(
         False, description="Always false: a view too wide to count exactly is refused."
     )
     cached: bool
+
+
+class CountResponse(_ResponseBase):
+    op: Literal["count"]
+    result: CountResult
+
+
+class StatsResponse(_ResponseBase):
+    op: Literal["stats"]
+    result: StatsResult
+
+
+class ValueCountsResponse(_ResponseBase):
+    op: Literal["value_counts"]
+    result: ValueCountsResult
+
+
+class HistogramResponse(_ResponseBase):
+    op: Literal["histogram"]
+    result: HistogramResult
+
+
+class GroupByResponse(_ResponseBase):
+    op: Literal["group_by"]
+    result: GroupByResult
+
+
+# Keyed on ``op`` so a client's generated parser picks the result by operation.
+AggregateResponse = Annotated[
+    CountResponse
+    | StatsResponse
+    | ValueCountsResponse
+    | HistogramResponse
+    | GroupByResponse,
+    Field(discriminator="op"),
+]
+_RESPONSES: dict[str, type[_ResponseBase]] = {
+    "count": CountResponse,
+    "stats": StatsResponse,
+    "value_counts": ValueCountsResponse,
+    "histogram": HistogramResponse,
+    "group_by": GroupByResponse,
+}
+
+
+def _respond(op: str, result: Any, *, cached: bool) -> AggregateResponse:
+    return _RESPONSES[op].model_validate({"op": op, "result": result, "cached": cached})
 
 
 class TableUnavailable(Exception):
@@ -479,20 +513,14 @@ async def run_aggregate(
     if not await feature_table_exists(db, dataset.table_name):
         raise TableUnavailable(dataset.table_name)
     if whole_layer and request.op == "count" and dataset.feature_count is not None:
-        return AggregateResponse(
-            op="count", result=CountResult(count=dataset.feature_count), cached=False
-        )
+        return _respond("count", {"count": dataset.feature_count}, cached=False)
 
     cache_key = _cache_key(
         "aggregate", dataset, request.model_dump(mode="json") | {"bbox": bbox}
     )
     cached = await get_cache().get(cache_key) if cache_key is not None else None
     if cached is not None:
-        return AggregateResponse(
-            op=request.op,
-            result=_RESULT_MODELS[request.op].model_validate(cached),
-            cached=True,
-        )
+        return _respond(request.op, cached, cached=True)
     keyed_ttl = _KEYED_TTL if owned else _REGISTERED_TTL
     # Whether a view is too wide depends on the filter and the view, not the
     # op, so every widget on a layer shares one verdict.
@@ -583,4 +611,4 @@ async def run_aggregate(
         await get_cache().set(
             cache_key, encoded, ttl=_WHOLE_LAYER_TTL if whole_layer else keyed_ttl
         )
-    return AggregateResponse(op=request.op, result=payload, cached=False)
+    return _respond(request.op, payload, cached=False)
