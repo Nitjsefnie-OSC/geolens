@@ -56,24 +56,6 @@ def _is_column(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr in COLUMNS
 
 
-def _targets(node: ast.expr):
-    if isinstance(node, (ast.Tuple, ast.List)):
-        for elt in node.elts:
-            yield from _targets(elt)
-    elif isinstance(node, ast.Starred):
-        yield from _targets(node.value)
-    else:
-        yield node
-
-
-def _target_write(target: ast.expr) -> str | None:
-    if _is_column(target):
-        return f"writes .{target.attr}"
-    if isinstance(target, ast.Subscript) and _is_column(target.value):
-        return f"writes an item of .{target.value.attr}"
-    return None
-
-
 def _dict_column_keys(node: ast.AST):
     for inner in ast.walk(node):
         if isinstance(inner, ast.Dict):
@@ -116,23 +98,17 @@ def binding_writes(source: str) -> list[tuple[int, str]]:
     """Every write to the binding columns this module's text shows, by line."""
     found: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(source)):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            targets = [node.target]
-        elif isinstance(node, ast.Delete):
-            targets = node.targets
-        for outer in targets:
-            for target in _targets(outer):
-                what = _target_write(target)
-                if what:
-                    found.append((node.lineno, what))
-        if isinstance(node, ast.Call):
+        stored = isinstance(getattr(node, "ctx", None), (ast.Store, ast.Del))
+        if stored and _is_column(node):
+            found.append((node.lineno, f"writes .{node.attr}"))
+        elif stored and isinstance(node, ast.Subscript) and _is_column(node.value):
+            found.append((node.lineno, f"writes an item of .{node.value.attr}"))
+        elif isinstance(node, ast.Call):
             found.extend((node.lineno, what) for what in _call_writes(node))
-        if (
+        elif (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
+            and "origin_" in node.value
             and _SQL_WRITE.search(node.value)
         ):
             found.append((node.lineno, "raw SQL writes the column"))
@@ -143,9 +119,10 @@ def test_only_the_binding_module_writes_origin_columns() -> None:
     violations = []
     for path in sorted(APP_ROOT.rglob("*.py")):
         rel = path.relative_to(BACKEND_ROOT).as_posix()
-        if rel == OWNER:
+        source = path.read_text(encoding="utf-8")
+        if rel == OWNER or not any(column in source for column in COLUMNS):
             continue
-        for line, what in binding_writes(path.read_text(encoding="utf-8")):
+        for line, what in binding_writes(source):
             violations.append(f"{rel}:{line}: {what}")
     assert not violations, (
         "origin_uri/origin_ref are written only by set_dataset_origin or "
