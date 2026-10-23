@@ -242,6 +242,23 @@ def _resolve_service_origin(dataset) -> _ServiceOrigin:
     )
 
 
+def _refuse_expected_revision_off_service(
+    body: DatasetRefreshRequest, origin_kind: str | None
+) -> None:
+    """422 for an expected revision on a refresh that replaces no data."""
+    if body.expected_data_revision is not None and origin_kind in ("postgis", "stac"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "expected_data_revision_not_applicable",
+                "message": (
+                    "Only a service refresh replaces the dataset's data, so "
+                    "only it takes expected_data_revision."
+                ),
+            },
+        )
+
+
 def _service_token_required() -> HTTPException:
     """The one 422 both refusal paths raise, so the wording cannot fork.
 
@@ -1030,6 +1047,7 @@ async def refresh_dataset(
     reupload_binding = await held_reupload_binding(
         db, dataset_id=dataset_id, run_id=body.accept_blocked_run_id
     )
+    _refuse_expected_revision_off_service(body, origin_kind)
     if origin_kind == "postgis":
         return await _dispatch_postgis_refresh(
             db,
@@ -1158,6 +1176,7 @@ async def refresh_dataset(
             ingest_job_id=job.id,
             feature_count_before=dataset.feature_count,
             verification_policy=body.verification_policy,
+            expected_data_revision=body.expected_data_revision,
         )
     except DatasetBusyError as exc:
         # The job row rolls back with the refusal, so a busy dataset leaves no

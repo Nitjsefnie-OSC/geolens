@@ -6077,6 +6077,19 @@
               }
             ],
             "description": "Structured credential for a protected service. Mutually exclusive with the token field."
+          },
+          "expected_data_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service refreshes only; 422 for other origins.",
+            "title": "Expected Data Revision"
           }
         },
         "title": "DatasetRefreshRequest",
@@ -7100,6 +7113,18 @@
               }
             ],
             "title": "Updated By"
+          },
+          "data_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Counts writes to the dataset's features and columns. Owner and admin only; null for other readers.",
+            "title": "Data Revision"
           },
           "record_type": {
             "default": "vector_dataset",
@@ -16636,6 +16661,19 @@
             ],
             "description": "The preview's `review_fingerprint`, sent once a person has seen the changes it describes. A file replacement or service re-upload with review reasons publishes only when the worker's own fingerprint matches; otherwise its run ends `blocked`.",
             "title": "Review Fingerprint"
+          },
+          "expected_data_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only.",
+            "title": "Expected Data Revision"
           }
         },
         "title": "ReuploadCommitRequest",

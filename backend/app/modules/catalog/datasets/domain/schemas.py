@@ -602,6 +602,13 @@ class DatasetResponse(BaseModel):
     owner_org: str | None = Field(default=None, description="Owning organization name")
     published_at: datetime | None = None
     updated_by: uuid.UUID | None = None
+    data_revision: int | None = Field(
+        default=None,
+        description=(
+            "Counts writes to the dataset's features and columns. Owner and "
+            "admin only; null for other readers."
+        ),
+    )
     record_type: str = Field(
         default="vector_dataset",
         description=(
@@ -1016,6 +1023,23 @@ class ReuploadPreviewRequest(BaseModel):
     )
 
 
+_EXPECTED_DATA_REVISION_DESCRIPTION = (
+    "The dataset's `data_revision` the caller last saw. When it differs from "
+    "the revision this replacement is compared with, every write counts as "
+    "later, so the run stops for review with `live_data_changed` instead of "
+    "publishing. Omit it to compare with the revision at admission only."
+)
+
+
+def _reject_expected_revision_with_acceptance(model: Any) -> Any:
+    if model.expected_data_revision is not None and model.accept_blocked_run_id:
+        raise ValueError(
+            "expected_data_revision can't be combined with accept_blocked_run_id: "
+            "an acceptance compares with the revision of the run it accepts"
+        )
+    return model
+
+
 class ReuploadCommitRequest(BaseModel):
     srid_override: int | None = Field(default=None, ge=1, le=998999)
     expected_origin_kind: OriginKind | None = Field(
@@ -1047,6 +1071,9 @@ class ReuploadCommitRequest(BaseModel):
             "with review reasons publishes only when the worker's own "
             "fingerprint matches; otherwise its run ends `blocked`."
         ),
+    )
+    expected_data_revision: int | None = Field(
+        default=None, ge=0, description=_EXPECTED_DATA_REVISION_DESCRIPTION
     )
     _reject_auth_conflict = model_validator(mode="after")(reject_service_auth_conflict)
 
@@ -1097,7 +1124,16 @@ class DatasetRefreshRequest(BaseModel):
     auth: ServiceAuthRequest | None = Field(
         default=None, description=SERVICE_AUTH_FIELD_DESCRIPTION
     )
+    expected_data_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description=_EXPECTED_DATA_REVISION_DESCRIPTION
+        + " Service refreshes only; 422 for other origins.",
+    )
     _reject_auth_conflict = model_validator(mode="after")(reject_service_auth_conflict)
+    _reject_expected_revision_with_acceptance = model_validator(mode="after")(
+        _reject_expected_revision_with_acceptance
+    )
 
 
 class DatasetRefreshResponse(BaseModel):

@@ -3637,6 +3637,12 @@ export type DatasetRefreshRequest = {
      * Structured credential for a protected service. Mutually exclusive with the token field.
      */
     auth?: ServiceAuthRequest | null;
+    /**
+     * Expected Data Revision
+     *
+     * The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only. Service refreshes only; 422 for other origins.
+     */
+    expected_data_revision?: number | null;
 };
 
 /**
@@ -4210,6 +4216,12 @@ export type DatasetResponse = {
      * Updated By
      */
     updated_by?: string | null;
+    /**
+     * Data Revision
+     *
+     * Counts writes to the dataset's features and columns. Owner and admin only; null for other readers.
+     */
+    data_revision?: number | null;
     /**
      * Record Type
      *
@@ -9660,6 +9672,12 @@ export type ReuploadCommitRequest = {
      * The preview's `review_fingerprint`, sent once a person has seen the changes it describes. A file replacement or service re-upload with review reasons publishes only when the worker's own fingerprint matches; otherwise its run ends `blocked`.
      */
     review_fingerprint?: string | null;
+    /**
+     * Expected Data Revision
+     *
+     * The dataset's `data_revision` the caller last saw. When it differs from the revision this replacement is compared with, every write counts as later, so the run stops for review with `live_data_changed` instead of publishing. Omit it to compare with the revision at admission only.
+     */
+    expected_data_revision?: number | null;
 };
 
 /**
