@@ -1,5 +1,6 @@
 """POST /datasets/{id}/aggregate/ computes exact widget aggregates under Rule 1 and cost bounds."""
 
+import asyncio
 import uuid
 
 import pytest
@@ -165,14 +166,49 @@ class TestOperations:
 
 class TestViewThreshold:
     @pytest.fixture(autouse=True)
-    def _small_threshold(self, monkeypatch):
-        """Three rows is "too wide", and the planner overstates every view."""
+    def planned(self, monkeypatch) -> list[str]:
+        """Three rows is "too wide", and the planner overstates every view.
 
-        async def _overstated(*_args, **_kwargs):
+        Records the statement timeout each planning call ran under.
+        """
+        timeouts: list[str] = []
+
+        async def _overstated(db, *_args, **_kwargs):
+            shown = await db.execute(text("SHOW statement_timeout"))
+            timeouts.append(shown.scalar_one())
             return 10**9
 
         monkeypatch.setattr(aggregate, "MAX_VIEW_ROWS", 2)
         monkeypatch.setattr(aggregate, "planner_row_estimate", _overstated)
+        return timeouts
+
+    async def test_every_widget_on_a_view_shares_one_verdict(
+        self, client: AsyncClient, points, planned
+    ):
+        view = {"filter": KEEP, "bbox": FIRST_THREE}
+        first = await _aggregate(client, points.id, {"op": "count", **view})
+        second = await _aggregate(
+            client,
+            points.id,
+            {"op": "stats", "column": "pop", "stats": ["sum"], **view},
+        )
+
+        assert first.json()["detail"]["code"] == "too_wide"
+        assert second.json()["detail"]["code"] == "too_wide"
+        assert planned == ["4s"]
+
+    async def test_planning_waits_for_a_slot(
+        self, client: AsyncClient, points, planned, monkeypatch
+    ):
+        monkeypatch.setattr(aggregate, "_aggregate_slots", asyncio.Semaphore(0))
+
+        resp = await _aggregate(
+            client, points.id, {"op": "count", "filter": KEEP, "bbox": FIRST_THREE}
+        )
+
+        assert resp.status_code == 429, resp.text
+        assert resp.json()["detail"]["code"] == "query_at_capacity"
+        assert planned == []
 
     async def test_a_view_over_the_threshold_is_refused_not_approximated(
         self, client: AsyncClient, points
@@ -235,7 +271,7 @@ class TestCache:
 
 @pytest.fixture
 def stored_ttls(monkeypatch) -> list[int]:
-    """The TTL of every result the endpoint writes to the cache."""
+    """The TTL of every aggregate result the endpoint writes to the cache."""
     cache = aggregate.get_cache()
     ttls: list[int] = []
 
@@ -244,7 +280,8 @@ def stored_ttls(monkeypatch) -> list[int]:
 
         @staticmethod
         async def set(key, value, ttl=300, **kwargs):
-            ttls.append(ttl)
+            if key.startswith("aggregate:"):
+                ttls.append(ttl)
             await cache.set(key, value, ttl=ttl, **kwargs)
 
     monkeypatch.setattr(aggregate, "get_cache", lambda: _Recording)

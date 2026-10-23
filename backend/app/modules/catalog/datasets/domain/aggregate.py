@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.geo import extent_to_span_bbox
@@ -406,15 +407,20 @@ async def _sandboxed(
     )
 
 
-def _cache_key(dataset: Dataset, request: AggregateRequest, bbox) -> str | None:
+def _cache_key(prefix: str, dataset: Dataset, body: dict) -> str | None:
     if not tenant_cache_context_available():
         return None
-    body = request.model_dump(mode="json") | {"bbox": bbox}
     digest = hashlib.sha256(
         json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return tenant_cache_key(
-        f"aggregate:{dataset.id}:{dataset.tile_cache_version}:{digest}"
+        f"{prefix}:{dataset.id}:{dataset.tile_cache_version}:{digest}"
+    )
+
+
+def _too_wide() -> AggregateError:
+    return AggregateError(
+        "too_wide", "This view holds too many features to summarize exactly. Zoom in."
     )
 
 
@@ -449,7 +455,9 @@ async def run_aggregate(
             op="count", result=CountResult(count=dataset.feature_count), cached=False
         )
 
-    cache_key = _cache_key(dataset, request, bbox)
+    cache_key = _cache_key(
+        "aggregate", dataset, request.model_dump(mode="json") | {"bbox": bbox}
+    )
     cached = await get_cache().get(cache_key) if cache_key is not None else None
     if cached is not None:
         return AggregateResponse(
@@ -457,6 +465,17 @@ async def run_aggregate(
             result=_RESULT_MODELS[request.op].model_validate(cached),
             cached=True,
         )
+    keyed_ttl = _KEYED_TTL if owned else _REGISTERED_TTL
+    # Whether a view is too wide depends on the filter and the view, not the
+    # op, so every widget on a layer shares one verdict.
+    verdict_key = (
+        _cache_key("aggregate-view", dataset, {"filter": request.filter, "bbox": bbox})
+        if bbox is not None
+        else None
+    )
+    verdict = await get_cache().get(verdict_key) if verdict_key is not None else None
+    if verdict is not None and verdict["too_wide"]:
+        raise _too_wide()
 
     try:
         layer_filter = await compile_layer_filter(
@@ -470,26 +489,11 @@ async def run_aggregate(
     source = render_filtered_table_ref(_safe_table_ref(dataset.table_name), where_sql)
     predicates = [_bbox_predicate(bbox, "_t")] if bbox is not None else []
     sql = build_aggregate_sql(request, source, predicates, columns)
-
-    over_estimate = False
-    if bbox is not None:
-        # The request session has no tenant schema rewrite, so EXPLAIN reads
-        # the resolved table rather than the sandbox's logical reference.
-        estimate = await planner_row_estimate(
-            db,
-            render_filtered_table_ref(
-                get_catalog_port().quote_table(dataset.table_name), where_sql
-            ),
-            f"WHERE {_bbox_predicate(bbox, 't')}",
-            {},
-            lambda stmt: stmt.bindparams(*binds) if binds else stmt,
-        )
-        over_estimate = estimate > MAX_VIEW_ROWS
-
-    # Detached first: the rollback that returns the pooled connection would
-    # expire every loaded instance, the caller's user included.
-    db.expunge_all()
-    await db.rollback()
+    # The request session has no tenant schema rewrite, so EXPLAIN reads the
+    # resolved table rather than the sandbox's logical reference.
+    planned_source = render_filtered_table_ref(
+        get_catalog_port().quote_table(dataset.table_name), where_sql
+    )
 
     if _aggregate_slots.locked():
         raise SandboxError(
@@ -498,19 +502,41 @@ async def run_aggregate(
             "Try again in a moment.",
         )
     async with _aggregate_slots:
-        if over_estimate:
-            # Statistics can overstate a view; count it exactly, up to the
-            # limit, before telling the reader to zoom in.
-            probe = (
-                f"SELECT count(*) FROM (SELECT 1 FROM {source} AS _t"
-                f" WHERE {predicates[0]} LIMIT {MAX_VIEW_ROWS + 1}) AS _n"
+        over_estimate = False
+        if bbox is not None and verdict is None:
+            await db.execute(
+                text(f"SET LOCAL statement_timeout = {AGGREGATE_TIMEOUT_MS}")
             )
-            counted = await _sandboxed(db, probe, binds, caller_key, row_limit=1)
-            if int(counted.rows[0][0]) > MAX_VIEW_ROWS:
-                raise AggregateError(
-                    "too_wide",
-                    "This view holds too many features to summarize exactly. Zoom in.",
+            estimate = await planner_row_estimate(
+                db,
+                planned_source,
+                f"WHERE {_bbox_predicate(bbox, 't')}",
+                {},
+                lambda stmt: stmt.bindparams(*binds) if binds else stmt,
+            )
+            over_estimate = estimate > MAX_VIEW_ROWS
+        # Detached first: the rollback that returns the pooled connection
+        # would expire every loaded instance, the caller's user included.
+        db.expunge_all()
+        await db.rollback()
+
+        if bbox is not None and verdict is None:
+            too_wide = False
+            if over_estimate:
+                # Statistics can overstate a view; count it exactly, up to the
+                # limit, before telling the reader to zoom in.
+                probe = (
+                    f"SELECT count(*) FROM (SELECT 1 FROM {source} AS _t"
+                    f" WHERE {predicates[0]} LIMIT {MAX_VIEW_ROWS + 1}) AS _n"
                 )
+                counted = await _sandboxed(db, probe, binds, caller_key, row_limit=1)
+                too_wide = int(counted.rows[0][0]) > MAX_VIEW_ROWS
+            if verdict_key is not None:
+                await get_cache().set(
+                    verdict_key, {"too_wide": too_wide}, ttl=keyed_ttl
+                )
+            if too_wide:
+                raise _too_wide()
         result = await _sandboxed(
             db,
             sql,
@@ -527,10 +553,8 @@ async def run_aggregate(
     payload = _result(request, result.rows)
     encoded = payload.model_dump(mode="json")
     if cache_key is not None and len(json.dumps(encoded)) <= _MAX_CACHED_BYTES:
-        ttl = (
-            _WHOLE_LAYER_TTL if bbox is None and request.filter is None else _KEYED_TTL
-        )
+        whole_layer = owned and bbox is None and request.filter is None
         await get_cache().set(
-            cache_key, encoded, ttl=ttl if owned else min(ttl, _REGISTERED_TTL)
+            cache_key, encoded, ttl=_WHOLE_LAYER_TTL if whole_layer else keyed_ttl
         )
     return AggregateResponse(op=request.op, result=payload, cached=False)
