@@ -253,7 +253,7 @@ class TestUniqueValueRenderer:
         assert layer.style_config["ramp"] == "custom"
         assert layer.style_config["categories"] == [
             {"value": "a", "label": "Alpha", "color": "#ff0000"},
-            {"value": "2", "label": "Two", "color": "#0000ff"},
+            {"value": 2, "label": "Two", "color": "#0000ff"},
         ]
         expression = layer.paint["fill-color"]
         assert expression[0] == "case"
@@ -268,6 +268,23 @@ class TestUniqueValueRenderer:
             "#c8c8c8",
         ]
         assert not result.loss.items
+
+    def test_values_of_a_numeric_field_are_stored_as_numbers(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "CODE",
+            "uniqueValueInfos": [
+                {"value": "1", "symbol": _fill([255, 0, 0, 255])},
+                {"value": "2.5", "symbol": _fill([0, 0, 255, 255])},
+            ],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "CODE", "type": "esriFieldTypeInteger"}
+        ]
+        layer = _translate(webmap).layers[0]
+        assert [c["value"] for c in layer.style_config["categories"]] == [1, 2.5]
+        assert layer.paint["fill-color"][3][2:6] == ["1", "#ff0000", "2.5", "#0000ff"]
 
     def test_duplicate_values_are_reported(self) -> None:
         renderer = self._renderer()
@@ -356,6 +373,7 @@ class TestClassBreaksRenderer:
         assert layer.style_config["breaks"] == [10.0, 100.0]
         assert layer.style_config["colors"] == ["#00ff00", "#ffff00", "#ff0000"]
         assert layer.style_config["ramp"] == "custom"
+        assert layer.style_config["nullColor"] == "rgba(0,0,0,0)"
         assert layer.paint["fill-color"] == [
             "case",
             ["==", ["get", "POP"], None],
@@ -2030,6 +2048,7 @@ class TestLegendLabels:
         return {
             "type": "classBreaks",
             "field": "N",
+            "minValue": 0,
             "classBreakInfos": [
                 {"classMaxValue": (n + 1) * 10, "label": label, "symbol": _fill()}
                 for n, label in enumerate(labels)
@@ -2048,6 +2067,10 @@ class TestLegendLabels:
     )
     def test_range_labels_are_not(self, labels: list[str]) -> None:
         assert "class_label" not in self._kinds(self._breaks(labels))
+
+    @pytest.mark.parametrize("label", ["1", "$0–$10", "★", "10 - 20"])
+    def test_authored_labels_without_letters_are_reported(self, label: str) -> None:
+        assert "class_label" in self._kinds(self._breaks([label, "10 - 20"]))
 
     def test_a_default_label_is_reported_only_with_a_default_symbol(self) -> None:
         with_symbol = self._breaks(

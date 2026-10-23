@@ -230,6 +230,27 @@ def _filter(definition: dict, path: str, loss: LossReport) -> list | None:
     return translated
 
 
+_NUMERIC_FIELD_TYPES = frozenset(
+    {
+        "esriFieldTypeSmallInteger",
+        "esriFieldTypeInteger",
+        "esriFieldTypeBigInteger",
+        "esriFieldTypeSingle",
+        "esriFieldTypeDouble",
+    }
+)
+
+
+def _numeric_fields(definition: dict) -> frozenset[str]:
+    return frozenset(
+        field["name"]
+        for field in _l(definition.get("fields"))
+        if isinstance(field, dict)
+        and isinstance(field.get("name"), str)
+        and field.get("type") in _NUMERIC_FIELD_TYPES
+    )
+
+
 def _layer_input(
     layer: dict,
     path: str,
@@ -251,6 +272,7 @@ def _layer_input(
         f"{path}.layerDefinition.drawingInfo.renderer",
         loss,
         definition.get("geometryType"),
+        _numeric_fields(definition),
     )
 
     style_config = styled.style_config

@@ -7,6 +7,7 @@ Everything else keeps a default paint and is recorded in the loss report.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -268,7 +269,27 @@ def _report_class_differences(
         )
 
 
-def _categorical(r: dict, path: str, loss: LossReport, hint: str | None) -> Styled:
+def _typed_value(value: Any, numeric: bool) -> str | int | float:
+    """A category value as the column stores it; ArcGIS writes numbers as strings."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return str(value)
+    if isinstance(value, str) and numeric:
+        try:
+            number = float(value)
+        except ValueError:
+            return value
+        if math.isfinite(number):
+            return int(number) if number.is_integer() and "." not in value else number
+    return value
+
+
+def _categorical(
+    r: dict,
+    path: str,
+    loss: LossReport,
+    hint: str | None,
+    numeric_fields: frozenset[str] = frozenset(),
+) -> Styled:
     field_name = r.get("field1")
     infos = _l(r.get("uniqueValueInfos"))
     classes, dropped = _classes(
@@ -309,10 +330,11 @@ def _categorical(r: dict, path: str, loss: LossReport, hint: str | None) -> Styl
         label = info.get("label")
         categories.append(
             {
-                "value": key,
+                "value": _typed_value(value, field_name in numeric_fields),
                 "label": label if isinstance(label, str) and label else key,
                 "color": _class_color(sym),
                 "paint_color": _css_color(sym),
+                "key": key,
             }
         )
     if dropped:
@@ -320,9 +342,9 @@ def _categorical(r: dict, path: str, loss: LossReport, hint: str | None) -> Styl
     if not categories:
         return _simple(base, hint)
 
-    pairs = [item for c in categories for item in (c["value"], c["paint_color"])]
+    pairs = [item for c in categories for item in (c["key"], c["paint_color"])]
     for category in categories:
-        del category["paint_color"]
+        del category["paint_color"], category["key"]
     expression = [
         "case",
         ["==", ["get", field_name], None],
@@ -376,6 +398,37 @@ def _single_class(field_name: str, only: tuple, base: _Symbol, fallback: str) ->
     return Styled(_paint(base, expression, 1.0), _style_config(base), base.kind)
 
 
+def _bound(value: float) -> str:
+    return f"{value:g}"
+
+
+def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
+    """Class-break labels that differ from the range ArcGIS generates for the class."""
+    ordered = sorted(
+        (
+            (num(info.get("classMaxValue")), num(info.get("classMinValue")), info)
+            for info, _ in classes
+        ),
+        key=lambda item: (item[0] is None, item[0] or 0.0),
+    )
+    authored = 0
+    previous = renderer_min
+    for high, low, info in ordered:
+        label = info.get("label")
+        low = previous if low is None else low
+        previous = high
+        if not isinstance(label, str) or not label.strip():
+            continue
+        generated = set()
+        if high is not None:
+            generated = {f"< {_bound(high)}", f"<= {_bound(high)}"}
+            if low is not None:
+                generated.add(f"{_bound(low)} - {_bound(high)}")
+        if "".join(label.split()) not in {"".join(g.split()) for g in generated}:
+            authored += 1
+    return authored
+
+
 def _graduated(r: dict, path: str, loss: LossReport, hint: str | None) -> Styled:
     field_name = r.get("field")
     classes, skipped = _classes(
@@ -418,12 +471,7 @@ def _graduated(r: dict, path: str, loss: LossReport, hint: str | None) -> Styled
         else None
     )
     fallback = _css_color(default) if default else HIDDEN_COLOR
-    authored = sum(
-        1
-        for info, _ in classes
-        if isinstance(info.get("label"), str)
-        and any(c.isalpha() for c in info["label"])
-    )
+    authored = _authored_break_labels(classes, num(r.get("minValue")))
     _report_labels(path, loss, authored, r.get("defaultLabel") if default else None)
     _report_class_differences(
         base, [sym for _, _, sym in usable] + [default], path, loss
@@ -442,7 +490,7 @@ def _graduated(r: dict, path: str, loss: LossReport, hint: str | None) -> Styled
         field_name,
         breaks,
         paint_colors,
-        _css_color(default) if default else HIDDEN_COLOR,
+        fallback,
     )
     loss.add(
         path,
@@ -468,6 +516,7 @@ def _graduated(r: dict, path: str, loss: LossReport, hint: str | None) -> Styled
             "breaks": breaks,
             "colors": colors,
             "ramp": "custom",
+            "nullColor": fallback,
         },
     )
     return Styled(_paint(base, expression, 1.0), config, base.kind)
@@ -495,7 +544,11 @@ def _heatmap(r: dict, path: str, loss: LossReport) -> Styled:
 
 
 def translate_renderer(
-    renderer: Any, path: str, loss: LossReport, geometry_type: Any = None
+    renderer: Any,
+    path: str,
+    loss: LossReport,
+    geometry_type: Any = None,
+    numeric_fields: frozenset[str] = frozenset(),
 ) -> Styled:
     """Paint and style for a layer's renderer; empty when GeoLens defaults apply."""
     hint = geometry_kind(geometry_type)
@@ -516,7 +569,7 @@ def translate_renderer(
         _report_labels(path, loss, default_label=r.get("label"))
         return _simple(_symbol(r.get("symbol"), f"{path}.symbol", loss), hint)
     if kind == "uniqueValue":
-        return _categorical(r, path, loss, hint)
+        return _categorical(r, path, loss, hint, numeric_fields)
     if kind == "classBreaks":
         return _graduated(r, path, loss, hint)
     if kind == "heatmap":
