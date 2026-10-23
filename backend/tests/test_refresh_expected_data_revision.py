@@ -136,6 +136,7 @@ async def test_an_expected_revision_with_an_acceptance_is_refused(
     )
 
     assert resp.status_code == 422, resp.text
+    assert "can't be combined with accept_blocked_run_id" in resp.text
 
 
 async def test_the_data_revision_is_shown_to_the_owner_only(
