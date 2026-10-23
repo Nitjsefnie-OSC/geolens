@@ -18,6 +18,8 @@ from .admin_password_reset import AdminPasswordReset
 from .admin_share_token_list_response import AdminShareTokenListResponse
 from .admin_share_token_response import AdminShareTokenResponse
 from .admin_user_create import AdminUserCreate
+from .aggregate_response import AggregateResponse
+from .aggregate_response_op import AggregateResponseOp
 from .ai_availability_response import AIAvailabilityResponse
 from .ai_probe_check import AIProbeCheck
 from .ai_probe_report import AIProbeReport
@@ -206,6 +208,9 @@ from .contact_response import ContactResponse
 from .contact_response_extra_json_type_0 import ContactResponseExtraJsonType0
 from .contact_update import ContactUpdate
 from .contact_update_extra_json_type_0 import ContactUpdateExtraJsonType0
+from .count_request import CountRequest
+from .count_request_filter_type_0 import CountRequestFilterType0
+from .count_result import CountResult
 from .create_empty_dataset_request import CreateEmptyDatasetRequest
 from .create_feature_datasets_dataset_id_features_post_geo_json_feature import (
     CreateFeatureDatasetsDatasetIdFeaturesPostGeoJSONFeature,
@@ -468,13 +473,22 @@ from .get_single_feature_datasets_dataset_id_features_gid_get_geo_json_feature_g
 from .get_single_feature_datasets_dataset_id_features_gid_get_geo_json_feature_properties import (
     GetSingleFeatureDatasetsDatasetIdFeaturesGidGetGeoJSONFeatureProperties,
 )
+from .group_by_request import GroupByRequest
+from .group_by_request_filter_type_0 import GroupByRequestFilterType0
+from .group_by_request_stat import GroupByRequestStat
+from .group_by_result import GroupByResult
 from .group_list_response import GroupListResponse
 from .group_member_list_response import GroupMemberListResponse
 from .group_members_add import GroupMembersAdd
 from .group_response import GroupResponse
+from .group_value import GroupValue
 from .group_write import GroupWrite
 from .health_response import HealthResponse
 from .health_response_providers import HealthResponseProviders
+from .histogram_bin import HistogramBin
+from .histogram_request import HistogramRequest
+from .histogram_request_filter_type_0 import HistogramRequestFilterType0
+from .histogram_result import HistogramResult
 from .import_configuration_config_ops_import_post_mode import (
     ImportConfigurationConfigOpsImportPostMode,
 )
@@ -904,6 +918,10 @@ from .stac_search_request_cloud_cover_mode_type_0 import (
 )
 from .stac_search_response import StacSearchResponse
 from .stale_cleanup_response import StaleCleanupResponse
+from .stats_request import StatsRequest
+from .stats_request_filter_type_0 import StatsRequestFilterType0
+from .stats_request_stats_item import StatsRequestStatsItem
+from .stats_result import StatsResult
 from .status_update import StatusUpdate
 from .status_update_response import StatusUpdateResponse
 from .sublayer_override import SublayerOverride
@@ -947,6 +965,10 @@ from .validation_result_response import ValidationResultResponse
 from .validation_result_response_quality_score_type_0 import (
     ValidationResultResponseQualityScoreType0,
 )
+from .value_count import ValueCount
+from .value_counts_request import ValueCountsRequest
+from .value_counts_request_filter_type_0 import ValueCountsRequestFilterType0
+from .value_counts_result import ValueCountsResult
 from .vector_tile_token import VectorTileToken
 from .verify_email_request import VerifyEmailRequest
 from .visibility_check_response import VisibilityCheckResponse
@@ -986,6 +1008,8 @@ __all__ = (
     "AdminShareTokenListResponse",
     "AdminShareTokenResponse",
     "AdminUserCreate",
+    "AggregateResponse",
+    "AggregateResponseOp",
     "AIAvailabilityResponse",
     "AIProbeCheck",
     "AIProbeReport",
@@ -1140,6 +1164,9 @@ __all__ = (
     "ContactResponseExtraJsonType0",
     "ContactUpdate",
     "ContactUpdateExtraJsonType0",
+    "CountRequest",
+    "CountRequestFilterType0",
+    "CountResult",
     "CreateEmptyDatasetRequest",
     "CreateFeatureDatasetsDatasetIdFeaturesPostGeoJSONFeature",
     "CreateFeatureDatasetsDatasetIdFeaturesPostGeoJSONFeatureCollectionWrite",
@@ -1280,13 +1307,22 @@ __all__ = (
     "GetSingleFeatureDatasetsDatasetIdFeaturesGidGetGeoJSONFeatureGeoJSONGeometryCollectionGeoJSONGeometryType",
     "GetSingleFeatureDatasetsDatasetIdFeaturesGidGetGeoJSONFeatureGeoJSONGeometryType",
     "GetSingleFeatureDatasetsDatasetIdFeaturesGidGetGeoJSONFeatureProperties",
+    "GroupByRequest",
+    "GroupByRequestFilterType0",
+    "GroupByRequestStat",
+    "GroupByResult",
     "GroupListResponse",
     "GroupMemberListResponse",
     "GroupMembersAdd",
     "GroupResponse",
+    "GroupValue",
     "GroupWrite",
     "HealthResponse",
     "HealthResponseProviders",
+    "HistogramBin",
+    "HistogramRequest",
+    "HistogramRequestFilterType0",
+    "HistogramResult",
     "ImportConfigurationConfigOpsImportPostMode",
     "ImportResult",
     "InfrastructureConfig",
@@ -1586,6 +1622,10 @@ __all__ = (
     "StacSearchRequestCloudCoverModeType0",
     "StacSearchResponse",
     "StaleCleanupResponse",
+    "StatsRequest",
+    "StatsRequestFilterType0",
+    "StatsRequestStatsItem",
+    "StatsResult",
     "StatusUpdate",
     "StatusUpdateResponse",
     "SublayerOverride",
@@ -1623,6 +1663,10 @@ __all__ = (
     "ValidationIssueSeverity",
     "ValidationResultResponse",
     "ValidationResultResponseQualityScoreType0",
+    "ValueCount",
+    "ValueCountsRequest",
+    "ValueCountsRequestFilterType0",
+    "ValueCountsResult",
     "VectorTileToken",
     "VerifyEmailRequest",
     "VisibilityCheckResponse",

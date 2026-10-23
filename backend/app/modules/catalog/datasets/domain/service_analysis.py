@@ -64,7 +64,7 @@ LayerFilter = tuple[str, list[Any]]
 _EXTERNAL_POOLER_PREVIEW_BOUND = 3
 
 
-def _preview_bound() -> int:
+def preview_slot_bound() -> int:
     from app.core.config import settings
 
     if settings.db_use_external_pooler:
@@ -75,7 +75,7 @@ def _preview_bound() -> int:
     return max(1, (settings.db_pool_size + overflow) // 4)
 
 
-_MAX_CONCURRENT_PREVIEWS = _preview_bound()
+_MAX_CONCURRENT_PREVIEWS = preview_slot_bound()
 _preview_slots = asyncio.Semaphore(_MAX_CONCURRENT_PREVIEWS)
 _GEOJSON_PRECISION = 6
 

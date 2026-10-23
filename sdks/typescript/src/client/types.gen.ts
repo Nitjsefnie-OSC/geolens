@@ -556,6 +556,30 @@ export type AdminUserCreate = {
 };
 
 /**
+ * AggregateResponse
+ */
+export type AggregateResponse = {
+    /**
+     * Op
+     */
+    op: 'count' | 'stats' | 'value_counts' | 'histogram' | 'group_by';
+    /**
+     * Result
+     */
+    result: CountResult | StatsResult | ValueCountsResult | HistogramResult | GroupByResult;
+    /**
+     * Approximate
+     *
+     * Always false: a view too wide to count exactly is refused.
+     */
+    approximate?: false;
+    /**
+     * Cached
+     */
+    cached: boolean;
+};
+
+/**
  * AlterColumnTypeRequest
  */
 export type AlterColumnTypeRequest = {
@@ -3213,6 +3237,45 @@ export type ContactUpdate = {
 };
 
 /**
+ * CountRequest
+ */
+export type CountRequest = {
+    /**
+     * Filter
+     *
+     * CQL2-JSON filter, as the OGC API Features `filter` accepts.
+     */
+    filter?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Bbox
+     *
+     * Map view `[west, south, east, north]` in WGS 84; west greater than east crosses the antimeridian. Omit for the whole layer.
+     */
+    bbox?: [
+        number,
+        number,
+        number,
+        number
+    ] | null;
+    /**
+     * Op
+     */
+    op: 'count';
+};
+
+/**
+ * CountResult
+ */
+export type CountResult = {
+    /**
+     * Count
+     */
+    count: number;
+};
+
+/**
  * CreateEmptyDatasetRequest
  */
 export type CreateEmptyDatasetRequest = {
@@ -5460,6 +5523,65 @@ export type GeoJsonGeometryCollection = {
 };
 
 /**
+ * GroupByRequest
+ */
+export type GroupByRequest = {
+    /**
+     * Filter
+     *
+     * CQL2-JSON filter, as the OGC API Features `filter` accepts.
+     */
+    filter?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Bbox
+     *
+     * Map view `[west, south, east, north]` in WGS 84; west greater than east crosses the antimeridian. Omit for the whole layer.
+     */
+    bbox?: [
+        number,
+        number,
+        number,
+        number
+    ] | null;
+    /**
+     * Op
+     */
+    op: 'group_by';
+    /**
+     * Group Column
+     */
+    group_column: string;
+    /**
+     * Stat
+     */
+    stat: 'count' | 'sum' | 'avg' | 'min' | 'max';
+    /**
+     * Column
+     *
+     * The numeric column `stat` reads; omit for `count`.
+     */
+    column?: string | null;
+    /**
+     * Limit
+     */
+    limit?: number;
+};
+
+/**
+ * GroupByResult
+ */
+export type GroupByResult = {
+    /**
+     * Groups
+     *
+     * Largest value first.
+     */
+    groups: Array<GroupValue>;
+};
+
+/**
  * GroupListResponse
  */
 export type GroupListResponse = {
@@ -5544,6 +5666,20 @@ export type GroupResponse = {
 };
 
 /**
+ * GroupValue
+ */
+export type GroupValue = {
+    /**
+     * Key
+     */
+    key: string | number | number | boolean | null;
+    /**
+     * Value
+     */
+    value: number | number | string | null;
+};
+
+/**
  * GroupWrite
  */
 export type GroupWrite = {
@@ -5577,6 +5713,73 @@ export type HealthResponse = {
     providers: {
         [key: string]: ServiceHealth;
     };
+};
+
+/**
+ * HistogramBin
+ */
+export type HistogramBin = {
+    /**
+     * Lower
+     */
+    lower: number;
+    /**
+     * Upper
+     */
+    upper: number;
+    /**
+     * Count
+     */
+    count: number;
+};
+
+/**
+ * HistogramRequest
+ */
+export type HistogramRequest = {
+    /**
+     * Filter
+     *
+     * CQL2-JSON filter, as the OGC API Features `filter` accepts.
+     */
+    filter?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Bbox
+     *
+     * Map view `[west, south, east, north]` in WGS 84; west greater than east crosses the antimeridian. Omit for the whole layer.
+     */
+    bbox?: [
+        number,
+        number,
+        number,
+        number
+    ] | null;
+    /**
+     * Op
+     */
+    op: 'histogram';
+    /**
+     * Column
+     */
+    column: string;
+    /**
+     * Bins
+     */
+    bins?: number;
+};
+
+/**
+ * HistogramResult
+ */
+export type HistogramResult = {
+    /**
+     * Bins
+     *
+     * Equal-width bins over the finite values; empty with none.
+     */
+    bins: Array<HistogramBin>;
 };
 
 /**
@@ -11769,6 +11972,73 @@ export type StaleCleanupResponse = {
 };
 
 /**
+ * StatsRequest
+ */
+export type StatsRequest = {
+    /**
+     * Filter
+     *
+     * CQL2-JSON filter, as the OGC API Features `filter` accepts.
+     */
+    filter?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Bbox
+     *
+     * Map view `[west, south, east, north]` in WGS 84; west greater than east crosses the antimeridian. Omit for the whole layer.
+     */
+    bbox?: [
+        number,
+        number,
+        number,
+        number
+    ] | null;
+    /**
+     * Op
+     */
+    op: 'stats';
+    /**
+     * Column
+     */
+    column: string;
+    /**
+     * Stats
+     */
+    stats: Array<'count' | 'sum' | 'avg' | 'min' | 'max'>;
+};
+
+/**
+ * StatsResult
+ *
+ * The requested statistics; one over no rows is null.
+ *
+ * A value a float cannot carry (NaN, infinity) comes back as text.
+ */
+export type StatsResult = {
+    /**
+     * Count
+     */
+    count?: number | null;
+    /**
+     * Sum
+     */
+    sum?: number | string | null;
+    /**
+     * Avg
+     */
+    avg?: number | string | null;
+    /**
+     * Min
+     */
+    min?: number | string | null;
+    /**
+     * Max
+     */
+    max?: number | string | null;
+};
+
+/**
  * StatusUpdate
  */
 export type StatusUpdate = {
@@ -12515,6 +12785,75 @@ export type ValidationResultResponse = {
     quality_score?: {
         [key: string]: unknown;
     } | null;
+};
+
+/**
+ * ValueCount
+ */
+export type ValueCount = {
+    /**
+     * Value
+     */
+    value: string | number | number | boolean | null;
+    /**
+     * Count
+     */
+    count: number;
+};
+
+/**
+ * ValueCountsRequest
+ */
+export type ValueCountsRequest = {
+    /**
+     * Filter
+     *
+     * CQL2-JSON filter, as the OGC API Features `filter` accepts.
+     */
+    filter?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Bbox
+     *
+     * Map view `[west, south, east, north]` in WGS 84; west greater than east crosses the antimeridian. Omit for the whole layer.
+     */
+    bbox?: [
+        number,
+        number,
+        number,
+        number
+    ] | null;
+    /**
+     * Op
+     */
+    op: 'value_counts';
+    /**
+     * Column
+     */
+    column: string;
+    /**
+     * Limit
+     */
+    limit?: number;
+};
+
+/**
+ * ValueCountsResult
+ */
+export type ValueCountsResult = {
+    /**
+     * Values
+     *
+     * Most frequent first.
+     */
+    values: Array<ValueCount>;
+    /**
+     * Other Count
+     *
+     * Rows whose value is not listed.
+     */
+    other_count: number;
 };
 
 /**
@@ -19337,6 +19676,85 @@ export type UpdateDatasetMetadataDatasetsDatasetIdPatchResponses = {
 };
 
 export type UpdateDatasetMetadataDatasetsDatasetIdPatchResponse = UpdateDatasetMetadataDatasetsDatasetIdPatchResponses[keyof UpdateDatasetMetadataDatasetsDatasetIdPatchResponses];
+
+export type AggregateEndpointDatasetsDatasetIdAggregatePostData = {
+    /**
+     * Body
+     */
+    body: ({
+        op: 'count';
+    } & CountRequest) | ({
+        op: 'stats';
+    } & StatsRequest) | ({
+        op: 'value_counts';
+    } & ValueCountsRequest) | ({
+        op: 'histogram';
+    } & HistogramRequest) | ({
+        op: 'group_by';
+    } & GroupByRequest);
+    headers?: {
+        /**
+         * X-Embed-Token
+         *
+         * Optional embed token. Datasets in the token's scope are authorized even without user credentials (embed viewers).
+         */
+        'X-Embed-Token'?: string | null;
+    };
+    path: {
+        /**
+         * Dataset Id
+         */
+        dataset_id: string;
+    };
+    query?: never;
+    url: '/datasets/{dataset_id}/aggregate/';
+};
+
+export type AggregateEndpointDatasetsDatasetIdAggregatePostErrors = {
+    /**
+     * Bad request — invalid query parameters or payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthenticated — a credential was supplied and could not be resolved (expired, revoked, or malformed). Sending no credential at all is not an error on these operations; they answer anonymously with the public subset. Neither is sending an unresolvable credential alongside a valid X-Embed-Token that authorizes the request on its own. That request is served and the unrelated credential is ignored.
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks access to this resource
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type AggregateEndpointDatasetsDatasetIdAggregatePostError = AggregateEndpointDatasetsDatasetIdAggregatePostErrors[keyof AggregateEndpointDatasetsDatasetIdAggregatePostErrors];
+
+export type AggregateEndpointDatasetsDatasetIdAggregatePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: AggregateResponse;
+};
+
+export type AggregateEndpointDatasetsDatasetIdAggregatePostResponse = AggregateEndpointDatasetsDatasetIdAggregatePostResponses[keyof AggregateEndpointDatasetsDatasetIdAggregatePostResponses];
 
 export type AnalysisMaterializeEndpointDatasetsDatasetIdAnalysisMaterializePostData = {
     body: AnalysisMaterializeRequest;
