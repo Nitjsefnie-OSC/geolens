@@ -101,6 +101,14 @@ def _private_dirs(path: Path) -> None:
             directory.mkdir(mode=0o700)
 
 
+def _stop_if_token_refused(exc: PortalError) -> None:
+    if exc.http_status in _TOKEN_STATUSES:
+        raise StopRun(
+            f"the portal refused the ArcGIS token ({exc}); it may have "
+            "expired. Rerun with a fresh token to resume."
+        ) from None
+
+
 def _slug(item_type: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", item_type.lower()).strip("-") or "item"
 
@@ -128,11 +136,7 @@ class _Export:
         self._staged = 0
 
     def note_error(self, what: str, exc: PortalError) -> None:
-        if exc.http_status in _TOKEN_STATUSES:
-            raise StopRun(
-                f"the portal refused the ArcGIS token ({exc}); it may have "
-                "expired. Rerun with a fresh token to resume."
-            ) from None
+        _stop_if_token_refused(exc)
         # The status or kind, not the error text, which repeats the request
         # path and with it a resource name.
         message = (
@@ -433,11 +437,7 @@ def refresh_export(
     try:
         modified = _modified(client.get_json(f"content/items/{item['id']}"))
     except PortalError as exc:
-        if exc.http_status in _TOKEN_STATUSES:
-            raise StopRun(
-                f"the portal refused the ArcGIS token ({exc}); it may have "
-                "expired. Rerun with a fresh token to resume."
-            ) from None
+        _stop_if_token_refused(exc)
         return [f"reading the item to check it for changes failed, {exc}"]
     if modified is None:
         return [
@@ -455,7 +455,6 @@ def refresh_export(
             f"again failed: {exc}"
         ]
     entry.notes = list(result.notes)
-    ctx.save()
     return []
 
 

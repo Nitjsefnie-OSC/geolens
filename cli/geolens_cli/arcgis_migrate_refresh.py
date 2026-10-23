@@ -379,10 +379,10 @@ def refresh_file(
 ) -> list[str]:
     """Download a data file item again, then replace each of its datasets with
     it, one layer each for a multi-layer file."""
+    if not entry.layer_datasets:
+        return ["no dataset of it is recorded, so there is nothing to replace"]
     extension = EXTENSIONS.get(item["type"])
     row = ctx.inventory.get(item["id"])
-    if not entry.layer_datasets:
-        return []
     if extension is None or row is None:
         return ["the item is not in the inventory the plan was built from"]
     limit = _limit(ctx)

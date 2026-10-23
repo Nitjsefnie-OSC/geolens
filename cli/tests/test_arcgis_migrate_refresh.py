@@ -746,6 +746,20 @@ def test_a_replacement_made_in_geolens_during_the_upload_is_not_overwritten(
     assert _state(plan_file)["items"][D3]["refreshing"] == {}
 
 
+def test_a_finished_file_item_without_a_recorded_dataset_is_reported(
+    runner, tmp_path, geolens, portal
+):
+    files.FakeFiles(geolens)
+    plan_file = files._plan(tmp_path)
+    _migrate(runner, plan_file, "--only", D3)
+    _edit_state(plan_file, D3, layer_datasets={}, dataset_ids=[])
+
+    result, payload = _migrate(runner, plan_file, "--only", D3)
+
+    assert result.exit_code == 1
+    assert "nothing to replace" in payload["not_up_to_date"][D3][0]
+
+
 # Cutover
 
 
