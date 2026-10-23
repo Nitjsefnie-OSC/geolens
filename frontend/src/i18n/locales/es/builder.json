@@ -818,8 +818,7 @@
     "prev": "Elemento anterior",
     "next": "Elemento siguiente",
     "close": "Cerrar popup",
-    "dialogLabel": "Detalles del elemento",
-    "youtubeTitle": "Vídeo de YouTube"
+    "dialogLabel": "Detalles del elemento"
   },
   "descriptionPlaceholder": "Agregar una descripción...",
   "titleBar": {

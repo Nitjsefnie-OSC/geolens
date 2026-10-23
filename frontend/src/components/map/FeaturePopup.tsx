@@ -379,9 +379,6 @@ function ValueDisplay({
     );
   }
 
-  // YouTube embeds require allow-same-origin so the
-  // player can load its own JS. This is intentionally laxer than the share-embed
-  // sandbox with allow-scripts only.
   if (isUrl(value)) {
     const { kind, srcUrl } = classifyUrl(value);
 
@@ -425,21 +422,6 @@ function ValueDisplay({
       );
     }
 
-    if (kind === 'youtube') {
-      return (
-        <span className="block">
-          <iframe
-            src={srcUrl}
-            title={t('featurePopup.youtubeTitle')}
-            sandbox="allow-scripts allow-same-origin allow-presentation"
-            referrerPolicy="strict-origin-when-cross-origin"
-            loading="lazy"
-            className="max-h-32 max-w-full rounded-sm w-full aspect-video"
-          />
-        </span>
-      );
-    }
-
     return (
       <a
         href={value}
@@ -447,6 +429,10 @@ function ValueDisplay({
         rel="noopener noreferrer"
         className="text-primary underline break-all"
         onClick={(e) => e.stopPropagation()}
+        // Preserve native link activation inside the copyable property row.
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+        }}
       >
         {!expanded ? truncateGraphemes(value, MAX_VALUE_LENGTH) : value}
       </a>

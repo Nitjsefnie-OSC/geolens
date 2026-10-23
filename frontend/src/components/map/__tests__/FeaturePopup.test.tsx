@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@/test/test-utils';
+import { act, fireEvent, render, screen } from '@/test/test-utils';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { FeaturePopup, type FeatureInfo } from '../FeaturePopup';
 
@@ -75,19 +76,21 @@ describe('FeaturePopup — EASY-11 rich-text rendering', () => {
     expect(video).toHaveAttribute('preload', 'metadata');
   });
 
-  it('EASY-11 — YouTube URL value renders an <iframe> with sandbox and title', () => {
+  it('renders a YouTube URL value as a link without an iframe', () => {
     const features: FeatureInfo[] = [
       makeFeature({
         properties: { video: 'https://youtu.be/dQw4w9WgXcQ' },
         visibleFields: ['video'],
       }),
     ];
-    render(<FeaturePopup longitude={0} latitude={0} features={features} onClose={vi.fn()} />);
-    const iframe = document.querySelector('iframe');
-    expect(iframe).not.toBeNull();
-    expect(iframe!.getAttribute('src')).toContain('youtube.com/embed/dQw4w9WgXcQ');
-    expect(iframe!.getAttribute('sandbox')).toContain('allow-scripts');
-    expect(iframe!.getAttribute('title')).toBeTruthy();
+    const { container } = render(
+      <FeaturePopup longitude={0} latitude={0} features={features} onClose={vi.fn()} />,
+    );
+    expect(container.querySelector('iframe')).toBeNull();
+    const anchor = screen.getByRole('link', { name: 'https://youtu.be/dQw4w9WgXcQ' });
+    expect(anchor).toHaveAttribute('href', 'https://youtu.be/dQw4w9WgXcQ');
+    expect(anchor).toHaveAttribute('target', '_blank');
+    expect(anchor).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
   it('EASY-11 — plain URL value (no extension) renders as anchor (backward-compat regression pin)', () => {
@@ -116,6 +119,50 @@ describe('FeaturePopup — EASY-11 rich-text rendering', () => {
     expect(screen.queryByRole('link')).toBeNull();
     // The text content appears as plain text
     expect(screen.getByText('javascript:alert(1)')).toBeInTheDocument();
+  });
+});
+
+describe('FeaturePopup keyboard activation', () => {
+  it('leaves Enter on the YouTube link uncanceled without copying the value', async () => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    render(
+      <FeaturePopup
+        longitude={0}
+        latitude={0}
+        features={[makeFeature({ properties: { video: 'https://youtu.be/dQw4w9WgXcQ' } })]}
+        onClose={vi.fn()}
+      />,
+    );
+    const anchor = screen.getByRole('link', { name: 'https://youtu.be/dQw4w9WgXcQ' });
+    anchor.focus();
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+
+    await act(async () => { fireEvent(anchor, enter); });
+
+    expect(enter.defaultPrevented).toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', ' '])('copies the value when the property row receives %j', async (key) => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    render(
+      <FeaturePopup
+        longitude={0}
+        latitude={0}
+        features={[makeFeature({ properties: { video: 'https://youtu.be/dQw4w9WgXcQ' } })]}
+        onClose={vi.fn()}
+      />,
+    );
+    const row = screen.getByRole('button', { name: /Video/ });
+    row.focus();
+    const activation = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+
+    await act(async () => { fireEvent(row, activation); });
+
+    expect(activation.defaultPrevented).toBe(true);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('https://youtu.be/dQw4w9WgXcQ');
   });
 });
 

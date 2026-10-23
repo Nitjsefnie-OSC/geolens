@@ -818,8 +818,7 @@
     "prev": "上一个要素",
     "next": "下一个要素",
     "close": "关闭弹窗",
-    "dialogLabel": "要素详情",
-    "youtubeTitle": "YouTube 视频"
+    "dialogLabel": "要素详情"
   },
   "descriptionPlaceholder": "添加描述...",
   "titleBar": {
