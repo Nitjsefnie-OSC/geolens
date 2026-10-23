@@ -315,6 +315,7 @@
     "userNotFound": "Utilisateur introuvable",
     "apiKeyNotFound": "Clé API introuvable",
     "datasetKeyLimit": "Ce jeu de données a déjà 100 clés d'écriture actives. Révoquez-en une pour en créer une autre.",
+    "valueLabelsTooLarge": "Les libellés de valeurs de ce jeu de données dépassent la limite de 1 Mo. Supprimez-en pour en ajouter.",
     "accessDenied": "Accès refusé",
     "couldNotValidateCredentials": "Impossible de valider les identifiants",
     "inactiveUser": "Utilisateur inactif",
@@ -467,7 +468,9 @@
       "booleanFalse": "Faux",
       "resultSummary_one": "{{count}} entité visible",
       "resultSummary_other": "{{count}} entités visibles",
-      "resultSummaryTruncated": "Affichage de {{shown}} entités visibles sur {{total}}"
+      "resultSummaryTruncated": "Affichage de {{shown}} entités visibles sur {{total}}",
+      "truncatedHint": "Zoomez ou déplacez la carte pour afficher le reste des entités.",
+      "openDatasetData": "Voir toutes les données de {{name}}"
     },
     "heatmapLow": "Faible",
     "heatmapHigh": "Élevé",

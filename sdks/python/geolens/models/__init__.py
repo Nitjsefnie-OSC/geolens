@@ -63,14 +63,34 @@ from .api_key_status_response_anthropic_platform import (
 from .approve_request import ApproveRequest
 from .arc_gis_sign_in_request import ArcGISSignInRequest
 from .arc_gis_sign_in_response import ArcGISSignInResponse
+from .arcgis_loss_item import ArcgisLossItem
+from .arcgis_loss_report import ArcgisLossReport
+from .arcgis_loss_report_summary import ArcgisLossReportSummary
+from .arcgis_unmatched_layer import ArcgisUnmatchedLayer
+from .arcgis_webmap_import_request import ArcgisWebmapImportRequest
+from .arcgis_webmap_import_request_basemap_map import (
+    ArcgisWebmapImportRequestBasemapMap,
+)
+from .arcgis_webmap_import_request_dataset_matches import (
+    ArcgisWebmapImportRequestDatasetMatches,
+)
+from .arcgis_webmap_import_request_webmap import ArcgisWebmapImportRequestWebmap
+from .arcgis_webmap_import_response import ArcgisWebmapImportResponse
+from .arcgis_webmap_import_response_layer_ids import ArcgisWebmapImportResponseLayerIds
 from .attribute_metadata_list_response import AttributeMetadataListResponse
 from .attribute_metadata_response import AttributeMetadataResponse
+from .attribute_metadata_response_value_labels_type_0 import (
+    AttributeMetadataResponseValueLabelsType0,
+)
 from .attribute_metadata_update import AttributeMetadataUpdate
 from .attribute_metadata_update_domain_type_type_0 import (
     AttributeMetadataUpdateDomainTypeType0,
 )
 from .attribute_metadata_update_semantic_role_type_0 import (
     AttributeMetadataUpdateSemanticRoleType0,
+)
+from .attribute_metadata_update_value_labels_type_0 import (
+    AttributeMetadataUpdateValueLabelsType0,
 )
 from .audit_log_list_response import AuditLogListResponse
 from .audit_log_response import AuditLogResponse
@@ -1015,13 +1035,25 @@ __all__ = (
     "ApiKeyStatusResponse",
     "ApiKeyStatusResponseAnthropicPlatform",
     "ApproveRequest",
+    "ArcgisLossItem",
+    "ArcgisLossReport",
+    "ArcgisLossReportSummary",
     "ArcGISSignInRequest",
     "ArcGISSignInResponse",
+    "ArcgisUnmatchedLayer",
+    "ArcgisWebmapImportRequest",
+    "ArcgisWebmapImportRequestBasemapMap",
+    "ArcgisWebmapImportRequestDatasetMatches",
+    "ArcgisWebmapImportRequestWebmap",
+    "ArcgisWebmapImportResponse",
+    "ArcgisWebmapImportResponseLayerIds",
     "AttributeMetadataListResponse",
     "AttributeMetadataResponse",
+    "AttributeMetadataResponseValueLabelsType0",
     "AttributeMetadataUpdate",
     "AttributeMetadataUpdateDomainTypeType0",
     "AttributeMetadataUpdateSemanticRoleType0",
+    "AttributeMetadataUpdateValueLabelsType0",
     "AuditLogListResponse",
     "AuditLogResponse",
     "AuditLogResponseDetailsType0",

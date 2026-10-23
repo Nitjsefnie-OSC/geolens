@@ -308,6 +308,36 @@ def test_a_two_layer_service_becomes_two_datasets(runner, plan_file, geolens):
     assert payload["items"][0]["status"] == "done"
 
 
+def test_two_layers_with_the_same_name_get_their_layer_ids_in_the_title(
+    runner, plan_file, geolens
+):
+    service = FakeImport(geolens, [_layer(0, "Parcels"), _layer(3, "Parcels")])
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert [c["title"] for c in service.bodies("POST /ingest/commit/")] == [
+        "Parcels (public view) - Parcels (0)",
+        "Parcels (public view) - Parcels (3)",
+    ]
+
+
+def test_a_layer_named_like_a_tagged_title_is_tagged_too(runner, plan_file, geolens):
+    service = FakeImport(
+        geolens,
+        [_layer(0, "Parcels"), _layer(3, "Parcels"), _layer(5, "Parcels (0)")],
+    )
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert [c["title"] for c in service.bodies("POST /ingest/commit/")] == [
+        "Parcels (public view) - Parcels (0)",
+        "Parcels (public view) - Parcels (3)",
+        "Parcels (public view) - Parcels (0) (5)",
+    ]
+
+
 def test_a_public_item_sends_no_credential(runner, plan_file, geolens):
     service = FakeImport(geolens, [_layer(0, "Parcels")])
     token = secrets.token_urlsafe(16)
@@ -624,6 +654,26 @@ def test_the_token_does_not_follow_a_probe_url_to_another_host(
         "not one of the organization's servers"
         in (_state(plan_file)["items"][A1]["error"])
     )
+
+
+def test_an_inventory_of_another_organization_is_refused(runner, plan_file, geolens):
+    plan = json.loads(plan_file.read_text())
+    plan["inventory"]["scope"]["org_id"] = "AnotherOrg000"
+    plan_file.write_text(json.dumps(plan))
+
+    result, _ = _migrate(
+        runner,
+        plan_file,
+        "--only",
+        A1,
+        "--username",
+        "gis_admin",
+        env={"ARCGIS_PASSWORD": secrets.token_urlsafe(16)},
+    )
+
+    assert result.exit_code == 2
+    assert "ArcGIS organization" in result.output
+    assert geolens.seen == []
 
 
 def test_a_plan_for_another_portal_than_its_inventory_is_refused(
