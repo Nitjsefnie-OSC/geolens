@@ -194,19 +194,13 @@ def test_layers_match_the_dataset_of_their_service_layer():
                 layer_datasets={"0": "ds-0", "1": "ds-1"}, dataset_ids=["ds-0", "ds-1"]
             ),
             "file": _state_item(dataset_ids=["ds-file"]),
+            "sparse": _state_item(
+                layer_datasets={"0": "ds-a", "3": "ds-d"}, dataset_ids=["ds-a", "ds-d"]
+            ),
             "solo": _state_item(
                 layer_datasets={"0": "ds-solo"}, dataset_ids=["ds-solo"]
             ),
             "many": _state_item(dataset_ids=["a", "b"]),
-            "two": _state_item(
-                layer_datasets={"layer:Roads": "ds-roads", "layer:Lakes": "ds-lakes"},
-                dataset_ids=["ds-roads", "ds-lakes"],
-                file_layers=["Roads", "Lakes"],
-            ),
-            "old": _state_item(
-                layer_datasets={"layer:Roads": "ds-roads", "layer:Lakes": "ds-lakes"},
-                dataset_ids=["ds-roads", "ds-lakes"],
-            ),
             "failed": _state_item("failed", dataset_ids=["ds-failed"]),
         }
     )
@@ -216,11 +210,10 @@ def test_layers_match_the_dataset_of_their_service_layer():
             {"id": "l1", "itemId": "svc", "url": f"{base}/1"},
             {"id": "l0", "itemId": "svc", "url": f"{base}/0?token=x"},
             {"id": "other_index", "itemId": "solo", "url": f"{base}/7"},
+            {"id": "s3", "itemId": "sparse", "url": f"{base}/3"},
+            {"id": "s1", "itemId": "sparse", "url": f"{base}/1"},
             {"id": "f", "itemId": "file"},
-            {"id": "t0", "itemId": "two", "url": f"{base}/0"},
-            {"id": "t1", "itemId": "two", "url": f"{base}/1"},
-            {"id": "t2", "itemId": "two", "url": f"{base}/2"},
-            {"id": "o0", "itemId": "old", "url": f"{base}/0"},
+            {"id": "file_indexed", "itemId": "file", "url": f"{base}/0"},
             {"id": "ambiguous", "itemId": "many"},
             {"id": "failed", "itemId": "failed"},
             {"id": "unknown", "itemId": "other"},
@@ -235,9 +228,8 @@ def test_layers_match_the_dataset_of_their_service_layer():
     assert match_datasets(ctx, webmap) == {
         "l1": "ds-1",
         "l0": "ds-0",
+        "s3": "ds-d",
         "f": "ds-file",
-        "t0": "ds-roads",
-        "t1": "ds-lakes",
         "inner": "ds-0",
     }
 

@@ -284,7 +284,6 @@ def test_a_multi_layer_file_becomes_one_dataset_per_layer(
     assert not files.commits
     entry = _state(plan_file)["items"][D3]
     assert entry["dataset_ids"] == [dataset_id("Roads"), dataset_id("Parcels")]
-    assert entry["file_layers"] == ["Roads", "Parcels"]
 
 
 def test_a_rerun_after_a_lost_commit_answer_does_not_upload_again(
