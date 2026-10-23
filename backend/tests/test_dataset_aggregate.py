@@ -273,6 +273,18 @@ class TestOperations:
             {"key": "keep", "value": 0.30000000000000004}
         ]
 
+    async def test_a_deeply_nested_filter_is_an_invalid_filter(
+        self, client: AsyncClient, points
+    ):
+        nested: dict = KEEP
+        for _ in range(300):
+            nested = {"op": "not", "args": [nested]}
+
+        resp = await _aggregate(client, points.id, {"op": "count", "filter": nested})
+
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "invalid_filter"
+
     async def test_the_live_columns_are_read_once(
         self, client: AsyncClient, points, monkeypatch
     ):

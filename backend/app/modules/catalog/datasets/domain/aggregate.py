@@ -59,6 +59,9 @@ from app.platform.sandbox.schemas import SandboxError
 MAX_VIEW_ROWS = 500_000
 AGGREGATE_TIMEOUT_MS = 4_000
 _MAX_ITEMS = 50
+# Pydantic stops serializing at 255 levels, and the cache key serializes the
+# filter. Filters the builder writes nest a few levels.
+_MAX_FILTER_DEPTH = 64
 _FLOAT_TYPES = frozenset({"real", "double precision"})
 # Integers at or past this lose precision as JavaScript numbers.
 _JS_SAFE_INTEGER = 2**53
@@ -556,6 +559,20 @@ async def _aggregate_rows(
     return result.rows
 
 
+def _check_filter_depth(cql2: Any) -> None:
+    """Refuse a filter nested past ``_MAX_FILTER_DEPTH``, without recursing."""
+    pending = [(cql2, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > _MAX_FILTER_DEPTH:
+            raise AggregateError(
+                "invalid_filter", "Invalid CQL2 expression: filter nests too deeply"
+            )
+        children = node.values() if isinstance(node, dict) else node
+        if isinstance(node, (dict, list)):
+            pending.extend((child, depth + 1) for child in children)
+
+
 def _cache_key(prefix: str, dataset: Dataset, body: dict) -> str | None:
     if not tenant_cache_context_available():
         return None
@@ -584,6 +601,7 @@ async def run_aggregate(
     when the query cannot run. Releases ``db``'s connection before the query,
     so the caller must not read ORM state from it afterwards.
     """
+    _check_filter_depth(request.filter)
     bbox = request.bbox
     if bbox is not None and not dataset.geometry_type:
         raise AggregateError("no_geometry", "This dataset has no geometry to bound")
