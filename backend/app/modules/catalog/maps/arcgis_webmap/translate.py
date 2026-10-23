@@ -234,6 +234,7 @@ _NUMERIC_FIELD_KINDS = {
     "esriFieldTypeSmallInteger": "integer",
     "esriFieldTypeInteger": "integer",
     "esriFieldTypeBigInteger": "integer",
+    "esriFieldTypeOID": "integer",
     "esriFieldTypeSingle": "float",
     "esriFieldTypeDouble": "float",
 }

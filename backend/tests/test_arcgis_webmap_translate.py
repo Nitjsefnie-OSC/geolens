@@ -301,6 +301,19 @@ class TestUniqueValueRenderer:
         values = [c["value"] for c in layer.style_config["categories"]]
         assert values == [7, *big]
 
+    def test_oid_values_are_stored_as_numbers(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "OBJECTID",
+            "uniqueValueInfos": [{"value": "5", "symbol": _fill()}],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "OBJECTID", "type": "esriFieldTypeOID"}
+        ]
+        layer = _translate(webmap).layers[0]
+        assert layer.style_config["categories"][0]["value"] == 5
+
     def test_duplicate_values_are_reported(self) -> None:
         renderer = self._renderer()
         renderer["uniqueValueInfos"].append(
@@ -2086,6 +2099,16 @@ class TestLegendLabels:
     @pytest.mark.parametrize("label", ["1", "$0–$10", "★", "10 - 20"])
     def test_authored_labels_without_letters_are_reported(self, label: str) -> None:
         assert "class_label" in self._kinds(self._breaks([label, "10 - 20"]))
+
+    @pytest.mark.parametrize("label", ["< 20", "<= 20", "1 0 - 20"])
+    def test_a_later_class_has_no_upper_bound_form(self, label: str) -> None:
+        assert "class_label" in self._kinds(self._breaks(["0 - 10", label]))
+
+    def test_spacing_inside_a_number_is_not_ignored(self) -> None:
+        renderer = self._breaks(["0 - 1 000", "1000 - 2000"])
+        renderer["classBreakInfos"][0]["classMaxValue"] = 1000
+        renderer["classBreakInfos"][1]["classMaxValue"] = 2000
+        assert "class_label" in self._kinds(renderer)
 
     def test_a_default_label_is_reported_only_with_a_default_symbol(self) -> None:
         with_symbol = self._breaks(

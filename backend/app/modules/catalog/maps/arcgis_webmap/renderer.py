@@ -7,6 +7,7 @@ Everything else keeps a default paint and is recorded in the loss report.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -414,7 +415,7 @@ def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
     )
     authored = 0
     previous = renderer_min
-    for high, low, info in ordered:
+    for index, (high, low, info) in enumerate(ordered):
         label = info.get("label")
         low = previous if low is None else low
         previous = high
@@ -422,10 +423,11 @@ def _authored_break_labels(classes: list, renderer_min: float | None) -> int:
             continue
         generated = set()
         if high is not None:
-            generated = {f"<{high:g}", f"<={high:g}"}
+            if index == 0:
+                generated = {f"<{high:g}", f"<={high:g}"}
             if low is not None:
                 generated.add(f"{low:g}-{high:g}")
-        if "".join(label.split()) not in generated:
+        if re.sub(r"\s*(<=|<|-)\s*", r"\1", label.strip()) not in generated:
             authored += 1
     return authored
 
