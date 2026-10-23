@@ -3,7 +3,9 @@
 # PR-path jobs, minus the `changes` gating so every dispatched ref runs them.
 # DELIBERATELY EXCLUDED (loud skip, add before a probe that needs them):
 #   - Frontend Lint & Typecheck / Frontend Tests (ci.yml frontend-lint,
-#     frontend-test): add verbatim before dispatching a frontend-affecting ref.
+#     frontend-test): ADDED 2026-10-23 (verbatim from ci.yml minus changes
+#     gating; checkouts take target_ref + the Provenance step) — frontend-
+#     affecting refs run them.
 #   - e2e-test / e2e-smoke / accessibility (need the docker compose stack and
 #     Playwright browsers; upstream's own pull_request run covers these when
 #     its filters select them).
@@ -542,3 +544,143 @@ jobs:
             backend/coverage.xml
           retention-days: 14
 
+
+  frontend-lint:
+    name: Frontend Lint & Typecheck
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.target_ref }}
+      - name: Provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tested_target_ref=${{ inputs.target_ref }}"
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.10.2"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        # Same npm-ci-stall settings as License Check
+        # (frontend)'s Install step, applied here for consistency —
+        # any job restoring the npm cache and then fetching from the
+        # registry can hit the same registry stall.
+        env:
+          NPM_CONFIG_FETCH_TIMEOUT: "30000"
+          NPM_CONFIG_FETCH_RETRIES: "2"
+          NPM_CONFIG_LOGLEVEL: http
+        run: npm ci
+
+      - name: Verify generated API types
+        run: npm run types:check
+
+      - name: Locale parity
+        run: npm run test:i18n
+
+      - name: Hardcoded toast strings
+        run: npm run check:i18n:toast-strings
+
+      - name: Changed namespaces exist in all languages
+        run: npm run check:i18n:changed
+
+      - name: ESLint
+        run: npm run lint
+
+      # The four sec lint pins in package.json need a step to run
+      # them. The *-regression scripts strip inline eslint-disable comments and
+      # assert the security rule still FIRES on its fixture (exit != 0); the
+      # *-no-false-positive scripts assert the sanitized fixture stays clean.
+      # Without this step, an eslint-config change that silently drops
+      # the token-in-localStorage ban or react/no-danger would land unnoticed.
+      - name: ESLint security-rule regression pins
+        run: |
+          npm run lint:sec-s14-regression
+          npm run lint:sec-s14-no-false-positive
+          npm run lint:sec-fu-03-regression
+          npm run lint:sec-fu-03-no-false-positive
+
+      - name: TypeScript check
+        # `npx tsc --noEmit` is a no-op here: the solution-style root tsconfig has an
+        # empty `files`/`include`, so it compiles nothing and always exits 0. The real
+        # type gate is `tsc -b --noEmit`, which walks the project references.
+        run: npm run typecheck
+
+      - name: Unused exports and files
+        # Test files count as consumers, so this is knip's default mode; see knip.jsonc.
+        run: npm run knip
+  frontend-test:
+    name: Frontend Tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_ref }}
+      - name: Provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tested_target_ref=${{ inputs.target_ref }}"
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        # Same npm-ci-stall settings as License Check
+        # (frontend)'s Install step, applied here for consistency —
+        # any job restoring the npm cache and then fetching from the
+        # registry can hit the same registry stall.
+        env:
+          NPM_CONFIG_FETCH_TIMEOUT: "30000"
+          NPM_CONFIG_FETCH_RETRIES: "2"
+          NPM_CONFIG_LOGLEVEL: http
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload frontend coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          retention-days: 14
+
+  # ---------- license-check ----------
+  # BLOCKING license-checker against the frontend production dependency tree:
+  # fails CI on any license outside the curated permissive allowlist (validated
+  # against the current tree). The JSON report is still uploaded as an artifact.
