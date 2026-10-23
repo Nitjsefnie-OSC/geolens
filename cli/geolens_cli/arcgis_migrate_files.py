@@ -223,6 +223,9 @@ def _fan_out(
         "titles": [titles[name] for name in layers],
         "sent_at": _wall_clock(),
     }
+    # Kept after the fan-out record is cleared: a web map's numeric layer index
+    # is resolved against this order.
+    entry.file_layers = list(layers)
     entry.pending_upload = None
     ctx.save()
     request = FanOutCommitRequest(

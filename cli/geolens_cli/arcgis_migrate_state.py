@@ -83,6 +83,8 @@ class ItemState:
     # A multi-layer file's fan-out, recorded before it is sent: the parent
     # upload job and the layers asked for.
     fan_out: dict[str, Any] | None = None
+    # A multi-layer file's layer names in the order its preview listed them.
+    file_layers: list[str] = field(default_factory=list)
     # A file's upload job from the upload until its preview has chosen how it
     # is committed, so a rerun after a failed preview does not upload again.
     pending_upload: str | None = None

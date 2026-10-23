@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from . import arcgis_report as _report
 from ._sdk_helpers import long_request_timeout
+from .arcgis_migrate_files import LAYER_PREFIX
 from .arcgis_migrate_session import (
     GeoLensError,
     ItemFailed,
@@ -56,9 +57,13 @@ def _dataset_for(layer: Mapping[str, Any], source: ItemState) -> str | None:
     path = urlsplit(url).path if isinstance(url, str) else ""
     sub = _TRAILING_LAYER.search(path)
     if sub:
-        # An index the run imported no dataset for is another layer's, not
-        # the sole dataset's.
-        return source.layer_datasets.get(sub.group(1))
+        index = int(sub.group(1))
+        if sub.group(1) in source.layer_datasets:
+            return source.layer_datasets[sub.group(1)]
+        # An index with no dataset is another layer's, not the sole dataset's.
+        if index < len(source.file_layers):
+            return source.layer_datasets.get(LAYER_PREFIX + source.file_layers[index])
+        return None
     if len(source.dataset_ids) == 1:
         return source.dataset_ids[0]
     return None
