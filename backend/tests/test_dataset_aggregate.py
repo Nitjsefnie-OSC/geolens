@@ -1,13 +1,16 @@
 """POST /datasets/{id}/aggregate/ computes exact widget aggregates under Rule 1 and cost bounds."""
 
 import asyncio
+import contextlib
 import uuid
 
 import pytest
+import sqlalchemy
 from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.modules.catalog.datasets.domain import aggregate
 from tests.factories import (
     create_dataset,
@@ -286,6 +289,42 @@ def stored_ttls(monkeypatch) -> list[int]:
 
     monkeypatch.setattr(aggregate, "get_cache", lambda: _Recording)
     return ttls
+
+
+@contextlib.contextmanager
+def _holding(*keys: str):
+    """Hold the sandbox's advisory locks for ``keys`` from another session."""
+    engine = sqlalchemy.create_engine(settings.test_database_url_sync)
+    try:
+        with engine.connect() as conn:
+            for key in keys:
+                conn.execute(
+                    text("SELECT pg_advisory_lock(hashtextextended(:k, 0))"),
+                    {"k": f"geolens:ai-sql:{key}"},
+                )
+            yield
+            conn.execute(text("SELECT pg_advisory_unlock_all()"))
+    finally:
+        engine.dispose()
+
+
+class TestConcurrency:
+    async def test_a_caller_may_run_two_aggregates_at_once(
+        self, client: AsyncClient, admin_auth_header: dict, test_db_session, points
+    ):
+        admin_id = await get_user_id(test_db_session, "admin")
+        body = {"op": "count", "filter": KEEP}
+
+        with _holding(f"aggregate:{admin_id}:0"):
+            second = await _aggregate(client, points.id, body, admin_auth_header)
+        with _holding(f"aggregate:{admin_id}:0", f"aggregate:{admin_id}:1"):
+            third = await _aggregate(
+                client, points.id, {**body, "bbox": FIRST_THREE}, admin_auth_header
+            )
+
+        assert second.status_code == 200, second.text
+        assert third.status_code == 429, third.text
+        assert third.json()["detail"]["code"] == "query_busy"
 
 
 class TestCachePolicy:

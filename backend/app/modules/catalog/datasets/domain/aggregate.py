@@ -10,6 +10,7 @@ rolls on every in-app write to the live table.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 from collections.abc import Sequence
@@ -50,6 +51,9 @@ from app.platform.sandbox.schemas import SandboxError
 MAX_VIEW_ROWS = 500_000
 AGGREGATE_TIMEOUT_MS = 4_000
 _MAX_ITEMS = 50
+# Two widgets of one caller may run at once; a third waits for the client's
+# retry. More would let a few callers hold every slot on a worker.
+_CALLER_CONCURRENCY = 2
 # Category keys are column values of any size; numbers need no cap.
 _MAX_KEYED_RESULT_BYTES = 1 << 20
 _WHOLE_LAYER_TTL = 24 * 3600
@@ -395,16 +399,25 @@ async def _sandboxed(
     row_limit: int,
     max_result_bytes: int | None = None,
 ):
-    return await execute_safe(
+    """Run under one of the caller's lock keys; ``query_busy`` once all are held."""
+    run = functools.partial(
+        execute_safe,
         db,
         sql,
         row_limit=row_limit,
         timeout_ms=AGGREGATE_TIMEOUT_MS,
-        concurrency_key=f"aggregate:{caller_key}",
         require_reader_role=True,
         max_result_bytes=max_result_bytes,
         binds=binds_referenced_by(sql, binds),
     )
+    keys = [f"aggregate:{caller_key}:{slot}" for slot in range(_CALLER_CONCURRENCY)]
+    for key in keys[:-1]:
+        try:
+            return await run(concurrency_key=key)
+        except SandboxError as exc:
+            if exc.category != "query_busy":
+                raise
+    return await run(concurrency_key=keys[-1])
 
 
 def _cache_key(prefix: str, dataset: Dataset, body: dict) -> str | None:
@@ -430,7 +443,7 @@ async def run_aggregate(
     """Compute one aggregate exactly, from the cache when it holds the answer.
 
     The caller has already authorized ``dataset`` and checked it has a feature
-    table. ``caller_key`` names the caller for the one-query-at-a-time lock.
+    table. ``caller_key`` names the caller for its concurrency lock.
     Raises ``AggregateError`` for a request it refuses and ``SandboxError``
     when the query cannot run. Releases ``db``'s connection before the query,
     so the caller must not read ORM state from it afterwards.
