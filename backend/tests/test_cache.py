@@ -899,3 +899,78 @@ async def test_redis_conditional_operation_cannot_change_a_racing_owner(
     )
     assert await getattr(cache, operation)(*args) is False
     assert await original_get("claim") == '"successor"'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_conditional_error_preserves_a_matching_local_claim(
+    redis_cache, monkeypatch, operation
+):
+    cache = redis_cache
+    await cache.set("claim", "owner")
+    await cache._fallback.set("claim", "owner", ttl=45)
+    local_entry = cache._fallback._store["claim"]
+    monkeypatch.setattr(cache._client, "eval", AsyncMock(side_effect=ConnectionError))
+    args = (
+        ("claim", "owner", "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", "owner")
+    )
+
+    changed = await getattr(cache, operation)(*args)
+
+    assert cache._fallback._store.get("claim") == local_entry
+    assert changed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+@pytest.mark.parametrize(("expected", "changed"), [("owner", True), ("other", False)])
+async def test_redis_conditional_response_resets_consecutive_failures(
+    redis_cache, operation, expected, changed
+):
+    cache = redis_cache
+    await cache.set("claim", "owner")
+    cache._failure_count = cache._max_failures - 1
+    args = (
+        ("claim", expected, "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", expected)
+    )
+
+    assert await getattr(cache, operation)(*args) is changed
+    # A later cache read would reset the count independently and mask this call.
+    assert cache._failure_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_memory_conditional_operation_preserves_a_queued_successor(operation):
+    cache = InMemoryCacheProvider()
+    await cache.set("claim", "owner")
+    args = (
+        ("claim", "owner", "renewed", 60)
+        if operation == "compare_and_set"
+        else ("claim", "owner")
+    )
+    # Queue the successor immediately after the operation: any yield between
+    # reading the owner and mutating storage lets the successor win that gap.
+    conditional = asyncio.create_task(getattr(cache, operation)(*args))
+    successor = asyncio.create_task(cache.set("claim", "successor"))
+    changed, _ = await asyncio.gather(conditional, successor)
+
+    assert changed is True
+    assert await cache.get("claim") == "successor"
+
+
+@pytest.mark.asyncio
+async def test_redis_conditional_fallback_honors_the_requested_ttl(redis_cache):
+    cache = redis_cache
+    cache._failure_count = cache._max_failures
+    cache._circuit_open_until = time.monotonic() + 30
+    await cache._fallback.set("claim", "owner")
+
+    assert await cache.compare_and_set("claim", "owner", "renewed", ttl=17) is True
+
+    assert await cache._fallback.get("claim") == "renewed"
+    assert 0 < cache._fallback._store["claim"][1] - time.monotonic() <= 17

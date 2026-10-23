@@ -252,7 +252,7 @@ async def release_health_alert() -> None:
 
 
 async def retry_health_alert_later(token: str) -> None:
-    """Shorten *token*'s claim to the retry backoff after its delivery failed.
+    """Set *token*'s remaining claim TTL to the retry backoff.
 
     Only that claim: a newer incident's claim holds another token and stays.
     """
