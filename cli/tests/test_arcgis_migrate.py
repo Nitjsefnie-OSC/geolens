@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 import secrets
 import stat
 from pathlib import Path
@@ -153,9 +154,10 @@ def refreshed(monkeypatch):
     """Refreshers that record the finished items a rerun brings up to date."""
     calls: list[str] = []
 
-    def refresher(ctx, item, entry, datasets):
+    @contextmanager
+    def refresher(ctx, item, entry):
         calls.append(item["id"])
-        return []
+        yield [], None
 
     for action in migrate.REFRESHERS:
         monkeypatch.setitem(migrate.REFRESHERS, action, refresher)
@@ -617,6 +619,34 @@ def test_a_viewer_owner_is_asked_to_be_promoted_instead_of_a_refused_transfer(
     assert _state(tmp_path)["items"][L1]["owner_pending"] is None
 
 
+def test_a_viewer_who_stays_a_viewer_is_not_handed_the_item(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "vic"})
+    _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR]
+    assert "promote vic to editor" in payload["owner_pending"][L1]
+
+
+def test_a_waiting_item_is_not_handed_to_an_inactive_unmapped_owner(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+    _run(runner, tmp_path, plan, "--unmapped-owner", "operator")
+
+    result, _ = _run(runner, tmp_path, plan, "--unmapped-owner", "gone")
+
+    assert result.exit_code == 0, result.output
+    assert _owner_patches(geolens) == [OPERATOR]
+    assert _state(tmp_path)["items"][L1]["owner_id"] == OPERATOR
+
+
 def test_a_changed_unmapped_owner_takes_an_item_still_waiting(
     runner, tmp_path, geolens, handled
 ):
@@ -694,6 +724,52 @@ def test_a_migrated_item_whose_plan_owner_no_longer_resolves_is_reported(
     assert unresolved["item"] == L1 and reason in unresolved["reason"]
     assert "unresolved-users" in payload["cutover"]["refused"]
     assert _owner_patches(geolens) == []
+
+
+def test_each_accept_flag_lifts_only_its_own_check(runner, tmp_path, geolens, handled):
+    _allow_transfers(geolens, _created_id(L1))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+
+    result, payload = _run(
+        runner,
+        tmp_path,
+        plan,
+        "--unmapped-owner",
+        "operator",
+        "--cutover",
+        "--accept-unresolved-users",
+    )
+
+    assert result.exit_code == 1
+    assert payload["cutover"]["accepted"] == ["unresolved-users"]
+    # A v1 plan records no inventory scope.
+    assert payload["cutover"]["refused"] == ["incomplete-inventory"]
+
+    result, payload = _run(
+        runner,
+        tmp_path,
+        plan,
+        "--cutover",
+        "--accept-incomplete-inventory",
+        "--accept-unfinished-items",
+        "--accept-attachment-loss",
+    )
+    assert payload["cutover"]["refused"] == ["unresolved-users"]
+
+
+def test_a_state_file_is_written_as_v2_and_v1_still_loads(
+    runner, tmp_path, geolens, handled
+):
+    _allow_transfers(geolens, _created_id(L1), _created_id(L2))
+    _write_state(
+        tmp_path,
+        {L1: {"status": "done", "dataset_ids": [_created_id(L1)], "owner_id": ALICE}},
+    )
+
+    result, _ = _run(runner, tmp_path, _plan([_item(L1), _item(L2)]))
+
+    assert result.exit_code == 0, result.output
+    assert _state(tmp_path)["schema_version"] == "2"
 
 
 def test_cutover_refuses_an_item_still_waiting_for_its_owner(

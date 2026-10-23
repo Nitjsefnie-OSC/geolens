@@ -156,6 +156,17 @@ def attachment_flags(layers: Any) -> dict[str, bool | None]:
     return flags
 
 
+def importable_layers(probe: Any) -> tuple[list[Any], list[str]]:
+    """The probed layers to import, and a note for each one left out."""
+    layers = list(probe.layers)
+    selected = probe.selected_layer_id
+    if isinstance(selected, int | str):
+        layers = [layer for layer in layers if str(layer.layer_id) == str(selected)]
+    reasons = [(layer, _importable(layer)) for layer in layers]
+    notes = [reason for _layer, reason in reasons if reason]
+    return [layer for layer, reason in reasons if reason is None], notes
+
+
 def _importable(layer: Any) -> str | None:
     """Why *layer* is not imported, or None."""
     kind = getattr(layer, "source_layer_type", None)
@@ -395,13 +406,7 @@ def import_layers(
         entry.layer_jobs.clear()
         entry.dataset_ids.clear()
     entry.service_url = row["url"]
-    layers = list(probe.layers)
-    selected = probe.selected_layer_id
-    if isinstance(selected, int | str):
-        layers = [layer for layer in layers if str(layer.layer_id) == str(selected)]
-    reasons = [(layer, _importable(layer)) for layer in layers]
-    notes = [reason for _layer, reason in reasons if reason]
-    wanted = [layer for layer, reason in reasons if reason is None]
+    wanted, notes = importable_layers(probe)
     entry.attachments = attachment_flags(wanted)
     if not wanted:
         # Done rather than skipped, so a rerun doesn't probe it again.

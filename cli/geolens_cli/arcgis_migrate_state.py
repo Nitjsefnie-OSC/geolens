@@ -19,7 +19,10 @@ from . import arcgis_report as _report
 from .arcgis_portal import Redactor, redact_json
 
 STATE_FILENAME = "arcgis-migration-state.json"
-STATE_VERSION = "1"
+# v2 adds what a rerun compares and waits on; a CLI that reads only v1
+# refuses the file rather than rewriting it without them.
+STATE_VERSION = "2"
+_READABLE_VERSIONS = ("1", STATE_VERSION)
 
 PENDING = "pending"
 RUNNING = "running"
@@ -100,12 +103,13 @@ class ItemState:
     # attribution, license, source_organization, keywords), so a rerun can tell
     # a field it wrote from one someone edited in GeoLens.
     metadata_baseline: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Dataset -> its GeoLens updated_at and feature count when this command
-    # last left it, so a rerun can tell a change made in GeoLens since.
+    # Dataset -> its GeoLens updated_at, feature count and data revision when
+    # this command last left it, so a rerun can tell a change made since.
     last_update: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Dataset -> the refresh run ({"run": id}) or replacement upload job
-    # ({"job": id}) a run started and has not seen the end of.
-    refreshing: dict[str, dict[str, str]] = field(default_factory=dict)
+    # ({"job": id}) a run started, with the data revision it was sent with,
+    # until its outcome is settled.
+    refreshing: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Imported service layer -> whether the probe reported attachments (None:
     # it didn't say); None until the service is probed by this version.
     attachments: dict[str, bool | None] | None = None
@@ -184,7 +188,7 @@ class MigrationState:
             ) from None
         try:
             data = json.loads(raw)
-            if data.get("schema_version") != STATE_VERSION:
+            if data.get("schema_version") not in _READABLE_VERSIONS:
                 raise ValueError("unknown schema_version")
             items = {
                 str(item_id): ItemState.from_dict(entry)

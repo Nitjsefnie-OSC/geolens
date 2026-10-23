@@ -40,9 +40,19 @@ and releases use semantic versioning.
   credential, downloads each data file again and replaces its datasets, and
   writes the item metadata again. A refresh that stops for review is reported
   with the command that accepts it and is never accepted for you. A dataset
-  changed in GeoLens since the last run is reported and left alone. Private
-  items need an ArcGIS credential on every rerun, and the run exits 1 while any
-  migrated item isn't up to date.
+  changed in GeoLens since the last run is reported and left alone, and each
+  request carries the data revision the CLI recorded. Private items need an
+  ArcGIS credential on every rerun, and the run exits 1 while any migrated
+  item isn't up to date. Its state file is now version 2, which an earlier CLI
+  refuses to read.
+- `GET /datasets/{id}` returns `data_revision` to the dataset's owner and
+  admins (null for other readers). It counts writes to the dataset's features
+  and columns. `POST /datasets/{id}/refresh` (service datasets) and
+  `POST /datasets/{id}/reupload/{job_id}/commit` take an optional
+  `expected_data_revision`; when it isn't the revision the run compares with,
+  the run stops for review with `live_data_changed` instead of publishing. A
+  refresh of a registered table or STAC item answers 422 when it is set, and
+  it can't be combined with `accept_blocked_run_id`.
 - With `--unmapped-owner`, an item whose plan owner isn't a GeoLens user yet,
   is inactive or has a role that can't receive it goes to that owner for now
   instead of stopping the run, and a later run hands it over. A name that

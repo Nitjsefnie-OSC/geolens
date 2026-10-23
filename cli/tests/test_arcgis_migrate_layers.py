@@ -214,6 +214,8 @@ def _dataset(dataset: str, owner: str) -> dict:
         "created_by_display": None,
         "created_at": NOW,
         "updated_at": NOW,
+        "updated_by": OPERATOR,
+        "data_revision": 0,
     }
 
 
