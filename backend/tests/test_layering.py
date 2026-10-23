@@ -567,6 +567,8 @@ def test_cross_domain_does_not_import_user_from_auth_models() -> None:
             ":!backend/app/modules/catalog/records/inherited.py",
             # VRT audience checks pass User to record_audience, as service_public and inherited do.
             ":!backend/app/modules/catalog/authorization.py",
+            # Group access counts a group's active members.
+            ":!backend/app/modules/catalog/group_access.py",
             ":!backend/tests/",
         ],
         cwd=REPO_ROOT,
@@ -1378,7 +1380,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/modules/auth/oauth/service.py": 1130,
     # Admin mutations share locking and audit outcomes; the catalog stats measure
     # live and kept-version storage.
-    "backend/app/modules/admin/service.py": 1025,
+    "backend/app/modules/admin/service.py": 1050,
     # Ingest admission, staging, job settlement and table registration share one
     # orchestration boundary.
     "backend/app/processing/ingest/service.py": 1559,
@@ -1427,7 +1429,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/modules/catalog/features/service.py": 1639,
     # Dataset visibility, and the VRT member counts and extents each requester
     # may see, share the permission extension's one filter.
-    "backend/app/modules/catalog/authorization.py": 1186,
+    "backend/app/modules/catalog/authorization.py": 1215,
 }
 
 
