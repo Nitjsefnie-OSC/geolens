@@ -106,7 +106,29 @@ def _binds_a_write(statement: ast.expr) -> bool:
     )
 
 
-def _call_writes(call: ast.Call) -> list[str]:
+def _dataset_names(tree: ast.AST) -> frozenset[str]:
+    """Names this module binds to the Dataset model, for spotting its constructor.
+
+    ``Dataset`` itself, an import of it under another name, and a name assigned
+    from the processing port's ``get_dataset_orm_class()``.
+    """
+    names = {"Dataset"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(
+                alias.asname for alias in node.names if alias.name == "Dataset"
+            )
+        elif (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and _terminal_name(node.value.func) == "get_dataset_orm_class"
+        ):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    names.discard(None)
+    return frozenset(names)
+
+
+def _call_writes(call: ast.Call, dataset_names: frozenset[str]) -> list[str]:
     func = call.func
     if (
         isinstance(func, ast.Attribute)
@@ -122,7 +144,7 @@ def _call_writes(call: ast.Call) -> list[str]:
     ):
         return [f"setattr(..., {call.args[1].value!r}, ...)"]
     name = _terminal_name(func)
-    if name == "Dataset" or _is_statement_builder(func):
+    if name in dataset_names or _is_statement_builder(func):
         args = call.args
     elif isinstance(func, ast.Attribute) and name in _ROW_METHODS:
         args = call.args
@@ -146,14 +168,14 @@ def _call_writes(call: ast.Call) -> list[str]:
     return found
 
 
-def _node_writes(node: ast.AST) -> list[str]:
+def _node_writes(node: ast.AST, dataset_names: frozenset[str]) -> list[str]:
     stored = isinstance(getattr(node, "ctx", None), (ast.Store, ast.Del))
     if stored and _is_column(node):
         return [f"writes .{node.attr}"]
     if stored and isinstance(node, ast.Subscript) and _is_column(node.value):
         return [f"writes an item of .{node.value.attr}"]
     if isinstance(node, ast.Call):
-        return _call_writes(node)
+        return _call_writes(node, dataset_names)
     if isinstance(node, ast.Constant) and _is_sql_write(node.value):
         return ["raw SQL writes the column"]
     return []
@@ -165,15 +187,19 @@ def binding_writes(source: str) -> list[tuple[int, str | None, str]]:
     Each is ``(line, enclosing function or None, description)``.
     """
     found: list[tuple[int, str | None, str]] = []
+    tree = ast.parse(source)
+    dataset_names = _dataset_names(tree)
 
     def visit(node: ast.AST, function: str | None) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             function = node.name
-        found.extend((node.lineno, function, what) for what in _node_writes(node))
+        found.extend(
+            (node.lineno, function, what) for what in _node_writes(node, dataset_names)
+        )
         for child in ast.iter_child_nodes(node):
             visit(child, function)
 
-    visit(ast.parse(source), None)
+    visit(tree, None)
     return found
 
 
@@ -250,6 +276,12 @@ def test_the_owner_check_sees_an_extra_write(old: str, new: str) -> None:
         "text('INSERT INTO catalog.datasets (id, \"origin_uri\") VALUES (:i, :u)')",
         "text('UPDATE catalog.datasets SET ORIGIN_REF = :ref WHERE id = :id')",
         "session.execute(stmt, [{'id': 1, 'origin_ref': ref}])",
+        "from app.modules.catalog.datasets.domain.models import Dataset as DatasetModel"
+        "\nDatasetModel(origin_ref={'kind': 'upload'})",
+        "from app.modules.catalog.datasets.domain import models\n"
+        "models.Dataset(origin_uri='x')",
+        "DatasetCls = get_processing_port().get_dataset_orm_class()\n"
+        "DatasetCls(origin_uri='x')",
     ],
 )
 def test_the_scan_sees_a_write(snippet: str) -> None:
@@ -269,6 +301,10 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
         "payload.update(origin_uri=uri)",
         "response.values()",
         "session.execute(select(Dataset.origin_ref))",
+        "class DatasetModel(BaseModel):\n    origin_ref: dict | None = None\n"
+        "DatasetModel(origin_ref={'kind': 'upload'})",
+        "from app.modules.catalog.datasets.domain.schemas import DatasetResponse "
+        "as DatasetModel\nDatasetModel(origin_uri=uri)",
         "session.execute(text('SELECT id FROM catalog.datasets "
         "WHERE origin_ref = :origin_ref'), {'origin_ref': ref})",
         "session.execute(select(Dataset.id).where(Dataset.origin_uri == bindparam("
