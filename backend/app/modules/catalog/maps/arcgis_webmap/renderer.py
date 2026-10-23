@@ -7,6 +7,7 @@ Everything else keeps a default paint and is recorded in the loss report.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -273,11 +274,11 @@ def _js_string(value: str | int | float) -> str:
     """The text MapLibre's ``to-string`` gives a value, which the paint ``match`` keys on."""
     if isinstance(value, str):
         return value
-    if isinstance(value, int) or (value.is_integer() and abs(value) < 1e21):
+    if isinstance(value, int) or (value.is_integer() and abs(value) < 2**53):
         return str(int(value))
     text = repr(value)
     if "e" not in text:
-        return text
+        return text.removesuffix(".0")
     if 1e-6 <= abs(value) < 1e21:
         return format(Decimal(text), "f")
     mantissa, _, exponent = text.partition("e")
@@ -305,9 +306,14 @@ def _typed_value(value: Any, field_kind: str | None) -> str | int | float:
             return int(exact)
         return value
     number = float(exact)
-    if Decimal(repr(number)) != exact:
+    if field_kind == "single":
+        try:
+            number = struct.unpack("f", struct.pack("f", number))[0]
+        except OverflowError:
+            return value
+    elif Decimal(repr(number)) != exact:
         return value
-    return int(number) if number.is_integer() else number
+    return int(number) if number.is_integer() and abs(number) < 2**53 else number
 
 
 def _categorical(

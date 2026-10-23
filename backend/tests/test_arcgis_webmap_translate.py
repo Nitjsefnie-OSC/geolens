@@ -373,6 +373,34 @@ class TestUniqueValueRenderer:
         result = _translate(webmap)
         assert result.layers[0].style_config["categories"][0]["value"] == text
 
+    def test_single_fields_hold_float32_values(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "N",
+            "uniqueValueInfos": [{"value": "0.1", "symbol": _fill()}],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "N", "type": "esriFieldTypeSingle"}
+        ]
+        layer = _translate(webmap).layers[0]
+        assert layer.style_config["categories"][0]["value"] == 0.10000000149011612
+        assert layer.paint["fill-color"][3][2] == "0.10000000149011612"
+
+    def test_a_large_integral_double_keeps_its_javascript_text(self) -> None:
+        renderer = {
+            "type": "uniqueValue",
+            "field1": "N",
+            "uniqueValueInfos": [{"value": "123456789012345680000", "symbol": _fill()}],
+        }
+        webmap = _with_renderer(renderer)
+        webmap["operationalLayers"][0]["layerDefinition"]["fields"] = [
+            {"name": "N", "type": "esriFieldTypeDouble"}
+        ]
+        layer = _translate(webmap).layers[0]
+        assert isinstance(layer.style_config["categories"][0]["value"], float)
+        assert layer.paint["fill-color"][3][2] == "123456789012345680000"
+
     def test_oid_values_are_stored_as_numbers(self) -> None:
         renderer = {
             "type": "uniqueValue",
