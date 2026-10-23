@@ -10,8 +10,8 @@ validator refuses a member whose tenant differs from the group's, including
 for privileged maintenance SQL. The policies stay dormant until
 ``apply_tenancy_rls()`` enables them in multi-tenant mode.
 
-Revision ID: 0090_dataset_group_grants
-Revises: 0089_sharing_groups
+Revision ID: 0091_dataset_group_grants
+Revises: 0090_attribute_value_labels
 Create Date: 2026-10-22
 """
 
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0090_dataset_group_grants"
-down_revision: Union[str, None] = "0089_sharing_groups"
+revision: str = "0091_dataset_group_grants"
+down_revision: Union[str, None] = "0090_attribute_value_labels"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

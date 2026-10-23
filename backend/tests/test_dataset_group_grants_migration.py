@@ -1,4 +1,4 @@
-"""Migration 0090 adds dataset group grants and tenant-scopes sharing groups."""
+"""Migration 0091 adds dataset group grants and tenant-scopes sharing groups."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
     reason="OSS migration roundtrip; multi-head under an enterprise overlay.",
 )
 
-_BELOW = "0089_sharing_groups"
+_BELOW = "0090_attribute_value_labels"
 
 
 async def _seed_member(*, user_tenant: str | None) -> tuple[uuid.UUID, uuid.UUID]:
