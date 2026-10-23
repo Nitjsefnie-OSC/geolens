@@ -87,16 +87,16 @@ def main(argv: list[str]) -> int:
         try:
             subprocess.run(
                 [
-                    "gh", "api", "--method", "PUT",
+                    "gh", "api", "--method", "PATCH",
                     f"repos/{argv[2]}/code-scanning/alerts/{alert['number']}",
                     "-f", "state=dismissed",
-                    "-f", "dismissed_reason=wont_fix",
+                    "-f", "dismissed_reason=won't fix",
                     "-f", f"dismissed_comment={comment}",
                 ],
                 check=True, capture_output=True, text=True,
             )
         except subprocess.CalledProcessError as exc:
-            print(f"::error::Failed to dismiss {label}: {exc.stderr.strip()}")
+            print(f"::error::Failed to dismiss {label}: {' '.join(exc.stderr.split())}")
             failed = True
         else:
             print(f"Dismissed {label}")
