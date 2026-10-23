@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import click
 import typer
@@ -51,6 +52,7 @@ from .arcgis_migrate_refresh import (
     Refresher,
     changed_in_geolens,
     get_dataset,
+    record,
     record_last_update,
     refresh_file,
     refresh_layers,
@@ -555,30 +557,37 @@ def mark_cutover(
     }
 
 
-def transfer(geolens: GeoLens, entry: ItemState, owner: Owner) -> None:
-    """Hand every dataset and the map recorded for an item to *owner*."""
-    from uuid import UUID
-
+def transfer_dataset(geolens: GeoLens, dataset_id: str, owner: Owner) -> Any:
+    """Hand one dataset to *owner*; the dataset as the transfer left it."""
     from geolens.api.datasets import (
         update_dataset_metadata_datasets_dataset_id_patch as patch_dataset,
     )
-    from geolens.api.maps import patch_map_endpoint_maps_map_id_patch as patch_map
     from geolens.models.dataset_meta import DatasetMeta
+
+    return geolens.call(
+        patch_dataset.sync_detailed,
+        dataset_id=UUID(dataset_id),
+        body=DatasetMeta(owner_id=UUID(owner.id)),
+    )
+
+
+def _transfer_map(geolens: GeoLens, map_id: str, owner: Owner) -> None:
+    from geolens.api.maps import patch_map_endpoint_maps_map_id_patch as patch_map
     from geolens.models.map_patch import MapPatch
 
-    owner_id = UUID(owner.id)
+    geolens.call(
+        patch_map.sync_detailed,
+        map_id=UUID(map_id),
+        body=MapPatch(owner_id=UUID(owner.id)),
+    )
+
+
+def transfer(geolens: GeoLens, entry: ItemState, owner: Owner) -> None:
+    """Hand every dataset and the map recorded for an item to *owner*."""
     for dataset_id in entry.dataset_ids:
-        geolens.call(
-            patch_dataset.sync_detailed,
-            dataset_id=UUID(dataset_id),
-            body=DatasetMeta(owner_id=owner_id),
-        )
+        transfer_dataset(geolens, dataset_id, owner)
     if entry.map_id:
-        geolens.call(
-            patch_map.sync_detailed,
-            map_id=UUID(entry.map_id),
-            body=MapPatch(owner_id=owner_id),
-        )
+        _transfer_map(geolens, entry.map_id, owner)
 
 
 @dataclass
@@ -647,17 +656,24 @@ def _migrate_one(
 
 
 def _hand_over_one(ctx: MigrationContext, entry: ItemState, owner: Owner) -> None:
-    """Transfer the item to *owner*; an item someone already gave *owner* in
-    GeoLens counts as handed over."""
-    current = {d: get_dataset(ctx, d) for d in entry.dataset_ids}
-    if not current or any(str(d.created_by) != owner.id for d in current.values()):
-        for dataset_id, dataset in current.items():
-            reason = changed_in_geolens(ctx, entry, dataset_id, dataset)
-            if reason:
-                raise ItemFailed(f"dataset {dataset_id} was {reason}")
-        transfer(ctx.geolens, entry, owner)
+    """Transfer the item to *owner* one dataset at a time.
+
+    A dataset *owner* already has, given by an earlier run that stopped part
+    way or by someone in GeoLens, is left as it is. Each transfer is recorded
+    as this command's own write, so a rerun resumes with the rest.
+    """
+    for dataset_id in entry.dataset_ids:
+        dataset = get_dataset(ctx, dataset_id)
+        if str(dataset.created_by) == owner.id:
+            continue
+        reason = changed_in_geolens(ctx, entry, dataset_id, dataset)
+        if reason:
+            raise ItemFailed(f"dataset {dataset_id} was {reason}")
+        record(entry, dataset_id, transfer_dataset(ctx.geolens, dataset_id, owner))
+        ctx.save()
+    if entry.map_id:
+        _transfer_map(ctx.geolens, entry.map_id, owner)
     entry.owner_id = owner.id
-    record_last_update(ctx, entry, entry.dataset_ids)
 
 
 def hand_over(

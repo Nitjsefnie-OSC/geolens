@@ -88,11 +88,12 @@ def record_last_update(
 ) -> None:
     """Record how this command leaves each dataset, once its writes are done."""
     for dataset_id in dataset_ids:
-        _record(entry, dataset_id, get_dataset(ctx, dataset_id))
+        record(entry, dataset_id, get_dataset(ctx, dataset_id))
     ctx.save()
 
 
-def _record(entry: ItemState, dataset_id: str, dataset: Any) -> None:
+def record(entry: ItemState, dataset_id: str, dataset: Any) -> None:
+    """Record *dataset* as this command left it."""
     entry.last_update[dataset_id] = snapshot(dataset)
     entry.refreshing.pop(dataset_id, None)
 
@@ -451,12 +452,12 @@ def _bring_one(
             dataset_id,
             "changed in GeoLens while its refresh ran; it was left as it is",
         )
-    _record(entry, dataset_id, published)
+    record(entry, dataset_id, published)
     ctx.save()
     apply_item_metadata(ctx, item, entry, [dataset_id])
     after = get_dataset(ctx, dataset_id)
     if _published_unchanged(ctx, after, revision):
-        _record(entry, dataset_id, after)
+        record(entry, dataset_id, after)
         ctx.save()
     return None
 

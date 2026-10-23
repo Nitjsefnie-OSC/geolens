@@ -645,6 +645,63 @@ def test_a_waiting_item_is_not_handed_to_an_inactive_unmapped_owner(
     assert _state(tmp_path)["items"][L1]["owner_id"] == OPERATOR
 
 
+def test_a_handover_that_failed_part_way_resumes_on_the_next_run(
+    runner, tmp_path, geolens, handled
+):
+    first, second = _created_id(L1), _created_id(L2)
+    owners = {first: OPERATOR, second: OPERATOR}
+    edited = {first: NOW, second: NOW}
+    refuse = {second}
+
+    def get(seen, d):
+        return {**_dataset(d, owners[d]), "updated_at": edited[d]}
+
+    def patch(seen, d):
+        if d in refuse:
+            return (500, {"title": "Error", "status": 500, "detail": "boom"})
+        owners[d] = seen.json()["owner_id"]
+        edited[d] = "2026-10-02T00:00:00Z"
+        return get(seen, d)
+
+    for d in (first, second):
+        geolens.routes[f"GET /datasets/{d}"] = lambda seen, d=d: get(seen, d)
+        geolens.routes[f"PATCH /datasets/{d}"] = lambda seen, d=d: patch(seen, d)
+    snapshot = {"updated_at": "2026-10-01T00:00:00+00:00", "feature_count": 0}
+    _write_state(
+        tmp_path,
+        {
+            L1: {
+                "status": "done",
+                "dataset_ids": [first, second],
+                "owner_id": OPERATOR,
+                "owner_pending": "newbie is not a GeoLens user yet",
+                "last_update": {
+                    first: {**snapshot, "data_revision": None},
+                    second: {**snapshot, "data_revision": None},
+                },
+            }
+        },
+    )
+    _users(geolens, _user(NEW, "newbie", ["editor"]))
+    plan = _plan([_item(L1)], owner_map={"agol_alice": "newbie"})
+
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 1 and payload["handover_failed"]
+    assert owners == {first: NEW, second: OPERATOR}
+    recorded = _state(tmp_path)["items"][L1]["last_update"]
+    assert recorded[first]["updated_at"].startswith("2026-10-02")
+
+    refuse.clear()
+    result, payload = _run(runner, tmp_path, plan)
+
+    assert result.exit_code == 0, result.output
+    assert payload["handed_over"] == [{"item": L1, "owner": "newbie"}]
+    assert owners == {first: NEW, second: NEW}
+    entry = _state(tmp_path)["items"][L1]
+    assert entry["owner_id"] == NEW and entry["owner_pending"] is None
+
+
 def test_a_changed_unmapped_owner_takes_an_item_still_waiting(
     runner, tmp_path, geolens, handled
 ):
