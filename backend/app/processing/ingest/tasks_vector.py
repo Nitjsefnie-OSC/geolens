@@ -341,7 +341,7 @@ async def _fetch_arcgis_import_page_info(
         fetch_arcgis_pagination_info,
     )
     from app.core.url_redaction import redact_exception_text
-    from app.platform.security import make_safe_client
+    from app.platform.security import CredentialRedirectError, make_safe_client
 
     # A failed count must not discard what the layer metadata already said.
     max_record_count, supports_pagination = None, False
@@ -363,7 +363,8 @@ async def _fetch_arcgis_import_page_info(
                 source_url, layer_id, client, token=token
             )
             return feature_count, max_record_count, supports_pagination, order_field
-    except ArcGISTokenError:
+    except (ArcGISTokenError, CredentialRedirectError):
+        # GDAL would follow the same redirect with the token in its URL.
         raise
     except Exception as exc:  # broad: count is an optimization; import can fall back
         structlog.get_logger().warning(

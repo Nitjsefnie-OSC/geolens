@@ -375,7 +375,11 @@ async def _read_with_query_token(
     """
     retry_headers, retry_token = _query_form_credential(token)
     body, _ = await bounded_probe_read(
-        client, build_url(retry_token), headers=retry_headers, accept=OGC_JSON_ACCEPT
+        client,
+        build_url(retry_token),
+        headers=retry_headers,
+        accept=OGC_JSON_ACCEPT,
+        credential_in_query=True,
     )
     return _arcgis_parsed_json(body)
 
@@ -413,7 +417,11 @@ async def read_arcgis_json(
     requested_url = build_url(query_token)
     try:
         body, _ = await bounded_probe_read(
-            client, requested_url, headers=headers, accept=OGC_JSON_ACCEPT
+            client,
+            requested_url,
+            headers=headers,
+            accept=OGC_JSON_ACCEPT,
+            credential_in_query=query_token is not None,
         )
     except httpx.HTTPStatusError as exc:
         if not headers or not token or not _is_web_tier_refusal(exc, requested_url):
