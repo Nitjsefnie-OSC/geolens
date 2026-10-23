@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import re
 import socket
 from types import ModuleType
 from urllib.parse import unquote, unquote_plus, urlparse
@@ -196,6 +197,8 @@ def _names_query_credential(tokens: set[str], target: httpx.URL) -> bool:
 
     Anywhere in the URL, at every percent-decoding depth up to the cap, with
     ``+`` read both ways, and ignoring case, since httpx lowercases the host.
+    A match must not continue a run of letters or digits, so a short token is
+    not found inside an unrelated value (``a`` in ``sig=abc``).
     """
     if not tokens:
         return False
@@ -206,7 +209,12 @@ def _names_query_credential(tokens: set[str], target: httpx.URL) -> bool:
             break
         spellings.append(decoded)
     spellings += [unquote_plus(spelled) for spelled in spellings]
-    return any(token in spelled.lower() for token in tokens for spelled in spellings)
+    patterns = [
+        re.compile(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])") for token in tokens
+    ]
+    return any(
+        pattern.search(spelled.lower()) for pattern in patterns for spelled in spellings
+    )
 
 
 def _refuse_cross_origin_credential(

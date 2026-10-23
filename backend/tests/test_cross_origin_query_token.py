@@ -270,6 +270,17 @@ async def test_a_cross_origin_hop_that_drops_the_token_still_follows(one_redirec
     assert not _carries_token(recorded[1])
 
 
+@pytest.mark.parametrize("token", ["a", "abc1"])
+async def test_a_short_token_inside_an_unrelated_value_is_not_an_echo(
+    one_redirect, token
+):
+    recorded = one_redirect("https://cdn.example/blob?sig=xabc1z&q=abc12")
+    async with make_safe_client() as client:
+        response = await client.get(f"https://{SERVICE_HOST}/data?token={token}")
+    assert response.status_code == 200
+    assert len(recorded) == 2
+
+
 async def test_the_parameter_name_is_matched_case_insensitively(one_redirect):
     recorded = one_redirect(f"https://{ELSEWHERE_HOST}/data?Token={ENCODED}")
     async with make_safe_client() as client:
