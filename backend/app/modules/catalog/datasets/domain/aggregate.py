@@ -59,6 +59,7 @@ from app.platform.sandbox.schemas import SandboxError
 MAX_VIEW_ROWS = 500_000
 AGGREGATE_TIMEOUT_MS = 4_000
 _MAX_ITEMS = 50
+_FLOAT_TYPES = frozenset({"real", "double precision"})
 # Integers at or past this lose precision as JavaScript numbers.
 _JS_SAFE_INTEGER = 2**53
 _QUERY_CANCELED = "57014"
@@ -322,11 +323,13 @@ def _column_type(columns: dict[str, str], name: str, *, numeric: bool) -> str:
     return data_type
 
 
-def _stat_sql(stat: str, column: str) -> str:
+def _stat_sql(stat: str, column: str, data_type: str) -> str:
     quoted = _sql_quote_ident(column)
     if stat == "count":
         return f"count({quoted})"
-    return f"{stat}({quoted}::numeric)"
+    # float8 holds every real and double exactly; numeric keeps 15 digits of one.
+    cast = "float8" if data_type in _FLOAT_TYPES else "numeric"
+    return f"{stat}({quoted}::{cast})"
 
 
 def _stat_value(stat: str, value: Any) -> Any:
@@ -335,7 +338,9 @@ def _stat_value(stat: str, value: Any) -> Any:
         return None
     if stat == "count":
         return int(value)
-    return _json_number(value) if stat == "avg" else _exact(value)
+    if stat == "avg" and isinstance(value, Decimal):
+        return _json_number(value)
+    return _exact(value)
 
 
 def build_aggregate_sql(
@@ -355,9 +360,9 @@ def build_aggregate_sql(
     if request.op == "count":
         return f"SELECT count(*) AS _n{from_where()}"
     if request.op == "stats":
-        _column_type(columns, request.column, numeric=True)
+        data_type = _column_type(columns, request.column, numeric=True)
         selects = ", ".join(
-            f"{_stat_sql(stat, request.column)} AS _s{i}"
+            f"{_stat_sql(stat, request.column, data_type)} AS _s{i}"
             for i, stat in enumerate(request.stats)
         )
         return f"SELECT {selects}{from_where()}"
@@ -392,8 +397,8 @@ def build_aggregate_sql(
     if request.stat == "count":
         value = "count(*)"
     else:
-        _column_type(columns, request.column, numeric=True)
-        value = _stat_sql(request.stat, request.column)
+        data_type = _column_type(columns, request.column, numeric=True)
+        value = _stat_sql(request.stat, request.column, data_type)
     return (
         f"SELECT {key} AS _k, {value} AS _v{from_where()}"
         f" GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1 NULLS LAST LIMIT {request.limit}"

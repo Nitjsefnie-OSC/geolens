@@ -226,6 +226,53 @@ class TestOperations:
             {"lower": 0.0, "upper": 1e308, "count": 5},
         ]
 
+    async def test_double_extremes_keep_every_stored_digit(
+        self, client: AsyncClient, test_db_session, points
+    ):
+        await test_db_session.execute(
+            text(
+                f"UPDATE data.{points.table_name}"  # noqa: S608
+                " SET score = CASE gid WHEN 3 THEN 0.30000000000000004::float8"
+                " ELSE 1234567.123456789::float8 END WHERE gid IN (3, 4)"
+            )
+        )
+        await test_db_session.commit()
+        filtered = {
+            "op": "and",
+            "args": [
+                {"op": ">=", "args": [{"property": "pop"}, 30]},
+                {"op": "<=", "args": [{"property": "pop"}, 40]},
+            ],
+        }
+
+        stats = await _aggregate(
+            client,
+            points.id,
+            {
+                "op": "stats",
+                "column": "score",
+                "stats": ["min", "max"],
+                "filter": filtered,
+            },
+        )
+        grouped = await _aggregate(
+            client,
+            points.id,
+            {
+                "op": "group_by",
+                "group_column": "kind",
+                "stat": "min",
+                "column": "score",
+                "filter": {"op": "=", "args": [{"property": "pop"}, 30]},
+            },
+        )
+
+        assert stats.json()["result"]["min"] == 0.30000000000000004
+        assert stats.json()["result"]["max"] == 1234567.123456789
+        assert grouped.json()["result"]["groups"] == [
+            {"key": "keep", "value": 0.30000000000000004}
+        ]
+
     async def test_the_live_columns_are_read_once(
         self, client: AsyncClient, points, monkeypatch
     ):
