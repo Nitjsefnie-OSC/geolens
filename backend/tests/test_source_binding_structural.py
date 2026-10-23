@@ -8,12 +8,16 @@ an attribute assignment or delete, an item write or mutating method on the
 stored dict, ``setattr`` by name, the columns as keywords or dict keys of an
 ORM constructor or SQL write, and raw SQL that sets or inserts them.
 
+Inside the owner module, each write is counted by the function it sits in, so
+a second write site, or a write outside the setter, fails too.
+
 A write through ``**kwargs`` or a name computed at runtime leaves no lexical
 trace, so it is out of reach here.
 """
 
 import ast
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -21,22 +25,25 @@ import pytest
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = BACKEND_ROOT / "app"
 OWNER = "app/platform/dataset_origin.py"
+# Every write the owner module makes, by enclosing function. set_postgis_origin
+# writes through set_dataset_origin.
+OWNER_WRITES = Counter(
+    {
+        ("set_dataset_origin", "writes .origin_ref"): 1,
+        ("set_dataset_origin", "writes .origin_uri"): 1,
+    }
+)
 
 COLUMNS = frozenset({"origin_ref", "origin_uri"})
 _DICT_MUTATORS = frozenset(
     {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "__delitem__"}
 )
-# Calls that write rows: the ORM constructor and the SQL statement builders.
-_ROW_WRITERS = frozenset(
-    {
-        "Dataset",
-        "values",
-        "execute",
-        "update",
-        "bulk_insert_mappings",
-        "bulk_update_mappings",
-    }
-)
+# SQLAlchemy's statement builders, called as functions or through the module.
+_STATEMENTS = frozenset({"update", "insert"})
+_SQLALCHEMY_MODULES = frozenset({"sa", "sqlalchemy"})
+# Methods whose arguments become row values. A dict's own ``values()`` and
+# ``update()`` are not here: ``payload.update({"origin_ref": ...})`` writes no row.
+_ROW_METHODS = frozenset({"values", "bulk_insert_mappings", "bulk_update_mappings"})
 _SQL_WRITE = re.compile(
     r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\s*=(?!=)"
     r"|\bINSERT\s+INTO\s+[\w.\"]*datasets\"?\s*\([^)]*\borigin_(?:ref|uri)\b",
@@ -79,40 +86,73 @@ def _call_writes(call: ast.Call) -> list[str]:
         and call.args[1].value in COLUMNS
     ):
         return [f"setattr(..., {call.args[1].value!r}, ...)"]
-    if _terminal_name(func) not in _ROW_WRITERS:
+    name = _terminal_name(func)
+    if name == "Dataset" or (
+        name in _STATEMENTS
+        and (
+            isinstance(func, ast.Name)
+            or (
+                isinstance(func.value, ast.Name)
+                and func.value.id in _SQLALCHEMY_MODULES
+            )
+        )
+    ):
+        args = call.args
+    elif isinstance(func, ast.Attribute) and name in _ROW_METHODS:
+        args = call.args
+    elif isinstance(func, ast.Attribute) and name == "execute":
+        # The statement is checked as its own call; the rest are bind parameters.
+        args = call.args[1:]
+    else:
         return []
     found = [
-        f"passes {kw.arg}= to {_terminal_name(func)}()"
-        for kw in call.keywords
-        if kw.arg in COLUMNS
+        f"passes {kw.arg}= to {name}()" for kw in call.keywords if kw.arg in COLUMNS
     ]
-    for arg in [*call.args, *(kw.value for kw in call.keywords if kw.arg is None)]:
+    for arg in [*args, *(kw.value for kw in call.keywords if kw.arg is None)]:
         found.extend(
-            f"passes a {key!r} key to {_terminal_name(func)}()"
-            for key in _dict_column_keys(arg)
+            f"passes a {key!r} key to {name}()" for key in _dict_column_keys(arg)
         )
     return found
 
 
-def binding_writes(source: str) -> list[tuple[int, str]]:
-    """Every write to the binding columns this module's text shows, by line."""
-    found: list[tuple[int, str]] = []
-    for node in ast.walk(ast.parse(source)):
-        stored = isinstance(getattr(node, "ctx", None), (ast.Store, ast.Del))
-        if stored and _is_column(node):
-            found.append((node.lineno, f"writes .{node.attr}"))
-        elif stored and isinstance(node, ast.Subscript) and _is_column(node.value):
-            found.append((node.lineno, f"writes an item of .{node.value.attr}"))
-        elif isinstance(node, ast.Call):
-            found.extend((node.lineno, what) for what in _call_writes(node))
-        elif (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and "origin_" in node.value
-            and _SQL_WRITE.search(node.value)
-        ):
-            found.append((node.lineno, "raw SQL writes the column"))
+def _node_writes(node: ast.AST) -> list[str]:
+    stored = isinstance(getattr(node, "ctx", None), (ast.Store, ast.Del))
+    if stored and _is_column(node):
+        return [f"writes .{node.attr}"]
+    if stored and isinstance(node, ast.Subscript) and _is_column(node.value):
+        return [f"writes an item of .{node.value.attr}"]
+    if isinstance(node, ast.Call):
+        return _call_writes(node)
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "origin_" in node.value
+        and _SQL_WRITE.search(node.value)
+    ):
+        return ["raw SQL writes the column"]
+    return []
+
+
+def binding_writes(source: str) -> list[tuple[int, str | None, str]]:
+    """Every write to the binding columns this module's text shows.
+
+    Each is ``(line, enclosing function or None, description)``.
+    """
+    found: list[tuple[int, str | None, str]] = []
+
+    def visit(node: ast.AST, function: str | None) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function = node.name
+        found.extend((node.lineno, function, what) for what in _node_writes(node))
+        for child in ast.iter_child_nodes(node):
+            visit(child, function)
+
+    visit(ast.parse(source), None)
     return found
+
+
+def owner_writes(source: str) -> Counter:
+    return Counter((function, what) for _, function, what in binding_writes(source))
 
 
 def test_only_the_binding_module_writes_origin_columns() -> None:
@@ -122,7 +162,7 @@ def test_only_the_binding_module_writes_origin_columns() -> None:
         source = path.read_text(encoding="utf-8")
         if rel == OWNER or not any(column in source for column in COLUMNS):
             continue
-        for line, what in binding_writes(source):
+        for line, _, what in binding_writes(source):
             violations.append(f"{rel}:{line}: {what}")
     assert not violations, (
         "origin_uri/origin_ref are written only by set_dataset_origin or "
@@ -131,12 +171,30 @@ def test_only_the_binding_module_writes_origin_columns() -> None:
     )
 
 
-def test_the_owner_module_is_where_the_writes_are() -> None:
+def test_the_owner_module_writes_only_inside_its_setter() -> None:
     owner = (BACKEND_ROOT / OWNER).read_text(encoding="utf-8")
-    assert {what for _, what in binding_writes(owner)} == {
-        "writes .origin_ref",
-        "writes .origin_uri",
-    }
+    assert owner_writes(owner) == OWNER_WRITES
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            "\ndef project_unknown(",
+            "\ndef _sneak(dataset):\n    dataset.origin_ref = {}\n\n\n"
+            "def project_unknown(",
+        ),
+        (
+            "    dataset.origin_uri = uri\n",
+            "    dataset.origin_uri = uri\n    dataset.origin_uri = uri\n",
+        ),
+    ],
+    ids=["second_function", "second_site_in_the_setter"],
+)
+def test_the_owner_check_sees_an_extra_write(old: str, new: str) -> None:
+    owner = (BACKEND_ROOT / OWNER).read_text(encoding="utf-8")
+    assert owner.count(old) == 1
+    assert owner_writes(owner.replace(old, new)) != OWNER_WRITES
 
 
 @pytest.mark.parametrize(
@@ -154,6 +212,9 @@ def test_the_owner_module_is_where_the_writes_are() -> None:
         "setattr(dataset, 'origin_uri', 'x')",
         "Dataset(origin_ref={'kind': 'upload'})",
         "update(Dataset).values(origin_uri='x')",
+        "sa.update(Dataset).values({'origin_ref': ref})",
+        "sqlalchemy.insert(Dataset).values(origin_uri='x')",
+        "session.execute(update(Dataset).values(origin_ref=ref))",
         "insert(Dataset).values({'origin_ref': ref})",
         "Dataset(**{'origin_uri': 'x'})",
         "session.execute(update(Dataset), [{'id': 1, 'origin_ref': ref}])",
@@ -174,6 +235,10 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
         "DatasetResponse(origin_uri=dataset.origin_uri)",
         "origin_ref = {'filename': name}",
         "origin_ref['filename'] = name",
+        "payload.update({'origin_ref': ref})",
+        "payload.update(origin_uri=uri)",
+        "response.values()",
+        "session.execute(select(Dataset.origin_ref))",
         "text('UPDATE catalog.datasets SET last_checked_at = now() "
         "WHERE origin_ref = :ref')",
         "text(\"INSERT INTO v (h) SELECT origin_ref->>'file_hash' FROM d\")",
