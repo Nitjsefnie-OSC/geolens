@@ -60,7 +60,7 @@ RUN_PAGE = 50
 # Starts one dataset's refresh or replacement and records its marker: the
 # dataset id, its GeoLens record and the data revision to send. Returns why it
 # couldn't start, or None.
-Starter = Callable[[str, Any, "int | None"], "str | None"]
+Starter = Callable[[str, Any, int], "str | None"]
 Refresher = Callable[[MigrationContext, Mapping[str, Any], ItemState], list[str]]
 
 
@@ -126,11 +126,10 @@ def _published_unchanged(
 ) -> bool:
     """Whether *dataset* is as a succeeded run published it: the operator
     wrote it last and its data revision is the one the run was sent with."""
-    revision = _revision(dataset)
     return (
-        _operator_wrote_last(ctx, dataset)
-        and revision is not None
-        and revision == expected
+        expected is not None
+        and _revision(dataset) == expected
+        and _operator_wrote_last(ctx, dataset)
     )
 
 
@@ -171,9 +170,9 @@ def changed_in_geolens(
 
 def _wait_for_run(
     ctx: MigrationContext, entry: ItemState, dataset_id: str
-) -> tuple[Any | None, str | None]:
-    """The run ``entry.refreshing`` names for *dataset_id* once it ends, or
-    None while it is still going at the deadline; and why it didn't publish."""
+) -> tuple[bool, str | None]:
+    """Whether the run ``entry.refreshing`` names for *dataset_id* ended before
+    the deadline, and why it didn't publish."""
     marker = entry.refreshing[dataset_id]
     deadline = ctx.clock() + JOB_TIMEOUT
     while True:
@@ -190,14 +189,14 @@ def _wait_for_run(
         if run is not None and str(run.status) in _ENDED:
             break
         if ctx.clock() >= deadline:
-            return None, (
+            return False, (
                 f"its refresh was still running after {JOB_TIMEOUT:g} s; a rerun "
                 "picks up its result"
             )
         ctx.sleep(JOB_POLL_INTERVAL)
     status = str(run.status)
     if status == "succeeded":
-        return run, None
+        return True, None
     if status == "blocked":
         found = _value(run.verification)
         poll = RefreshPollResult(
@@ -205,14 +204,14 @@ def _wait_for_run(
             verification=found.to_dict() if hasattr(found, "to_dict") else found,
             run_id=str(run.id),
         )
-        return run, " ".join(
+        return True, " ".join(
             [
                 "its refresh stopped for review and published nothing.",
                 *blocked_guidance(UUID(dataset_id), poll),
             ]
         )
     error = _value(run.error_message)
-    return run, f"its refresh ended {status}" + (
+    return True, f"its refresh ended {status}" + (
         f": {describe_failure_reason(str(error))}" if error else ""
     )
 
@@ -229,13 +228,12 @@ def _start_refresh(
     entry: ItemState,
     dataset_id: str,
     dataset: Any,
-    revision: int | None,
+    revision: int,
 ) -> str | None:
     from geolens.api.datasets_refresh import (
         refresh_dataset_datasets_dataset_id_refresh_post as refresh,
     )
     from geolens.models.dataset_refresh_request import DatasetRefreshRequest
-    from geolens.types import UNSET
 
     # The token goes where the dataset's stored source points, which the
     # trust check must judge rather than the inventory's URL.
@@ -248,9 +246,7 @@ def _start_refresh(
             row,
             url or row["url"],
             refresh.sync_detailed,
-            body=DatasetRefreshRequest(
-                expected_data_revision=UNSET if revision is None else revision
-            ),
+            body=DatasetRefreshRequest(expected_data_revision=revision),
             dataset_id=UUID(dataset_id),
             expected=202,
         )
@@ -313,7 +309,7 @@ def _start_replace(
     entry: ItemState,
     dataset_id: str,
     dataset: Any,
-    revision: int | None,
+    revision: int,
     path: Path,
 ) -> str | None:
     from geolens.api.datasets_reupload import (
@@ -344,20 +340,23 @@ def _start_replace(
                 job_id=upload.job_id,
                 body=_replace.build_preview_request(layer),
             )
-        problem = None
         if layer is None and _replace.layer_summaries(previewed):
-            problem = (
+            return _settle_unrecorded(
+                ctx,
+                entry,
+                dataset_id,
                 "the file now holds several layers; replace it by hand with "
-                f"geolens replace {dataset_id} --layer <name>"
+                f"geolens replace {dataset_id} --layer <name>",
             )
         # A swap made in GeoLens during the upload, which doesn't move the
         # data revision the commit sends, would otherwise be replaced.
-        elif snapshot(get_dataset(ctx, dataset_id)) != snapshot(dataset):
-            problem = "changed in GeoLens during the upload; it was left as it is"
-        if problem:
-            del entry.refreshing[dataset_id]
-            ctx.save()
-            return problem
+        if snapshot(get_dataset(ctx, dataset_id)) != snapshot(dataset):
+            return _settle_unrecorded(
+                ctx,
+                entry,
+                dataset_id,
+                "changed in GeoLens during the upload; it was left as it is",
+            )
         ctx.geolens.call(
             commit.sync_detailed,
             dataset_id=UUID(dataset_id),
@@ -424,7 +423,8 @@ def _bring_one(
         if exc.status != 404:
             raise
         return "deleted in GeoLens; it was left as it is"
-    if _revision(dataset) is None:
+    revision = _revision(dataset)
+    if revision is None:
         return (
             "this GeoLens doesn't report data revisions, so edits made in it "
             "can't all be told apart; upgrade GeoLens to bring migrated datasets "
@@ -433,12 +433,11 @@ def _bring_one(
     reason = changed_in_geolens(ctx, entry, dataset_id, dataset)
     if reason:
         return f"{reason}; it was left as it is"
-    revision = _revision(dataset)
     problem = start(dataset_id, dataset, revision)
     if problem:
         return problem
-    run, problem = _wait_for_run(ctx, entry, dataset_id)
-    if run is None:
+    ended, problem = _wait_for_run(ctx, entry, dataset_id)
+    if not ended:
         return problem
     if problem:
         return _settle_unrecorded(ctx, entry, dataset_id, problem)
@@ -454,7 +453,7 @@ def _bring_one(
     ctx.save()
     apply_item_metadata(ctx, item, entry, [dataset_id])
     after = get_dataset(ctx, dataset_id)
-    if _revision(after) == _revision(published) and _operator_wrote_last(ctx, after):
+    if _published_unchanged(ctx, after, revision):
         _record(entry, dataset_id, after)
         ctx.save()
     return None
