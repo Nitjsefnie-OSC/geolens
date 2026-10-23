@@ -308,6 +308,10 @@ export const createGroupAdminGroupsPost = <ThrowOnError extends boolean = false>
  * Delete Group
  *
  * Delete a sharing group and all its memberships (admin only).
+ *
+ * 422 when removing the members' access to the group's datasets would leave
+ * a VRT reaching past a source, or cut a member off a dataset its owner's
+ * public or internal maps show.
  */
 export const deleteGroupAdminGroupsGroupIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteGroupAdminGroupsGroupIdDeleteData, ThrowOnError>): RequestResult<DeleteGroupAdminGroupsGroupIdDeleteResponses, DeleteGroupAdminGroupsGroupIdDeleteErrors, ThrowOnError> => (options.client ?? client).delete<DeleteGroupAdminGroupsGroupIdDeleteResponses, DeleteGroupAdminGroupsGroupIdDeleteErrors, ThrowOnError>({
     security: [
@@ -390,7 +394,8 @@ export const listGroupMembersAdminGroupsGroupIdMembersGet = <ThrowOnError extend
  * Add users to a sharing group (admin only).
  *
  * Users already in the group are skipped. If any id matches no user, the
- * request is 404 and nobody is added.
+ * request is 404 and nobody is added. 422 when the new members' access to
+ * the group's datasets would let a VRT reach past one of its sources.
  */
 export const addGroupMembersAdminGroupsGroupIdMembersPost = <ThrowOnError extends boolean = false>(options: Options<AddGroupMembersAdminGroupsGroupIdMembersPostData, ThrowOnError>): RequestResult<AddGroupMembersAdminGroupsGroupIdMembersPostResponses, AddGroupMembersAdminGroupsGroupIdMembersPostErrors, ThrowOnError> => (options.client ?? client).post<AddGroupMembersAdminGroupsGroupIdMembersPostResponses, AddGroupMembersAdminGroupsGroupIdMembersPostErrors, ThrowOnError>({
     security: [
@@ -414,6 +419,10 @@ export const addGroupMembersAdminGroupsGroupIdMembersPost = <ThrowOnError extend
  * Remove Group Member
  *
  * Remove one user from a sharing group (admin only).
+ *
+ * 422 when losing the group's datasets would leave a VRT reaching past a
+ * source, or cut the user off a dataset its owner's public or internal maps
+ * show.
  */
 export const removeGroupMemberAdminGroupsGroupIdMembersUserIdDelete = <ThrowOnError extends boolean = false>(options: Options<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteData, ThrowOnError>): RequestResult<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses, RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors, ThrowOnError> => (options.client ?? client).delete<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses, RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors, ThrowOnError>({
     security: [

@@ -277,6 +277,10 @@ export interface paths {
         /**
          * Delete Group
          * @description Delete a sharing group and all its memberships (admin only).
+         *
+         *     422 when removing the members' access to the group's datasets would leave
+         *     a VRT reaching past a source, or cut a member off a dataset its owner's
+         *     public or internal maps show.
          */
         delete: operations["delete_group_admin_groups__group_id__delete"];
         options?: never;
@@ -306,7 +310,8 @@ export interface paths {
          * @description Add users to a sharing group (admin only).
          *
          *     Users already in the group are skipped. If any id matches no user, the
-         *     request is 404 and nobody is added.
+         *     request is 404 and nobody is added. 422 when the new members' access to
+         *     the group's datasets would let a VRT reach past one of its sources.
          */
         post: operations["add_group_members_admin_groups__group_id__members__post"];
         delete?: never;
@@ -328,6 +333,10 @@ export interface paths {
         /**
          * Remove Group Member
          * @description Remove one user from a sharing group (admin only).
+         *
+         *     422 when losing the group's datasets would leave a VRT reaching past a
+         *     source, or cut the user off a dataset its owner's public or internal maps
+         *     show.
          */
         delete: operations["remove_group_member_admin_groups__group_id__members__user_id__delete"];
         options?: never;

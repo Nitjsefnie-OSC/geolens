@@ -102,6 +102,10 @@ def sync_detailed(
 
      Remove one user from a sharing group (admin only).
 
+    422 when losing the group's datasets would leave a VRT reaching past a
+    source, or cut the user off a dataset its owner's public or internal maps
+    show.
+
     Args:
         group_id (UUID):
         user_id (UUID):
@@ -136,6 +140,10 @@ def sync(
 
      Remove one user from a sharing group (admin only).
 
+    422 when losing the group's datasets would leave a VRT reaching past a
+    source, or cut the user off a dataset its owner's public or internal maps
+    show.
+
     Args:
         group_id (UUID):
         user_id (UUID):
@@ -164,6 +172,10 @@ async def asyncio_detailed(
     """Remove Group Member
 
      Remove one user from a sharing group (admin only).
+
+    422 when losing the group's datasets would leave a VRT reaching past a
+    source, or cut the user off a dataset its owner's public or internal maps
+    show.
 
     Args:
         group_id (UUID):
@@ -196,6 +208,10 @@ async def asyncio(
     """Remove Group Member
 
      Remove one user from a sharing group (admin only).
+
+    422 when losing the group's datasets would leave a VRT reaching past a
+    source, or cut the user off a dataset its owner's public or internal maps
+    show.
 
     Args:
         group_id (UUID):

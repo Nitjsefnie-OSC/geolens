@@ -24126,7 +24126,7 @@
     },
     "/admin/groups/{group_id}": {
       "delete": {
-        "description": "Delete a sharing group and all its memberships (admin only).",
+        "description": "Delete a sharing group and all its memberships (admin only).\n\n422 when removing the members' access to the group's datasets would leave\na VRT reaching past a source, or cut a member off a dataset its owner's\npublic or internal maps show.",
         "operationId": "delete_group_admin_groups__group_id__delete",
         "parameters": [
           {
@@ -24692,7 +24692,7 @@
         ]
       },
       "post": {
-        "description": "Add users to a sharing group (admin only).\n\nUsers already in the group are skipped. If any id matches no user, the\nrequest is 404 and nobody is added.",
+        "description": "Add users to a sharing group (admin only).\n\nUsers already in the group are skipped. If any id matches no user, the\nrequest is 404 and nobody is added. 422 when the new members' access to\nthe group's datasets would let a VRT reach past one of its sources.",
         "operationId": "add_group_members_admin_groups__group_id__members__post",
         "parameters": [
           {
@@ -24836,7 +24836,7 @@
     },
     "/admin/groups/{group_id}/members/{user_id}": {
       "delete": {
-        "description": "Remove one user from a sharing group (admin only).",
+        "description": "Remove one user from a sharing group (admin only).\n\n422 when losing the group's datasets would leave a VRT reaching past a\nsource, or cut the user off a dataset its owner's public or internal maps\nshow.",
         "operationId": "remove_group_member_admin_groups__group_id__members__user_id__delete",
         "parameters": [
           {

@@ -1,0 +1,265 @@
+"""Members of a sharing group granted on a restricted dataset can read it."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import select, text
+
+from app.modules.catalog.datasets.domain.models import (
+    Dataset,
+    DatasetGroupGrant,
+    Record,
+)
+from app.modules.catalog.maps.models import Map, MapLayer
+from tests.factories import create_user, get_user_id
+from tests.test_tile_signature_revocation_1963 import _evict_tile_meta, _make_vector
+from tests.test_vrt_source_authz_1172 import (
+    _create_raster_dataset,
+    _create_vrt_dataset,
+    _link_source,
+)
+
+pytestmark = pytest.mark.usefixtures("_init_tile_pool_for_tests")
+
+
+@dataclass
+class _Shared:
+    dataset: Dataset
+    group_id: str
+    owner: dict[str, str]
+    member: dict[str, str]
+    member_id: str
+    outsider: dict[str, str]
+    outsider_id: str
+
+
+async def _new_group(client: AsyncClient, admin: dict, member_ids: list[str]) -> str:
+    created = await client.post(
+        "/admin/groups/", json={"name": f"grp-{uuid.uuid4().hex[:8]}"}, headers=admin
+    )
+    assert created.status_code == 201, created.text
+    group_id = created.json()["id"]
+    if member_ids:
+        added = await client.post(
+            f"/admin/groups/{group_id}/members/",
+            json={"user_ids": member_ids},
+            headers=admin,
+        )
+        assert added.status_code == 200, added.text
+    return group_id
+
+
+async def _grant(session, dataset_id, group_id) -> None:
+    session.add(DatasetGroupGrant(dataset_id=dataset_id, group_id=uuid.UUID(group_id)))
+    await session.commit()
+
+
+@pytest.fixture
+async def shared(client: AsyncClient, admin_auth_header: dict, test_db_session):
+    owner, owner_id = await create_user(client, admin_auth_header, "editor")
+    member, member_id = await create_user(client, admin_auth_header, "viewer")
+    outsider, outsider_id = await create_user(client, admin_auth_header, "viewer")
+    dataset = await _make_vector(
+        test_db_session, created_by=uuid.UUID(owner_id), visibility="restricted"
+    )
+    group_id = await _new_group(client, admin_auth_header, [member_id])
+    await _grant(test_db_session, dataset.id, group_id)
+    table = dataset.table_name
+    yield _Shared(dataset, group_id, owner, member, member_id, outsider, outsider_id)
+    await test_db_session.execute(text(f"DROP TABLE IF EXISTS data.{table}"))
+    await test_db_session.commit()
+
+
+_SURFACES = {
+    "dataset": lambda d: f"/datasets/{d.id}",
+    "features": lambda d: f"/datasets/{d.id}/features/",
+    "ogc_collection": lambda d: f"/collections/{d.id}",
+    "ogc_items": lambda d: f"/collections/{d.id}/items",
+    "ogc_record": lambda d: f"/collections/datasets/items/{d.id}",
+    "dcat": lambda d: f"/datasets/{d.id}/dcat/",
+    "tile_token": lambda d: f"/tiles/token/{d.id}/",
+    "vector_tile": lambda d: f"/tiles/data.{d.table_name}/0/0/0.pbf",
+}
+
+
+@pytest.mark.parametrize("surface", list(_SURFACES))
+async def test_a_member_reads_and_an_outsider_gets_404(
+    client: AsyncClient, shared: _Shared, surface: str
+):
+    url = _SURFACES[surface](shared.dataset)
+
+    member = await client.get(url, headers=shared.member)
+    outsider = await client.get(url, headers=shared.outsider)
+
+    assert member.status_code == 200, member.text
+    assert outsider.status_code == 404, outsider.text
+
+
+async def test_search_lists_the_dataset_for_members_only(
+    client: AsyncClient, shared: _Shared
+):
+    title = shared.dataset.record.title
+
+    async def found(headers) -> bool:
+        resp = await client.get(
+            "/search/datasets/", params={"q": title}, headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        return str(shared.dataset.id) in [f["id"] for f in resp.json()["features"]]
+
+    assert await found(shared.member)
+    assert not await found(shared.outsider)
+
+
+async def test_stac_serves_a_granted_raster_to_members_only(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
+):
+    raster = await _create_raster_dataset(
+        test_db_session,
+        created_by=await get_user_id(test_db_session, "admin"),
+        visibility="restricted",
+    )
+    await _grant(test_db_session, raster, shared.group_id)
+
+    member = await client.get(f"/stac/items/{raster}", headers=shared.member)
+    outsider = await client.get(f"/stac/items/{raster}", headers=shared.outsider)
+
+    assert member.status_code == 200, member.text
+    assert outsider.status_code == 404, outsider.text
+
+
+async def _mint(client: AsyncClient, dataset_id, headers) -> dict:
+    resp = await client.get(f"/tiles/token/{dataset_id}/", headers=headers)
+    assert resp.status_code == 200, resp.text
+    token = resp.json()
+    return {"sig": token["sig"], "exp": token["exp"], "scope": token["scope"]}
+
+
+async def _signed_tile(client: AsyncClient, dataset: Dataset, params: dict):
+    _evict_tile_meta()
+    return await client.get(
+        f"/tiles/data.{dataset.table_name}/0/0/0.pbf", params=params
+    )
+
+
+async def test_removing_the_member_revokes_reads_and_signed_tiles(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared
+):
+    params = await _mint(client, shared.dataset.id, shared.member)
+    assert (await _signed_tile(client, shared.dataset, params)).status_code == 200
+
+    removed = await client.delete(
+        f"/admin/groups/{shared.group_id}/members/{shared.member_id}",
+        headers=admin_auth_header,
+    )
+    assert removed.status_code == 204, removed.text
+
+    detail = await client.get(f"/datasets/{shared.dataset.id}", headers=shared.member)
+    assert detail.status_code == 404, detail.text
+    stale = await _signed_tile(client, shared.dataset, params)
+    assert stale.status_code == 403, stale.text
+    assert stale.json()["detail"] == "Invalid or expired signature"
+
+
+async def test_deleting_the_group_leaves_the_owner_and_admins(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared
+):
+    params = await _mint(client, shared.dataset.id, shared.member)
+
+    deleted = await client.delete(
+        f"/admin/groups/{shared.group_id}", headers=admin_auth_header
+    )
+    assert deleted.status_code == 204, deleted.text
+
+    url = f"/datasets/{shared.dataset.id}"
+    assert (await client.get(url, headers=shared.member)).status_code == 404
+    assert (await client.get(url, headers=shared.owner)).status_code == 200
+    assert (await client.get(url, headers=admin_auth_header)).status_code == 200
+    assert (await _signed_tile(client, shared.dataset, params)).status_code == 403
+
+
+async def test_adding_a_member_grants_reads_and_rolls_the_publication_version(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
+):
+    url = f"/datasets/{shared.dataset.id}"
+    version = select(Dataset.publication_version).where(Dataset.id == shared.dataset.id)
+    before = await test_db_session.scalar(version)
+
+    added = await client.post(
+        f"/admin/groups/{shared.group_id}/members/",
+        json={"user_ids": [shared.outsider_id]},
+        headers=admin_auth_header,
+    )
+
+    assert added.status_code == 200, added.text
+    assert (await client.get(url, headers=shared.outsider)).status_code == 200
+    assert await test_db_session.scalar(version) == (before or 0) + 1
+
+
+async def test_removal_that_cuts_a_member_off_an_owners_shared_map_is_refused(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
+):
+    owner_id = await test_db_session.scalar(
+        select(Record.created_by).where(Record.id == shared.dataset.record_id)
+    )
+    map_name = f"Team map {uuid.uuid4().hex[:6]}"
+    team_map = Map(name=map_name, visibility="internal", created_by=owner_id)
+    test_db_session.add(team_map)
+    await test_db_session.flush()
+    test_db_session.add(
+        MapLayer(map_id=team_map.id, dataset_id=shared.dataset.id, sort_order=0)
+    )
+    await test_db_session.commit()
+
+    removed = await client.delete(
+        f"/admin/groups/{shared.group_id}/members/{shared.member_id}",
+        headers=admin_auth_header,
+    )
+    deleted = await client.delete(
+        f"/admin/groups/{shared.group_id}", headers=admin_auth_header
+    )
+
+    assert removed.status_code == 422, removed.text
+    assert map_name in removed.json()["detail"]
+    assert deleted.status_code == 422, deleted.text
+    url = f"/datasets/{shared.dataset.id}"
+    assert (await client.get(url, headers=shared.member)).status_code == 200
+
+
+async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(
+    client: AsyncClient, admin_auth_header: dict, test_db_session
+):
+    """The VRT's group reaches past the group its source is shared with, so a
+    new member would see the source's pixels through the mosaic."""
+    _, owner_id = await create_user(client, admin_auth_header, "editor")
+    _, joiner_id = await create_user(client, admin_auth_header, "viewer")
+    source = await _create_raster_dataset(
+        test_db_session,
+        created_by=await get_user_id(test_db_session, "admin"),
+        visibility="restricted",
+    )
+    vrt = await _create_vrt_dataset(
+        test_db_session, created_by=uuid.UUID(owner_id), visibility="restricted"
+    )
+    await _link_source(test_db_session, vrt, source, 0)
+    await _grant(
+        test_db_session, source, await _new_group(client, admin_auth_header, [owner_id])
+    )
+    group_id = await _new_group(client, admin_auth_header, [])
+    await _grant(test_db_session, vrt, group_id)
+
+    added = await client.post(
+        f"/admin/groups/{group_id}/members/",
+        json={"user_ids": [joiner_id]},
+        headers=admin_auth_header,
+    )
+
+    assert added.status_code == 422, added.text
+    members = await client.get(
+        f"/admin/groups/{group_id}/members/", headers=admin_auth_header
+    )
+    assert members.json()["total"] == 0

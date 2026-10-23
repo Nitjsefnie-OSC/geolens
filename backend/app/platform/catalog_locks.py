@@ -9,7 +9,7 @@ them, and both the catalog and the ingest router reach the VRT admission here.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -365,6 +365,24 @@ async def bump_publication_versions_for_owner(
             "WHERE sr.created_by = :owner_id)"
         ),
         {"owner_id": owner_id},
+    )
+
+
+async def bump_publication_versions(
+    session: AsyncSession, dataset_ids: Sequence[uuid.UUID]
+) -> None:
+    """Roll ``publication_version`` on ``dataset_ids`` and on every VRT linking
+    one, for a change that moves who may read them without writing their rows.
+    """
+    await session.execute(
+        text(
+            "UPDATE catalog.datasets "
+            "SET publication_version = coalesce(publication_version, 0) + 1 "
+            "WHERE id IN (SELECT unnest(CAST(:ids AS uuid[])) "
+            "UNION SELECT vrt_dataset_id FROM catalog.vrt_source_links "
+            "WHERE source_dataset_id = ANY(CAST(:ids AS uuid[])))"
+        ),
+        {"ids": list(dataset_ids)},
     )
 
 
