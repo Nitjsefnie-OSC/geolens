@@ -13,6 +13,7 @@ import asyncio
 import functools
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
@@ -361,6 +362,15 @@ def _histogram(rows: Sequence[Sequence[Any]], bins: int) -> HistogramResult:
     )
 
 
+def _key(value: Any) -> Any:
+    """A category key as JSON; a non-finite float keeps PostgreSQL's spelling."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return (
+            "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
+        )
+    return _json_number(value)
+
+
 def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseModel:
     if request.op == "count":
         return CountResult(count=int(rows[0][0]))
@@ -372,7 +382,7 @@ def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseMod
             }
         )
     if request.op == "value_counts":
-        listed = [ValueCount(value=_json_number(r[0]), count=int(r[1])) for r in rows]
+        listed = [ValueCount(value=_key(r[0]), count=int(r[1])) for r in rows]
         total = int(rows[0][2]) if rows else 0
         return ValueCountsResult(
             values=listed, other_count=total - sum(v.count for v in listed)
@@ -382,7 +392,7 @@ def _result(request: AggregateRequest, rows: Sequence[Sequence[Any]]) -> BaseMod
     return GroupByResult(
         groups=[
             GroupValue(
-                key=_json_number(r[0]),
+                key=_key(r[0]),
                 value=_json_number(r[1]),
             )
             for r in rows
@@ -490,14 +500,14 @@ async def run_aggregate(
     if verdict is not None and verdict["too_wide"]:
         raise _too_wide()
 
+    live = await get_catalog_port().get_column_info(db, dataset.table_name)
     try:
         layer_filter = await compile_layer_filter(
-            db, dataset, request.filter, bind_prefix="agg_filter"
+            db, dataset, request.filter, bind_prefix="agg_filter", live_columns=live
         )
     except ValueError as exc:
         raise AggregateError("invalid_filter", str(exc)) from exc
     where_sql, binds = layer_filter if layer_filter else (None, [])
-    live = await get_catalog_port().get_column_info(db, dataset.table_name)
     columns = {col["name"]: str(col["type"]).lower() for col in live}
     source = render_filtered_table_ref(_safe_table_ref(dataset.table_name), where_sql)
     predicates = [_bbox_predicate(bbox, "_t")] if bbox is not None else []

@@ -36,23 +36,26 @@ WHOLE_WORLD = [-180, -90, 180, 90]
 async def _points(session: AsyncSession, **dataset_fields):
     """Points 1-8 with pop = 10 * i; 1-6 are ``keep`` and 7-8 ``drop``.
 
-    ``note`` holds a 3,000-character value per row.
+    ``note`` holds a 3,000-character value per row; ``score`` is NaN on point
+    1, null on point 2 and ``i`` elsewhere.
     """
     admin_id = await get_user_id(session, "admin")
     table = f"agg_{uuid.uuid4().hex[:10]}"
     await session.execute(
         text(
             f"CREATE TABLE data.{table} (gid SERIAL PRIMARY KEY, kind TEXT,"
-            " pop INTEGER, note TEXT, geom geometry(Point, 4326),"
+            " pop INTEGER, note TEXT, score DOUBLE PRECISION,"
+            " geom geometry(Point, 4326),"
             " geom_4326 geometry(Point, 4326))"
         )
     )
     await session.execute(text(f"GRANT SELECT ON data.{table} TO geolens_reader"))
     await session.execute(
         text(
-            f"INSERT INTO data.{table} (kind, pop, note, geom, geom_4326)"  # noqa: S608
+            f"INSERT INTO data.{table} (kind, pop, note, score, geom, geom_4326)"  # noqa: S608
             " SELECT CASE WHEN i <= 6 THEN 'keep' ELSE 'drop' END, i * 10,"
             " repeat('x', 3000) || i,"
+            " CASE i WHEN 1 THEN 'NaN'::float8 WHEN 2 THEN NULL ELSE i END,"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326),"
             " ST_SetSRID(ST_MakePoint(i * 0.001, 0), 4326)"
             " FROM generate_series(1, 8) AS i"
@@ -138,6 +141,40 @@ class TestOperations:
         assert resp.status_code == 200, resp.text
         assert resp.json()["result"] == expected
         assert resp.json()["approximate"] is False
+
+    async def test_nan_is_its_own_category_beside_null(
+        self, client: AsyncClient, points
+    ):
+        resp = await _aggregate(
+            client, points.id, {"op": "value_counts", "column": "score", "limit": 50}
+        )
+
+        assert resp.status_code == 200, resp.text
+        values = [entry["value"] for entry in resp.json()["result"]["values"]]
+        assert values.count(None) == 1
+        assert values.count("NaN") == 1
+
+    async def test_the_live_columns_are_read_once(
+        self, client: AsyncClient, points, monkeypatch
+    ):
+        port = type(aggregate.get_catalog_port())
+        reads = []
+        original = port.get_column_info
+
+        async def _counted(self, *args, **kwargs):
+            reads.append(args)
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(port, "get_column_info", _counted)
+
+        resp = await _aggregate(
+            client,
+            points.id,
+            {"op": "stats", "column": "pop", "stats": ["sum"], "filter": KEEP},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert len(reads) == 1
 
     async def test_a_view_counts_only_the_features_inside_it(
         self, client: AsyncClient, points
@@ -414,6 +451,25 @@ class TestAccess:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["result"] == {"count": 8}
+
+    async def test_an_embed_token_for_another_dataset_is_refused(
+        self,
+        client: AsyncClient,
+        admin_auth_header: dict,
+        test_db_session,
+        private_points,
+    ):
+        admin_id = await get_user_id(test_db_session, "admin")
+        async for other in _dropped(test_db_session, visibility="private"):
+            raw, _share = await _embed(
+                client, test_db_session, admin_auth_header, admin_id, other.id
+            )
+
+            resp = await _aggregate(
+                client, private_points.id, {"op": "count"}, {"X-Embed-Token": raw}
+            )
+
+            assert resp.status_code == 404, resp.text
 
     async def test_a_raster_has_nothing_to_aggregate(
         self, client: AsyncClient, admin_auth_header: dict, test_db_session
