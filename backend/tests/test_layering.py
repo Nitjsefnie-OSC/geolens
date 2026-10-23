@@ -1295,10 +1295,10 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # protocol.
     "backend/app/modules/catalog/sources/arcgis_signin.py": 1130,
     # ArcGIS identity enumeration and bounded verification share this adapter.
-    "backend/app/modules/catalog/sources/adapters/arcgis.py": 1079,
-    # Source API router debt; split discovery, preview and dispatch endpoints before
-    # raising.
-    "backend/app/modules/catalog/sources/router.py": 1730,
+    "backend/app/modules/catalog/sources/adapters/arcgis.py": 1082,
+    # Source API router debt; each credential door judges its URL's scheme in
+    # place. Split discovery, preview and dispatch endpoints before raising further.
+    "backend/app/modules/catalog/sources/router.py": 1733,
     # Adoption DDL mirrors the current schema without importing historical migrations.
     "backend/app/core/db/tenant_adoption_sql.py": 2088,
     # Adoption coordinates resumable tenant transactions with ownership and ACL repair.
@@ -1314,10 +1314,10 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Metadata facade preserves the import and patch surface used by extensions and
     # callers.
     "backend/app/processing/ingest/metadata.py": 169,
-    # Ingest API router debt; split upload, import and registration endpoints before
-    # raising further. Each upload door branches once per 3D upload kind: a 3D
-    # Tiles tileset and a COPC point cloud.
-    "backend/app/processing/ingest/router.py": 1688,
+    # Ingest API router debt, including the commit door's token scheme check; split
+    # upload, import and registration endpoints before raising further. Each upload
+    # door branches once per 3D upload kind: a 3D Tiles tileset and a COPC point cloud.
+    "backend/app/processing/ingest/router.py": 1690,
     # One reader for untrusted COPC files: header, VLRs, hierarchy lookups,
     # chunk table, the checks before the decode child and the published extent.
     "backend/app/processing/ingest/pointcloud.py": 1085,
@@ -1338,7 +1338,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Refresh strategies share access, admission and dispatch rules at this API
     # boundary, including task-capability selection and accepting a held run
     # by the door it came through, which records the capability it admitted under.
-    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1364,
+    "backend/app/modules/catalog/datasets/api/router_refresh.py": 1367,
     # Config planning, signed dry runs, application and the embedding column
     # rebuild an applied width needs share one import workflow.
     "backend/app/platform/config_ops/service.py": 1465,
@@ -1348,9 +1348,9 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Refresh admission, claim fencing, terminal transitions and the job-scoped
     # abandoned-run sweep stay domain-neutral.
     "backend/app/platform/refresh/service.py": 1192,
-    # Central settings and boot-validation debt; split by configuration domain before
-    # raising.
-    "backend/app/core/config.py": 1442,
+    # Central settings and boot-validation debt, including the service-credential
+    # http allowlist; split by configuration domain before raising further.
+    "backend/app/core/config.py": 1503,
     # Config resolution coordinates validation, overrides, caching, audit and side
     # effects, including model defaults that follow the selected LLM provider.
     "backend/app/core/persistent_config.py": 1203,
@@ -1359,7 +1359,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/processing/embeddings/backfill.py": 909,
     # Reupload preview, compatibility, the file and service review, and staged
     # commit share an endpoint lifecycle and the capability its jobs record.
-    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1670,
+    "backend/app/modules/catalog/datasets/api/router_reupload.py": 1673,
     # VRT creation and regeneration share publication, member and submitter
     # re-authorization and its refusal, owed-object records and superseded-object
     # cleanup.
@@ -1371,7 +1371,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/processing/ingest/tasks_vector.py": 1149,
     # GDAL environments, timeouts, reaping and error sanitization share one process
     # boundary.
-    "backend/app/processing/ingest/ogr.py": 1572,
+    "backend/app/processing/ingest/ogr.py": 1581,
     # Archive and GDAL content validation remain centralized at the upload security
     # boundary.
     "backend/app/processing/ingest/validation.py": 1206,
