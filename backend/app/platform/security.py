@@ -197,8 +197,8 @@ def _names_query_credential(tokens: set[str], target: httpx.URL) -> bool:
 
     Anywhere in the URL, at every percent-decoding depth up to the cap, with
     ``+`` read both ways, and ignoring case, since httpx lowercases the host.
-    A match must not continue a run of letters or digits, so a short token is
-    not found inside an unrelated value (``a`` in ``sig=abc``).
+    A match must not continue a run of letters or digits, Unicode ones included,
+    so a short token is not found inside an unrelated value (``a`` in ``sig=abc``).
     """
     if not tokens:
         return False
@@ -210,7 +210,7 @@ def _names_query_credential(tokens: set[str], target: httpx.URL) -> bool:
         spellings.append(decoded)
     spellings += [unquote_plus(spelled) for spelled in spellings]
     patterns = [
-        re.compile(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])") for token in tokens
+        re.compile(rf"(?<![^\W_]){re.escape(token)}(?![^\W_])") for token in tokens
     ]
     return any(
         pattern.search(spelled.lower()) for pattern in patterns for spelled in spellings
