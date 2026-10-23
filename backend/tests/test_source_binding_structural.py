@@ -48,6 +48,8 @@ _SQL_WRITE = re.compile(
     r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\"?"
     # A JSON subscript or path between the column and ``=`` still writes it.
     r"(?:\s*\[[^\]]*\]|\s*->>?\s*'[^']*')*\s*=(?!=)"
+    # A row-valued SET: SET (title, origin_ref) = (...).
+    r"|\bSET\s*\([^)]*\borigin_(?:ref|uri)\b[^)]*\)\s*="
     r"|\bINSERT\s+INTO\s+[\w.\"]*datasets\"?\s*\([^)]*\borigin_(?:ref|uri)\b",
     re.IGNORECASE,
 )
@@ -151,6 +153,23 @@ def _call_writes(call: ast.Call, dataset_names: frozenset[str]) -> list[str]:
     name = _terminal_name(func)
     if name in dataset_names or _is_statement_builder(func):
         args = call.args
+    elif (
+        isinstance(func, ast.Attribute)
+        and name == "from_select"
+        and isinstance(func.value, ast.Call)
+        and _is_statement_builder(func.value.func)
+        and func.value.args
+        and _terminal_name(func.value.args[0]) in dataset_names
+    ):
+        # The first argument names the columns the select fills.
+        columns = call.args[0] if call.args else None
+        named = [
+            element.value if isinstance(element, ast.Constant) else element.attr
+            for element in getattr(columns, "elts", [])
+            if (isinstance(element, ast.Constant) and element.value in COLUMNS)
+            or (_is_column(element) and _terminal_name(element.value) in dataset_names)
+        ]
+        return [f"fills {column} from a select" for column in named]
     elif isinstance(func, ast.Attribute) and name in _ROW_METHODS:
         args = call.args
     elif isinstance(func, ast.Attribute) and name == "execute":
@@ -297,6 +316,11 @@ def test_the_owner_check_sees_an_extra_write(old: str, new: str) -> None:
         "session.execute(update(Dataset), params=[{'id': 1, 'origin_ref': ref}])",
         "session.execute(stmt, params={'origin_uri': uri})",
         "session.execute(statement=update(Dataset), params=[{'origin_ref': ref}])",
+        "insert(Dataset).from_select(['id', 'origin_ref'], select(a, b))",
+        "sa.insert(Dataset).from_select([Dataset.id, Dataset.origin_uri], query)",
+        "text('UPDATE catalog.datasets SET (title, origin_ref) = (:t, :r) "
+        "WHERE id = :i')",
+        "text('UPDATE catalog.datasets SET (\"origin_uri\") = ROW(:u)')",
     ],
 )
 def test_the_scan_sees_a_write(snippet: str) -> None:
@@ -318,6 +342,10 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
         "session.execute(select(Dataset.origin_ref))",
         "update(Dataset).values({Dataset.title: title})",
         "update(Record).values({Record.origin_ref: ref})",
+        "insert(Record).from_select(['id', 'origin_ref'], query)",
+        "insert(Dataset).from_select(['id', 'title'], query)",
+        "text('UPDATE catalog.datasets SET (title, summary) = (:t, :s) "
+        "WHERE origin_ref = :r')",
         'text("UPDATE catalog.datasets SET last_checked_at = now() '
         "WHERE origin_ref['url'] = :u\")",
         "session.execute(text('SELECT id FROM catalog.datasets "
