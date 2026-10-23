@@ -386,6 +386,27 @@ async def bump_publication_versions(
     )
 
 
+async def bump_publication_versions_for_member(
+    session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """:func:`bump_publication_versions` on every dataset granted to a group
+    ``user_id`` is in, before the account is deleted or deactivated, so tile
+    URLs it signed stop validating."""
+    granted = await session.scalars(
+        text(
+            "SELECT DISTINCT grant_row.dataset_id "
+            "FROM catalog.dataset_group_grants grant_row "
+            "JOIN catalog.group_members member "
+            "ON member.group_id = grant_row.group_id "
+            "WHERE member.user_id = :user_id"
+        ),
+        {"user_id": user_id},
+    )
+    dataset_ids = list(granted)
+    if dataset_ids:
+        await bump_publication_versions(session, dataset_ids)
+
+
 async def bump_tile_cache_version_on(session: AsyncSession, dataset: Any) -> int | None:
     """:func:`bump_tile_cache_version_atomic` for a loaded ``Dataset`` instance.
 

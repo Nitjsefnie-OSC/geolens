@@ -183,6 +183,28 @@ async def test_deleting_the_group_leaves_the_owner_and_admins(
     assert (await _signed_tile(client, shared.dataset, params)).status_code == 403
 
 
+@pytest.mark.parametrize("lifecycle", ["delete", "deactivate", "suspend"])
+async def test_ending_a_members_account_retires_tiles_they_signed(
+    client: AsyncClient, admin_auth_header: dict, shared: _Shared, lifecycle: str
+):
+    params = await _mint(client, shared.dataset.id, shared.member)
+    assert (await _signed_tile(client, shared.dataset, params)).status_code == 200
+    url = f"/admin/users/{shared.member_id}"
+
+    if lifecycle == "delete":
+        ended = await client.delete(url, headers=admin_auth_header)
+    elif lifecycle == "deactivate":
+        ended = await client.post(f"{url}/deactivate/", headers=admin_auth_header)
+    else:
+        ended = await client.patch(
+            url, json={"status": "suspended"}, headers=admin_auth_header
+        )
+
+    assert ended.status_code in (200, 204), ended.text
+    stale = await _signed_tile(client, shared.dataset, params)
+    assert stale.status_code == 403, stale.text
+
+
 async def test_adding_a_member_grants_reads_and_rolls_the_publication_version(
     client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
 ):

@@ -21,7 +21,10 @@ from app.modules.auth.providers.local import hash_password_async
 from app.modules.auth.service import AuthService
 from app.core.identity import Identity
 from app.core.text import escape_ilike
-from app.platform.catalog_locks import bump_publication_versions_for_owner
+from app.platform.catalog_locks import (
+    bump_publication_versions_for_member,
+    bump_publication_versions_for_owner,
+)
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -306,6 +309,7 @@ class AdminService:
 
         await self._ensure_not_last_admin(user, "deactivate", lock_held=True)
 
+        await bump_publication_versions_for_member(self.db, user_id)
         user.status = "deactivated"
         user.is_active = False
         await self.db.flush()
@@ -400,6 +404,8 @@ class AdminService:
             user.email = email
 
         if target_status is not None:
+            if target_status != "active":
+                await bump_publication_versions_for_member(self.db, user_id)
             user.status = target_status
             user.is_active = target_status == "active"
 
@@ -760,6 +766,7 @@ class AdminService:
         username = user.username
 
         await bump_publication_versions_for_owner(self.db, user_id)
+        await bump_publication_versions_for_member(self.db, user_id)
         await self.db.execute(delete(UserRole).where(UserRole.user_id == user_id))
         await self.db.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
 
