@@ -14,7 +14,7 @@ from geolens_cli import arcgis_migrate_webmaps as webmaps
 from geolens_cli.arcgis_migrate_state import ItemState
 from geolens_cli.arcgis_migrate_webmaps import match_datasets
 
-from .arcgis_fake import B1, FakePortal, portal_routes
+from .arcgis_fake import B1, FakePortal, item_data_path, portal_routes
 from .test_arcgis_migrate_layers import (  # noqa: F401  (fixtures)
     NOW,
     OPERATOR,
@@ -221,6 +221,7 @@ def test_layers_match_the_dataset_of_their_service_layer():
             {"id": "other_index", "itemId": "solo", "url": f"{base}/7"},
             {"id": "s3", "itemId": "sparse", "url": f"{base}/3"},
             {"id": "s1", "itemId": "sparse", "url": f"{base}/1"},
+            {"id": "bad_url", "itemId": "svc", "url": "http://["},
             {"id": "f", "itemId": "file"},
             {"id": "file0", "itemId": "file", "url": f"{base}/0"},
             {"id": "file1", "itemId": "file", "url": f"{base}/1"},
@@ -335,3 +336,17 @@ def test_a_saved_map_resumes_without_a_portal_credential(runner, plan_file, geol
     assert first.exit_code == 1
     assert second.exit_code == 0, second.output
     assert len(_sent(geolens)) == 1
+
+
+def test_a_refused_portal_token_stops_the_run(runner, plan_file, geolens, portal):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    portal.routes[item_data_path(B1)] = (498, {"error": {"code": 498}})
+
+    result, _ = _run(runner, plan_file)
+
+    assert result.exit_code != 0
+    entry = _state(plan_file)["items"][B1]
+    assert entry["status"] == "failed"
+    assert "Rerun with a fresh token" in entry["error"]
+    assert _sent(geolens) == []

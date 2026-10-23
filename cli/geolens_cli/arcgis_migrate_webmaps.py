@@ -25,6 +25,7 @@ from .arcgis_migrate_session import (
     ItemFailed,
     ItemResult,
     MigrationContext,
+    StopRun,
 )
 from .arcgis_migrate_state import DONE, EXISTS, FINISHED, ItemState
 from .arcgis_portal import PortalError, redact_json
@@ -33,6 +34,7 @@ LOSS_DIRNAME = "webmap-loss"
 _ITEM_ID = re.compile(r"[0-9A-Za-z]{32}")
 _TRAILING_LAYER = re.compile(r"/(\d+)/?$")
 _MAX_NOTE_LAYERS = 5
+_TOKEN_STATUSES = (498, 499)
 
 
 def _walk(layers: Any) -> list[Mapping[str, Any]]:
@@ -54,7 +56,10 @@ def _dataset_for(layer: Mapping[str, Any], source: ItemState) -> str | None:
     """The dataset imported for *layer*, or None when the item holds no
     unambiguous one."""
     url = layer.get("url")
-    path = urlsplit(url).path if isinstance(url, str) else ""
+    try:
+        path = urlsplit(url).path if isinstance(url, str) else ""
+    except ValueError:
+        return None
     sub = _TRAILING_LAYER.search(path)
     if sub:
         # An index the run imported no dataset for is another layer's, not
@@ -109,6 +114,11 @@ def _fetch(ctx: MigrationContext, item_id: str) -> dict[str, Any]:
     try:
         data = ctx.portal.client.get_json(f"content/items/{item_id}/data")
     except PortalError as exc:
+        if exc.http_status in _TOKEN_STATUSES:
+            raise StopRun(
+                f"the portal refused the ArcGIS token ({exc}); it may have "
+                "expired. Rerun with a fresh token to resume."
+            ) from None
         raise ItemFailed(f"reading the web map failed, {exc}") from None
     if not isinstance(data, dict):
         raise ItemFailed("the web map's data is not a JSON object")
