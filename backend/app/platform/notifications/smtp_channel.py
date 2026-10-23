@@ -11,8 +11,9 @@ Credentials are revealed only at the ``login()`` call boundary via
 or traceback. The blocking smtplib sequence runs inside
 ``asyncio.to_thread()``.
 
-Re-raises on any smtplib exception — the caller
-(``EnvConfiguredNotificationSink``) owns per-channel isolation.
+Re-raises connection/send failures — the caller
+(``EnvConfiguredNotificationSink``) owns per-channel isolation. Network and
+SMTP errors during QUIT are suppressed after a successful send.
 """
 
 from __future__ import annotations
@@ -113,6 +114,18 @@ def _local_hostname(connection) -> str:
     return f"[{address}]"
 
 
+def _quit_after_send(connection, message_sent: bool) -> None:
+    """Preserve send success when QUIT has a network or SMTP failure."""
+    import smtplib
+
+    try:
+        connection.quit()
+    except (OSError, smtplib.SMTPException):
+        connection.close()
+        if not message_sent:
+            raise
+
+
 async def send_email(notification: "Notification") -> None:  # type: ignore[name-defined]  # noqa: F821
     """Send *notification* as an email via stdlib smtplib.
 
@@ -123,6 +136,7 @@ async def send_email(notification: "Notification") -> None:  # type: ignore[name
     An opt-in notification deadline shuts down the connection at expiry,
     waking greeting, TLS and message I/O and preventing subsequent socket I/O.
     The worker and abort timer are joined before this call finishes.
+    Network/SMTP QUIT failures close the connection and propagate if sending failed.
 
     Raises:
         smtplib.SMTPException: on SMTP-level failures.
@@ -187,17 +201,19 @@ async def send_email(notification: "Notification") -> None:  # type: ignore[name
                 # Avoid unbounded reverse-DNS work inside the SMTP worker.
                 kwargs["local_hostname"] = _local_hostname(connection)
             conn = factory(host, port, **kwargs)
+            message_sent = False
             try:
                 if not use_ssl and use_tls:
                     conn.starttls(context=ssl_context)
                 if username:
                     conn.login(username, reveal(password) or "")
                 conn.send_message(msg)
+                message_sent = True
             finally:
                 if abort is not None and abort.expired.is_set():
                     conn.close()
                 else:
-                    conn.quit()
+                    _quit_after_send(conn, message_sent)
         finally:
             if abort is not None:
                 abort.close()

@@ -851,3 +851,51 @@ async def test_a_background_send_cannot_restart_an_expired_delivery_budget(monke
         )
         assert transport.connections == 0
         assert not transport.messages
+
+
+async def test_a_quit_error_after_send_does_not_schedule_a_health_alert_retry(
+    monkeypatch,
+):
+    import smtplib
+
+    from app.core.config import settings
+    from app.platform import notifications
+    from app.platform.notifications.env_sink import EnvConfiguredNotificationSink
+    from tests.fixtures.smtp_transport import SMTPTransport
+
+    deliveries = []
+
+    class QuitFailureSMTP(smtplib.SMTP):
+        def quit(self):
+            raise OSError("QUIT response timed out")
+
+    async def notify(notification):
+        result = await notifications.notify(notification)
+        deliveries.append(result)
+        return result
+
+    monkeypatch.setattr(settings, "notifications_enabled", True)
+    monkeypatch.setattr(settings, "notification_webhook_url", None)
+    monkeypatch.setattr(
+        notifications,
+        "get_notification_sinks",
+        lambda: [EnvConfiguredNotificationSink()],
+    )
+    monkeypatch.setattr(events_mod, "notify", notify)
+    monkeypatch.setattr(smtplib, "SMTP", QuitFailureSMTP)
+    _checks(monkeypatch, DEGRADED)
+    with SMTPTransport(data=True) as transport:
+        transport.configure(monkeypatch)
+        response = await _poll(run_background=False)
+        task = asyncio.create_task(response.background())
+        try:
+            assert await asyncio.to_thread(transport.data.wait, 1)
+        finally:
+            transport.release_data.set()
+            await task
+        assert len(transport.messages) == 1
+        assert deliveries == [DELIVERED]
+        remaining = (
+            get_cache()._store[health_svc._HEALTH_ALERT_KEY][1] - time.monotonic()
+        )
+        assert health_svc.HEALTH_ALERT_COOLDOWN_SECS - 1 < remaining

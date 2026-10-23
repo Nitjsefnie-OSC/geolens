@@ -344,3 +344,58 @@ def test_preconnected_smtp_uses_an_address_literal_without_reverse_dns(
 
     connection = SimpleNamespace(family=family, getsockname=lambda: (address, 25))
     assert smtp._local_hostname(connection) == expected
+
+
+@pytest.mark.parametrize("message_sent", [True, False])
+@pytest.mark.parametrize("quit_failure", ["os", "smtp", "unexpected"])
+@pytest.mark.parametrize("deadline_set", [False, True])
+async def test_quit_failure_only_fails_before_a_completed_send(
+    monkeypatch, message_sent, quit_failure, deadline_set
+):
+    import smtplib
+
+    error_type = {
+        "os": OSError,
+        "smtp": smtplib.SMTPException,
+        "unexpected": RuntimeError,
+    }[quit_failure]
+    error = error_type("QUIT failed")
+    connections = []
+    closed = []
+    quits = []
+
+    class QuitFailureSMTP(smtplib.SMTP):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            connections.append(self)
+
+        def quit(self):
+            quits.append(True)
+            raise error
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(smtplib, "SMTP", QuitFailureSMTP)
+    with SMTPTransport(data=True, fail=not message_sent) as transport:
+        transport.configure(monkeypatch)
+        deadline = time.monotonic() + 2 if deadline_set else None
+        with notification_deadline(deadline):
+            task = asyncio.create_task(smtp.send_email(MESSAGE))
+        try:
+            assert await asyncio.to_thread(transport.data.wait, 1)
+        finally:
+            transport.release_data.set()
+            result = await asyncio.gather(task, return_exceptions=True)
+            closed_before_cleanup = bool(closed)
+            for connection in connections:
+                connection.close()
+
+        assert quits == [True]
+        assert len(transport.messages) == 1
+        if message_sent and quit_failure != "unexpected":
+            assert result == [None]
+            assert closed_before_cleanup
+        else:
+            assert result[0] is error

@@ -35,6 +35,11 @@ return 0
 """
 
 
+def _encode_value(value: Any) -> str:
+    """Use stable mapping-key order for Redis's byte comparisons."""
+    return json.dumps(value, default=str, sort_keys=True)
+
+
 class RedisCacheProvider:
     """Redis/Valkey cache provider with circuit breaker and graceful fallback.
 
@@ -200,9 +205,7 @@ class RedisCacheProvider:
                     self._pending_authoritative.pop(key, None)
                     continue
                 try:
-                    await self._client.set(
-                        key, json.dumps(value, default=str), ex=remaining
-                    )
+                    await self._client.set(key, _encode_value(value), ex=remaining)
                 except (
                     Exception
                 ):  # broad: redis unreachable; leave entries queued for next drain
@@ -269,7 +272,7 @@ class RedisCacheProvider:
                 await self._fallback.set(key, value, ttl)
             return
         try:
-            await self._client.set(key, json.dumps(value, default=str), ex=ttl)
+            await self._client.set(key, _encode_value(value), ex=ttl)
             self._record_success()
         except Exception:  # broad: redis circuit breaker — any Redis error falls back to in-memory cache
             logger.warning("redis_cache_set_failed", key=key, exc_info=True)
@@ -295,7 +298,7 @@ class RedisCacheProvider:
             self._queue_authoritative_replay(key, value, ttl)
             return
         try:
-            await self._client.set(key, json.dumps(value, default=str), ex=ttl)
+            await self._client.set(key, _encode_value(value), ex=ttl)
             self._record_success()
         except Exception:  # broad: redis circuit breaker — any Redis error falls back to in-memory cache
             logger.warning(
@@ -334,9 +337,7 @@ class RedisCacheProvider:
                 return False
             return await self._fallback.set_if_absent(key, value, ttl)
         try:
-            stored = await self._client.set(
-                key, json.dumps(value, default=str), ex=ttl, nx=True
-            )
+            stored = await self._client.set(key, _encode_value(value), ex=ttl, nx=True)
             self._record_success()
             return bool(stored)
         except Exception:  # broad: redis circuit breaker — any Redis error falls back to in-memory cache
@@ -355,8 +356,8 @@ class RedisCacheProvider:
                 _COMPARE_AND_SET,
                 1,
                 key,
-                json.dumps(expected, default=str),
-                json.dumps(value, default=str),
+                _encode_value(expected),
+                _encode_value(value),
                 ttl,
             )
             self._record_success()
@@ -372,7 +373,7 @@ class RedisCacheProvider:
             return await self._fallback.compare_and_delete(key, expected)
         try:
             deleted = await self._client.eval(
-                _COMPARE_AND_DELETE, 1, key, json.dumps(expected, default=str)
+                _COMPARE_AND_DELETE, 1, key, _encode_value(expected)
             )
             self._record_success()
             return bool(deleted)

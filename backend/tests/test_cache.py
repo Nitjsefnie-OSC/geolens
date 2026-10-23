@@ -987,3 +987,33 @@ async def test_memory_conditional_delete_releases_the_byte_budget():
     assert "claim" not in cache._sizes
     await cache.set("next", "value")
     assert await cache.get("next") == "value"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "writer", ["set", "set_authoritative", "set_if_absent", "replay", "compare_and_set"]
+)
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_conditional_mapping_equality_ignores_insertion_order(
+    redis_cache, writer, operation
+):
+    original = {"z": {"c": 3, "a": 1, "b": 2}, "m": 2, "a": 1}
+    expected = {"m": 2, "a": 1, "z": {"b": 2, "c": 3, "a": 1}}
+    assert original == expected
+    if writer == "replay":
+        redis_cache._queue_authoritative_replay("claim", original, 60)
+        await redis_cache._replay_pending_authoritative()
+    elif writer == "compare_and_set":
+        await redis_cache.set("claim", "seed")
+        assert await redis_cache.compare_and_set("claim", "seed", original, 60)
+    else:
+        await getattr(redis_cache, writer)("claim", original, ttl=60)
+
+    if operation == "compare_and_set":
+        replacement = {"z": 9, "m": 8, "a": 7}
+        assert await redis_cache.compare_and_set("claim", expected, replacement, 60)
+        assert await redis_cache.get("claim") == replacement
+        assert await redis_cache.compare_and_delete("claim", {"m": 8, "a": 7, "z": 9})
+    else:
+        assert await redis_cache.compare_and_delete("claim", expected)
+    assert await redis_cache.get("claim") is None
