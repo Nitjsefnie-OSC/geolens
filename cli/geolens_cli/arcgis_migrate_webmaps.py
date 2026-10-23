@@ -55,8 +55,10 @@ def _dataset_for(layer: Mapping[str, Any], source: ItemState) -> str | None:
     url = layer.get("url")
     path = urlsplit(url).path if isinstance(url, str) else ""
     sub = _TRAILING_LAYER.search(path)
-    if sub and sub.group(1) in source.layer_datasets:
-        return source.layer_datasets[sub.group(1)]
+    if sub:
+        # An index the run imported no dataset for is another layer's, not
+        # the sole dataset's.
+        return source.layer_datasets.get(sub.group(1))
     if len(source.dataset_ids) == 1:
         return source.dataset_ids[0]
     return None

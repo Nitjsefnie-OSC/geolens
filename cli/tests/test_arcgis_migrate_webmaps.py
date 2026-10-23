@@ -194,6 +194,9 @@ def test_layers_match_the_dataset_of_their_service_layer():
                 layer_datasets={"0": "ds-0", "1": "ds-1"}, dataset_ids=["ds-0", "ds-1"]
             ),
             "file": _state_item(dataset_ids=["ds-file"]),
+            "solo": _state_item(
+                layer_datasets={"0": "ds-solo"}, dataset_ids=["ds-solo"]
+            ),
             "many": _state_item(dataset_ids=["a", "b"]),
             "failed": _state_item("failed", dataset_ids=["ds-failed"]),
         }
@@ -203,6 +206,7 @@ def test_layers_match_the_dataset_of_their_service_layer():
         "operationalLayers": [
             {"id": "l1", "itemId": "svc", "url": f"{base}/1"},
             {"id": "l0", "itemId": "svc", "url": f"{base}/0?token=x"},
+            {"id": "other_index", "itemId": "solo", "url": f"{base}/7"},
             {"id": "f", "itemId": "file"},
             {"id": "ambiguous", "itemId": "many"},
             {"id": "failed", "itemId": "failed"},
