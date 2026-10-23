@@ -45,7 +45,9 @@ _SQLALCHEMY_MODULES = frozenset({"sa", "sqlalchemy"})
 # ``update()`` are not here: ``payload.update({"origin_ref": ...})`` writes no row.
 _ROW_METHODS = frozenset({"values", "bulk_insert_mappings", "bulk_update_mappings"})
 _SQL_WRITE = re.compile(
-    r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\"?\s*=(?!=)"
+    r"\bSET\b(?:(?!\bWHERE\b)[^;])*?\borigin_(?:ref|uri)\"?"
+    # A JSON subscript or path between the column and ``=`` still writes it.
+    r"(?:\s*\[[^\]]*\]|\s*->>?\s*'[^']*')*\s*=(?!=)"
     r"|\bINSERT\s+INTO\s+[\w.\"]*datasets\"?\s*\([^)]*\borigin_(?:ref|uri)\b",
     re.IGNORECASE,
 )
@@ -63,12 +65,15 @@ def _is_column(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr in COLUMNS
 
 
-def _dict_column_keys(node: ast.AST):
+def _dict_column_keys(node: ast.AST, dataset_names: frozenset[str]):
+    """Column keys of the dicts under ``node``: ``"origin_ref"`` or ``Dataset.origin_ref``."""
     for inner in ast.walk(node):
         if isinstance(inner, ast.Dict):
             for key in inner.keys:
                 if isinstance(key, ast.Constant) and key.value in COLUMNS:
                     yield key.value
+                elif _is_column(key) and _terminal_name(key.value) in dataset_names:
+                    yield key.attr
 
 
 def _may_write(source: str) -> bool:
@@ -148,14 +153,13 @@ def _call_writes(call: ast.Call, dataset_names: frozenset[str]) -> list[str]:
         args = call.args
     elif isinstance(func, ast.Attribute) and name in _ROW_METHODS:
         args = call.args
-    elif (
-        isinstance(func, ast.Attribute)
-        and name == "execute"
-        and call.args
-        and _binds_a_write(call.args[0])
-    ):
+    elif isinstance(func, ast.Attribute) and name == "execute":
+        keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        statement = call.args[0] if call.args else keywords.get("statement")
+        if statement is None or not _binds_a_write(statement):
+            return []
         # The statement is checked as its own call; the rest are bind parameters.
-        args = call.args[1:]
+        args = [*call.args[1:], *([keywords["params"]] if "params" in keywords else [])]
     else:
         return []
     found = [
@@ -163,7 +167,8 @@ def _call_writes(call: ast.Call, dataset_names: frozenset[str]) -> list[str]:
     ]
     for arg in [*args, *(kw.value for kw in call.keywords if kw.arg is None)]:
         found.extend(
-            f"passes a {key!r} key to {name}()" for key in _dict_column_keys(arg)
+            f"passes a {key!r} key to {name}()"
+            for key in _dict_column_keys(arg, dataset_names)
         )
     return found
 
@@ -282,6 +287,16 @@ def test_the_owner_check_sees_an_extra_write(old: str, new: str) -> None:
         "models.Dataset(origin_uri='x')",
         "DatasetCls = get_processing_port().get_dataset_orm_class()\n"
         "DatasetCls(origin_uri='x')",
+        "update(Dataset).values({Dataset.origin_ref: ref})",
+        "from app.modules.catalog.datasets.domain.models import Dataset as DatasetModel"
+        "\ninsert(DatasetModel).values({DatasetModel.origin_uri: uri})",
+        "text(\"UPDATE catalog.datasets SET origin_ref['token'] = :v WHERE id = :i\")",
+        "text('UPDATE catalog.datasets SET \"origin_ref\"[\\'url\\'] = :v')",
+        "text('UPDATE catalog.datasets SET origin_ref = "
+        "jsonb_set(origin_ref, :path, :v) WHERE id = :i')",
+        "session.execute(update(Dataset), params=[{'id': 1, 'origin_ref': ref}])",
+        "session.execute(stmt, params={'origin_uri': uri})",
+        "session.execute(statement=update(Dataset), params=[{'origin_ref': ref}])",
     ],
 )
 def test_the_scan_sees_a_write(snippet: str) -> None:
@@ -301,6 +316,12 @@ def test_the_scan_sees_a_write(snippet: str) -> None:
         "payload.update(origin_uri=uri)",
         "response.values()",
         "session.execute(select(Dataset.origin_ref))",
+        "update(Dataset).values({Dataset.title: title})",
+        "update(Record).values({Record.origin_ref: ref})",
+        'text("UPDATE catalog.datasets SET last_checked_at = now() '
+        "WHERE origin_ref['url'] = :u\")",
+        "session.execute(text('SELECT id FROM catalog.datasets "
+        "WHERE origin_ref = :origin_ref'), params={'origin_ref': ref})",
         "class DatasetModel(BaseModel):\n    origin_ref: dict | None = None\n"
         "DatasetModel(origin_ref={'kind': 'upload'})",
         "from app.modules.catalog.datasets.domain.schemas import DatasetResponse "
