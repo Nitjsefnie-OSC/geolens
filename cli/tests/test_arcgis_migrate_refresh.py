@@ -210,7 +210,8 @@ def test_the_token_is_not_sent_to_a_stored_source_on_another_host(
     assert result.exit_code == 1
     assert refresh.bodies == []
     [reason] = payload["not_up_to_date"][A1]
-    assert "elsewhere.example.org" in reason and "token was not sent" in reason
+    assert "token was not sent" in reason
+    assert reason.rsplit("--trust-service-host ", 1)[1] == "elsewhere.example.org"
     assert token not in result.output
 
 
