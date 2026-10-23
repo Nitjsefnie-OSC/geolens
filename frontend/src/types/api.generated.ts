@@ -8118,6 +8118,16 @@ export interface components {
              * @default false
              */
             strict_cog: boolean;
+            /**
+             * Item Id
+             * @description Vector file only: ArcGIS portal item ID the file came from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description Vector file only: ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+             */
+            portal_url?: string | null;
         };
         /** CommitResponse */
         CommitResponse: {
@@ -8137,6 +8147,11 @@ export interface components {
              * @description Human-readable commit result.
              */
             message: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ConfigImportRequest
@@ -9910,6 +9925,16 @@ export interface components {
              * @description Layers to ingest as separate datasets. Maximum 50 per request.
              */
             layers: components["schemas"]["FanOutLayerRequest"][];
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the file came from. Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link. Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /**
          * FanOutCommitResponse
@@ -9927,6 +9952,11 @@ export interface components {
              * @description Per-layer outcomes in the same order as the request layers.
              */
             results: components["schemas"]["FanOutLayerResult"][];
+            /**
+             * Origin Link Loss
+             * @description Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * FanOutLayerRequest
@@ -13645,6 +13675,16 @@ export interface components {
             object_id_field?: string | null;
             /** @description Structured credential for a protected service. Mutually exclusive with the token field. */
             auth?: components["schemas"]["ServiceAuthRequest"] | null;
+            /**
+             * Item Id
+             * @description ArcGIS portal item ID the layer was published from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss. Dropped for a non-ArcGIS service type.
+             */
+            item_id?: string | null;
+            /**
+             * Portal Url
+             * @description ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is https and shares a registrable domain with the service URL, otherwise dropped and reported in origin_link_loss.
+             */
+            portal_url?: string | null;
         };
         /** ServicePreviewResponse */
         ServicePreviewResponse: {
@@ -13693,6 +13733,11 @@ export interface components {
              * @description Layer name as it appears in the remote service.
              */
             layer_name: string;
+            /**
+             * Origin Link Loss
+             * @description Reasons the item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+             */
+            origin_link_loss?: string[];
         };
         /**
          * ServiceProbeResult
