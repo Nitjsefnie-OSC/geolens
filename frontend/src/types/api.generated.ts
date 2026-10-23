@@ -2064,7 +2064,10 @@ export interface paths {
          *     Refusals carry a ``code`` in ``detail``: ``too_wide``, ``invalid_column``,
          *     ``invalid_filter``, ``no_geometry``, ``query_timeout``,
          *     ``query_data_error``, ``result_too_large``, and with 429 ``query_busy``
-         *     (this caller already has an aggregate running) or ``query_at_capacity``.
+         *     (this caller already has two aggregates running) or ``query_at_capacity``.
+         *
+         *     Clients should keep at most two requests in flight per caller and retry a
+         *     429 after 200-400 ms with jitter.
          */
         post: operations["aggregate_endpoint_datasets__dataset_id__aggregate__post"];
         delete?: never;
