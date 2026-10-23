@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from . import arcgis_report as _report
 from ._sdk_helpers import long_request_timeout
+from .arcgis_migrate_files import JOB_KEY
 from .arcgis_migrate_session import (
     GeoLensError,
     ItemFailed,
@@ -58,7 +59,11 @@ def _dataset_for(layer: Mapping[str, Any], source: ItemState) -> str | None:
     if sub:
         # An index the run imported no dataset for is another layer's, not
         # the sole dataset's.
-        return source.layer_datasets.get(sub.group(1))
+        found = source.layer_datasets.get(sub.group(1))
+        if found is None and sub.group(1) == "0" and JOB_KEY in source.layer_datasets:
+            # A single-layer file has one layer, which a web map calls 0.
+            return source.layer_datasets[JOB_KEY]
+        return found
     if len(source.dataset_ids) == 1:
         return source.dataset_ids[0]
     return None

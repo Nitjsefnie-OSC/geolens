@@ -193,7 +193,16 @@ def test_layers_match_the_dataset_of_their_service_layer():
             "svc": _state_item(
                 layer_datasets={"0": "ds-0", "1": "ds-1"}, dataset_ids=["ds-0", "ds-1"]
             ),
-            "file": _state_item(dataset_ids=["ds-file"]),
+            "file": _state_item(
+                layer_datasets={"file": "ds-file"}, dataset_ids=["ds-file"]
+            ),
+            "multi": _state_item(
+                layer_datasets={"layer:A": "ds-a", "layer:B": "ds-b"},
+                dataset_ids=["ds-a", "ds-b"],
+            ),
+            "partial": _state_item(
+                layer_datasets={"layer:A": "ds-a"}, dataset_ids=["ds-a"]
+            ),
             "sparse": _state_item(
                 layer_datasets={"0": "ds-a", "3": "ds-d"}, dataset_ids=["ds-a", "ds-d"]
             ),
@@ -213,7 +222,10 @@ def test_layers_match_the_dataset_of_their_service_layer():
             {"id": "s3", "itemId": "sparse", "url": f"{base}/3"},
             {"id": "s1", "itemId": "sparse", "url": f"{base}/1"},
             {"id": "f", "itemId": "file"},
-            {"id": "file_indexed", "itemId": "file", "url": f"{base}/0"},
+            {"id": "file0", "itemId": "file", "url": f"{base}/0"},
+            {"id": "file1", "itemId": "file", "url": f"{base}/1"},
+            {"id": "multi0", "itemId": "multi", "url": f"{base}/0"},
+            {"id": "partial0", "itemId": "partial", "url": f"{base}/0"},
             {"id": "ambiguous", "itemId": "many"},
             {"id": "failed", "itemId": "failed"},
             {"id": "unknown", "itemId": "other"},
@@ -230,6 +242,7 @@ def test_layers_match_the_dataset_of_their_service_layer():
         "l0": "ds-0",
         "s3": "ds-d",
         "f": "ds-file",
+        "file0": "ds-file",
         "inner": "ds-0",
     }
 
