@@ -148,10 +148,6 @@ def attachment_flags(layers: Any) -> dict[str, bool | None]:
     flags: dict[str, bool | None] = {}
     for layer in layers:
         value = getattr(layer, "has_attachments", None)
-        if not isinstance(value, bool):
-            value = (getattr(layer, "additional_properties", None) or {}).get(
-                "has_attachments"
-            )
         flags[_layer_key(layer)] = value if isinstance(value, bool) else None
     return flags
 
