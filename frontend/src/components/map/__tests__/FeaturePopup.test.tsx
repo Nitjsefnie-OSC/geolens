@@ -75,19 +75,21 @@ describe('FeaturePopup — EASY-11 rich-text rendering', () => {
     expect(video).toHaveAttribute('preload', 'metadata');
   });
 
-  it('EASY-11 — YouTube URL value renders an <iframe> with sandbox and title', () => {
+  it('renders a YouTube URL value as a link without an iframe', () => {
     const features: FeatureInfo[] = [
       makeFeature({
         properties: { video: 'https://youtu.be/dQw4w9WgXcQ' },
         visibleFields: ['video'],
       }),
     ];
-    render(<FeaturePopup longitude={0} latitude={0} features={features} onClose={vi.fn()} />);
-    const iframe = document.querySelector('iframe');
-    expect(iframe).not.toBeNull();
-    expect(iframe!.getAttribute('src')).toContain('youtube.com/embed/dQw4w9WgXcQ');
-    expect(iframe!.getAttribute('sandbox')).toContain('allow-scripts');
-    expect(iframe!.getAttribute('title')).toBeTruthy();
+    const { container } = render(
+      <FeaturePopup longitude={0} latitude={0} features={features} onClose={vi.fn()} />,
+    );
+    expect(container.querySelector('iframe')).toBeNull();
+    const anchor = screen.getByRole('link', { name: 'https://youtu.be/dQw4w9WgXcQ' });
+    expect(anchor).toHaveAttribute('href', 'https://youtu.be/dQw4w9WgXcQ');
+    expect(anchor).toHaveAttribute('target', '_blank');
+    expect(anchor).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
   it('EASY-11 — plain URL value (no extension) renders as anchor (backward-compat regression pin)', () => {

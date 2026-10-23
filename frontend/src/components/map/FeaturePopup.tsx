@@ -379,9 +379,6 @@ function ValueDisplay({
     );
   }
 
-  // YouTube embeds require allow-same-origin so the
-  // player can load its own JS. This is intentionally laxer than the share-embed
-  // sandbox with allow-scripts only.
   if (isUrl(value)) {
     const { kind, srcUrl } = classifyUrl(value);
 
@@ -420,21 +417,6 @@ function ValueDisplay({
             controls
             preload="metadata"
             className="max-h-32 max-w-full rounded-sm"
-          />
-        </span>
-      );
-    }
-
-    if (kind === 'youtube') {
-      return (
-        <span className="block">
-          <iframe
-            src={srcUrl}
-            title={t('featurePopup.youtubeTitle')}
-            sandbox="allow-scripts allow-same-origin allow-presentation"
-            referrerPolicy="strict-origin-when-cross-origin"
-            loading="lazy"
-            className="max-h-32 max-w-full rounded-sm w-full aspect-video"
           />
         </span>
       );

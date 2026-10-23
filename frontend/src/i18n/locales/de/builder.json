@@ -818,8 +818,7 @@
     "prev": "Vorheriges Objekt",
     "next": "Nächstes Objekt",
     "close": "Popup schließen",
-    "dialogLabel": "Objektdetails",
-    "youtubeTitle": "YouTube-Video"
+    "dialogLabel": "Objektdetails"
   },
   "descriptionPlaceholder": "Beschreibung hinzufügen...",
   "titleBar": {

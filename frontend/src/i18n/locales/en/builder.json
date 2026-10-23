@@ -818,8 +818,7 @@
     "prev": "Previous feature",
     "next": "Next feature",
     "close": "Close popup",
-    "dialogLabel": "Feature details",
-    "youtubeTitle": "YouTube video"
+    "dialogLabel": "Feature details"
   },
   "descriptionPlaceholder": "Add a description...",
   "titleBar": {
