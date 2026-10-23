@@ -36,8 +36,12 @@ return 0
 
 
 def _encode_value(value: Any) -> str:
-    """Use stable mapping-key order for Redis's byte comparisons."""
-    return json.dumps(value, default=str, sort_keys=True)
+    """Canonicalize sortable keys without narrowing the legacy JSON key domain."""
+    # Sorted keys compare independently of order; unsortable keys keep legacy order.
+    try:
+        return json.dumps(value, default=str, sort_keys=True)
+    except TypeError:
+        return json.dumps(value, default=str)
 
 
 class RedisCacheProvider:

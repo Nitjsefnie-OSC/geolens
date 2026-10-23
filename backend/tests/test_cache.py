@@ -1017,3 +1017,50 @@ async def test_redis_conditional_mapping_equality_ignores_insertion_order(
     else:
         assert await redis_cache.compare_and_delete("claim", expected)
     assert await redis_cache.get("claim") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("operation", ["compare_and_set", "compare_and_delete"])
+async def test_redis_mixed_key_write_and_compare_keeps_legacy_encoding(
+    redis_cache, nested, operation
+):
+    value = {"outer": {1: "a", "b": 2}} if nested else {1: "a", "b": 2}
+    expected = {"outer": {1: "a", "b": 2}} if nested else {1: "a", "b": 2}
+    decoded = {"outer": {"1": "a", "b": 2}} if nested else {"1": "a", "b": 2}
+    await redis_cache.set("claim", "old")
+
+    await redis_cache.set("claim", value)
+
+    assert await redis_cache.get("claim") == decoded
+    if operation == "compare_and_set":
+        assert await redis_cache.compare_and_set("claim", expected, {1: "new", "b": 3})
+        assert await redis_cache.get("claim") == {"1": "new", "b": 3}
+        assert await redis_cache.compare_and_delete("claim", {1: "new", "b": 3})
+    else:
+        assert await redis_cache.compare_and_delete("claim", expected)
+    assert await redis_cache.get("claim") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["set", "compare_and_set"])
+async def test_redis_failed_mixed_key_write_preserves_the_previous_shared_value(
+    redis_cache, monkeypatch, operation
+):
+    await redis_cache.set("claim", "old")
+    before = await redis_cache._client.get("claim")
+    write = AsyncMock(side_effect=ConnectionError("write refused before mutation"))
+    monkeypatch.setattr(
+        redis_cache._client, "set" if operation == "set" else "eval", write
+    )
+
+    if operation == "set":
+        await redis_cache.set("claim", {1: "a", "b": 2})
+    else:
+        assert (
+            await redis_cache.compare_and_set("claim", "old", {1: "a", "b": 2}) is False
+        )
+
+    write.assert_awaited_once()
+    assert await redis_cache.get("claim") == "old"
+    assert await redis_cache._client.get("claim") == before
