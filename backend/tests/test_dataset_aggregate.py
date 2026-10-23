@@ -411,6 +411,19 @@ class TestCachePolicy:
         assert first.status_code == 200, first.text
         assert again.json()["cached"] is False
 
+    async def test_values_cut_by_the_byte_cap_are_refused_not_returned(
+        self, client: AsyncClient, points, monkeypatch, stored_ttls
+    ):
+        """Each ``note`` is about 3 KB, so a 4 KB cap keeps only the first."""
+        monkeypatch.setattr(aggregate, "_MAX_KEYED_RESULT_BYTES", 4000)
+        body = {"op": "value_counts", "column": "note", "limit": 8}
+
+        resp = await _aggregate(client, points.id, body)
+
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "result_too_large"
+        assert stored_ttls == []
+
     async def test_a_registered_table_skips_its_stored_count_and_stays_fresh(
         self, client: AsyncClient, test_db_session, stored_ttls
     ):

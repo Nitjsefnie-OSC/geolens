@@ -472,6 +472,32 @@ async def _sandboxed(
     return await run(concurrency_key=keys[-1])
 
 
+async def _aggregate_rows(
+    db: AsyncSession,
+    request: AggregateRequest,
+    sql: str,
+    binds: list[Any],
+    caller_key: str,
+) -> list:
+    keyed = request.op in ("value_counts", "group_by")
+    result = await _sandboxed(
+        db,
+        sql,
+        binds,
+        caller_key,
+        row_limit=_MAX_ITEMS,
+        max_result_bytes=_MAX_KEYED_RESULT_BYTES if keyed else None,
+    )
+    # Only the byte cap can cut rows here (the SQL LIMIT is within the row
+    # limit), and a cut list is not an exact answer.
+    if result.truncated:
+        raise SandboxError(
+            "result_too_large",
+            "These values are too large to return together. Choose a smaller limit.",
+        )
+    return result.rows
+
+
 def _cache_key(prefix: str, dataset: Dataset, body: dict) -> str | None:
     if not tenant_cache_context_available():
         return None
@@ -592,20 +618,9 @@ async def run_aggregate(
                 await get_cache().set(verdict_key, too_wide, ttl=keyed_ttl)
             if too_wide:
                 raise _too_wide()
-        result = await _sandboxed(
-            db,
-            sql,
-            binds,
-            caller_key,
-            row_limit=_MAX_ITEMS,
-            max_result_bytes=(
-                _MAX_KEYED_RESULT_BYTES
-                if request.op in ("value_counts", "group_by")
-                else None
-            ),
-        )
+        rows = await _aggregate_rows(db, request, sql, binds, caller_key)
 
-    payload = _result(request, result.rows)
+    payload = _result(request, rows)
     encoded = payload.model_dump(mode="json")
     if cache_key is not None and len(json.dumps(encoded)) <= _MAX_CACHED_BYTES:
         await get_cache().set(
