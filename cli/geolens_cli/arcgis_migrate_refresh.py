@@ -135,19 +135,25 @@ def _find_run(
 
 
 def _published_unchanged(
-    ctx: MigrationContext,
-    dataset: Any,
-    expected: int | None,
-    operator: str | None = None,
+    ctx: MigrationContext, dataset: Any, marker: Mapping[str, Any]
 ) -> bool:
-    """Whether *dataset* is as a succeeded run published it: *operator* (by
-    default this run's) wrote it last and its data revision is the one the run
-    was sent with."""
+    """Whether *dataset* is as the succeeded run *marker* names published it:
+    the admin who started it (by default this run's) wrote it last, and its
+    data revision and owner are the ones the run was sent with. A marker from
+    before the owner was recorded skips the owner."""
+    expected = marker.get("revision")
+    owner = marker.get("owner")
     return (
         expected is not None
         and _revision(dataset) == expected
-        and _operator_wrote_last(ctx, dataset, operator)
+        and _operator_wrote_last(ctx, dataset, marker.get("by"))
+        and (owner is None or _owner(dataset) == owner)
     )
+
+
+def _owner(dataset: Any) -> str | None:
+    owner = _value(getattr(dataset, "created_by", None))
+    return None if owner is None else str(owner)
 
 
 def changed_in_geolens(
@@ -169,7 +175,7 @@ def changed_in_geolens(
             return "a refresh an earlier run started is still running"
         # The admin who started the run, who may not be this run's operator.
         if str(run.status) == "succeeded" and _published_unchanged(
-            ctx, dataset, marker.get("revision"), marker.get("by")
+            ctx, dataset, marker
         ):
             record(entry, dataset_id, dataset)
             ctx.save()
@@ -279,6 +285,7 @@ def _start_refresh(
         "run": str(accepted.run_id),
         "revision": revision,
         "by": ctx.operator_id,
+        "owner": _owner(dataset),
     }
     ctx.save()
     return None
@@ -360,6 +367,7 @@ def _start_replace(
             "job": str(upload.job_id),
             "revision": revision,
             "by": ctx.operator_id,
+            "owner": _owner(dataset),
         }
         ctx.save()
         with long_request_timeout(ctx.geolens.client):
@@ -472,8 +480,9 @@ def _bring_one(
         return problem
     if problem:
         return _settle_unrecorded(ctx, entry, dataset_id, problem)
+    marker = entry.refreshing[dataset_id]
     published = get_dataset(ctx, dataset_id)
-    if not _published_unchanged(ctx, published, revision):
+    if not _published_unchanged(ctx, published, marker):
         return _settle_unrecorded(
             ctx,
             entry,
@@ -484,7 +493,7 @@ def _bring_one(
     ctx.save()
     apply_item_metadata(ctx, item, entry, [dataset_id])
     after = get_dataset(ctx, dataset_id)
-    if _published_unchanged(ctx, after, revision):
+    if _published_unchanged(ctx, after, marker):
         record(entry, dataset_id, after)
         ctx.save()
     return None

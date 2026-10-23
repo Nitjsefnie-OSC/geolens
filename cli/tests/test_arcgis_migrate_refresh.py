@@ -329,7 +329,12 @@ def test_a_refresh_still_running_at_the_deadline_is_picked_up_by_the_next_run(
     entry = _state(plan_file)["items"][A2]
     [run] = refresh.runs[PARCELS]
     assert entry["refreshing"] == {
-        PARCELS: {"run": run["id"], "revision": 0, "by": layers.OPERATOR}
+        PARCELS: {
+            "run": run["id"],
+            "revision": 0,
+            "by": layers.OPERATOR,
+            "owner": layers.OPERATOR,
+        }
     }
     assert entry["last_update"][PARCELS]["updated_at"].startswith("2026-10-01")
 
@@ -566,6 +571,32 @@ def test_a_dataset_edited_right_after_its_refresh_published_is_not_recorded(
 
     _migrate(runner, plan_file, "--only", A2)
     assert len(refresh.bodies) == 1
+
+
+def test_a_dataset_transferred_while_its_refresh_ran_is_not_recorded(
+    runner, plan_file, geolens
+):
+    service = _migrated(runner, plan_file, geolens)
+
+    class TransferDuring(FakeRefresh):
+        def refresh(self, dataset, seen):
+            out = super().refresh(dataset, seen)
+            # The swap stamps the operator again; the revision doesn't move.
+            self.service.fields[dataset]["created_by"] = ALICE
+            return out
+
+    refresh = TransferDuring(geolens, service).allow(PARCELS)
+    before = len(geolens.seen)
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 1
+    [reason] = payload["not_up_to_date"][A2]
+    assert "changed in GeoLens while its refresh ran" in reason
+    assert _patches_since(geolens, before) == []
+    entry = _state(plan_file)["items"][A2]
+    assert entry["last_update"][PARCELS]["updated_at"].startswith("2026-10-01")
+    assert entry["refreshing"] == {} and len(refresh.bodies) == 1
 
 
 def test_a_layer_edited_while_another_layer_refreshes_stays_protected(
