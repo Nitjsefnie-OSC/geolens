@@ -98,9 +98,12 @@ def record(entry: ItemState, dataset_id: str, dataset: Any) -> None:
     entry.refreshing.pop(dataset_id, None)
 
 
-def _operator_wrote_last(ctx: MigrationContext, dataset: Any) -> bool:
+def _operator_wrote_last(
+    ctx: MigrationContext, dataset: Any, operator: str | None = None
+) -> bool:
+    """Whether *operator*, by default this run's, made the dataset's last write."""
     by = _value(getattr(dataset, "updated_by", None))
-    return by is not None and str(by) == ctx.operator_id
+    return by is not None and str(by) == (operator or ctx.operator_id)
 
 
 def _find_run(
@@ -132,14 +135,18 @@ def _find_run(
 
 
 def _published_unchanged(
-    ctx: MigrationContext, dataset: Any, expected: int | None
+    ctx: MigrationContext,
+    dataset: Any,
+    expected: int | None,
+    operator: str | None = None,
 ) -> bool:
-    """Whether *dataset* is as a succeeded run published it: the operator
-    wrote it last and its data revision is the one the run was sent with."""
+    """Whether *dataset* is as a succeeded run published it: *operator* (by
+    default this run's) wrote it last and its data revision is the one the run
+    was sent with."""
     return (
         expected is not None
         and _revision(dataset) == expected
-        and _operator_wrote_last(ctx, dataset)
+        and _operator_wrote_last(ctx, dataset, operator)
     )
 
 
@@ -160,8 +167,9 @@ def changed_in_geolens(
     if run is not None:
         if str(run.status) not in _ENDED:
             return "a refresh an earlier run started is still running"
+        # The admin who started the run, who may not be this run's operator.
         if str(run.status) == "succeeded" and _published_unchanged(
-            ctx, dataset, marker.get("revision")
+            ctx, dataset, marker.get("revision"), marker.get("by")
         ):
             record(entry, dataset_id, dataset)
             ctx.save()
@@ -267,7 +275,11 @@ def _start_refresh(
         return f"GeoLens refused the refresh, {exc}"
     except ItemFailed as exc:
         return str(exc)
-    entry.refreshing[dataset_id] = {"run": str(accepted.run_id), "revision": revision}
+    entry.refreshing[dataset_id] = {
+        "run": str(accepted.run_id),
+        "revision": revision,
+        "by": ctx.operator_id,
+    }
     ctx.save()
     return None
 
@@ -344,7 +356,11 @@ def _start_replace(
         )
         # Recorded before the commit: if its answer is lost, a rerun still
         # finds the run it started.
-        entry.refreshing[dataset_id] = {"job": str(upload.job_id), "revision": revision}
+        entry.refreshing[dataset_id] = {
+            "job": str(upload.job_id),
+            "revision": revision,
+            "by": ctx.operator_id,
+        }
         ctx.save()
         with long_request_timeout(ctx.geolens.client):
             previewed = ctx.geolens.call(

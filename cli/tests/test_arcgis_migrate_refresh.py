@@ -88,7 +88,10 @@ class FakeRefresh:
             0, _run(dataset, run_id, self.outcome, **self.extra)
         )
         if self.outcome == "succeeded":
-            self.service.fields.setdefault(dataset, {})["updated_at"] = LATER
+            # The swap is the operator's write.
+            self.service.fields.setdefault(dataset, {}).update(
+                updated_at=LATER, updated_by=layers.OPERATOR
+            )
         return (
             202,
             {
@@ -325,7 +328,9 @@ def test_a_refresh_still_running_at_the_deadline_is_picked_up_by_the_next_run(
     assert "still running" in payload["not_up_to_date"][A2][0]
     entry = _state(plan_file)["items"][A2]
     [run] = refresh.runs[PARCELS]
-    assert entry["refreshing"] == {PARCELS: {"run": run["id"], "revision": 0}}
+    assert entry["refreshing"] == {
+        PARCELS: {"run": run["id"], "revision": 0, "by": layers.OPERATOR}
+    }
     assert entry["last_update"][PARCELS]["updated_at"].startswith("2026-10-01")
 
     run.update(status="succeeded", finished_at=LATER)
@@ -387,6 +392,24 @@ def test_a_recovered_refresh_is_recorded_before_the_next_one_starts(
 
     assert result.exit_code == 0, result.output
     assert len(refresh.bodies) == 3
+
+
+@pytest.mark.parametrize(("by", "adopted"), [(ALICE, True), (None, False)])
+def test_a_refresh_another_admin_started_is_taken_as_this_commands_own(
+    runner, plan_file, geolens, by, adopted
+):
+    service = _migrated(runner, plan_file, geolens)
+    refresh = FakeRefresh(geolens, service).allow(PARCELS)
+    run_id = _uuid("5e", "77")
+    refresh.runs[PARCELS] = [_run(PARCELS, run_id, "succeeded")]
+    marker = {"run": run_id, "revision": 0, **({"by": by} if by else {})}
+    _edit_state(plan_file, A2, refreshing={PARCELS: marker})
+    service.fields[PARCELS] = {"updated_at": LATER, "updated_by": ALICE}
+
+    result, payload = _migrate(runner, plan_file, "--only", A2)
+
+    assert bool(refresh.bodies) is adopted
+    assert result.exit_code == (0 if adopted else 1), result.output
 
 
 def test_a_rerun_writes_the_portals_new_item_metadata(runner, tmp_path, geolens):
