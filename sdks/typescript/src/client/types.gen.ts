@@ -1003,6 +1003,153 @@ export type ArcGisSignInResponse = {
 };
 
 /**
+ * ArcgisLossItem
+ */
+export type ArcgisLossItem = {
+    /**
+     * Path
+     *
+     * JSON path of the web map part that was not carried over.
+     */
+    path: string;
+    /**
+     * Kind
+     *
+     * Stable code for the kind of loss.
+     */
+    kind: string;
+    /**
+     * Detail
+     *
+     * Free text; not localized.
+     */
+    detail?: string;
+};
+
+/**
+ * ArcgisLossReport
+ */
+export type ArcgisLossReport = {
+    /**
+     * Items
+     */
+    items: Array<ArcgisLossItem>;
+    /**
+     * Summary
+     *
+     * Item count per `kind`.
+     */
+    summary: {
+        [key: string]: number;
+    };
+};
+
+/**
+ * ArcgisUnmatchedLayer
+ */
+export type ArcgisUnmatchedLayer = {
+    /**
+     * Layer Id
+     */
+    layer_id: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string;
+    /**
+     * Reason
+     *
+     * `no_match` or `invalid`.
+     */
+    reason: string;
+};
+
+/**
+ * ArcgisWebmapImportRequest
+ */
+export type ArcgisWebmapImportRequest = {
+    /**
+     * Webmap
+     *
+     * The web map item data JSON, at most 1 MB serialized.
+     */
+    webmap: {
+        [key: string]: unknown;
+    };
+    /**
+     * Name
+     *
+     * Map name. Defaults to `title`.
+     */
+    name?: string | null;
+    /**
+     * Title
+     *
+     * The web map item's title.
+     */
+    title?: string | null;
+    /**
+     * Visibility of the new map.
+     */
+    visibility?: MapVisibility;
+    /**
+     * Basemap Map
+     *
+     * Esri basemap URL or style URL (the first base map layer's `url` or `styleUrl`) to a GeoLens basemap id. An unmapped basemap falls back to the first enabled basemap and is reported.
+     */
+    basemap_map?: {
+        [key: string]: string;
+    };
+    /**
+     * Dataset Matches
+     *
+     * Operational layer id to GeoLens dataset id. Every dataset must be one the caller can read, or the request is refused with 404. A layer with no entry is not imported and is listed as unmatched.
+     */
+    dataset_matches?: {
+        [key: string]: string;
+    };
+    /**
+     * Dry Run
+     *
+     * Return the translation without creating a map.
+     */
+    dry_run?: boolean;
+};
+
+/**
+ * ArcgisWebmapImportResponse
+ */
+export type ArcgisWebmapImportResponse = {
+    /**
+     * The new map; null on a dry run.
+     */
+    map: MapResponse | null;
+    /**
+     * Layers
+     *
+     * The translated layers, in draw order.
+     */
+    layers: Array<MapLayerInput>;
+    /**
+     * Layer Ids
+     *
+     * Operational layer id to the id of the map layer created for it. Layers that were not imported are absent; see `loss_report`. Empty on a dry run.
+     */
+    layer_ids?: {
+        [key: string]: string;
+    };
+    loss_report: ArcgisLossReport;
+    /**
+     * Unmatched Layers
+     */
+    unmatched_layers: Array<ArcgisUnmatchedLayer>;
+};
+
+/**
  * AttributeMetadataListResponse
  */
 export type AttributeMetadataListResponse = {
@@ -1065,6 +1212,14 @@ export type AttributeMetadataResponse = {
      */
     example_values?: Array<unknown> | null;
     /**
+     * Value Labels
+     *
+     * Label for each stored code, keyed by the code as text.
+     */
+    value_labels?: {
+        [key: string]: string;
+    } | null;
+    /**
      * Ordinal Position
      *
      * Column position in the table (1-based)
@@ -1120,6 +1275,14 @@ export type AttributeMetadataUpdate = {
      * Value domain: continuous, categorical, coded, etc.
      */
     domain_type?: 'continuous' | 'discrete' | 'categorical' | 'coded' | 'codedValue' | 'boolean' | 'text' | 'date' | 'temporal' | 'geometry' | 'range' | null;
+    /**
+     * Value Labels
+     *
+     * Label for each stored code, keyed by the code as text.
+     */
+    value_labels?: {
+        [key: string]: string;
+    } | null;
 };
 
 /**
@@ -2782,6 +2945,18 @@ export type CommitRequest = {
      * Raster only: reject a non-COG TIFF instead of converting it. False (the default) converts the source to a COG during ingest. True fails the job when the source is not already a compliant COG, and cannot be combined with resampling, nodata_override, srid_override or a compression other than the default DEFLATE: each of those is applied by a conversion, so the commit is refused with a 422 naming the fields that clash.
      */
     strict_cog?: boolean;
+    /**
+     * Item Id
+     *
+     * Vector file only: ArcGIS portal item ID the file came from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * Vector file only: ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss; other import types report it as 'origin_link_unsupported'.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -2806,6 +2981,12 @@ export type CommitResponse = {
      * Human-readable commit result.
      */
     message: string;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -5173,6 +5354,18 @@ export type FanOutCommitRequest = {
      * Layers to ingest as separate datasets. Maximum 50 per request.
      */
     layers: Array<FanOutLayerRequest>;
+    /**
+     * Item Id
+     *
+     * ArcGIS portal item ID the file came from. Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * ArcGIS portal address for the item link. Stored only when it is an https URL, otherwise dropped and reported in origin_link_loss.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -5193,6 +5386,12 @@ export type FanOutCommitResponse = {
      * Per-layer outcomes in the same order as the request layers.
      */
     results: Array<FanOutLayerResult>;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the ArcGIS item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -6096,6 +6295,12 @@ export type LayerInfo = {
      * False when the layer holds no features (ArcGIS composite, raster and annotation layers) and a preview of it is refused with 'unsupported_layer_type'.
      */
     importable?: boolean;
+    /**
+     * Has Attachments
+     *
+     * Whether the ArcGIS layer reports file attachments. Null when the service does not say, and for other service types.
+     */
+    has_attachments?: boolean | null;
     /**
      * Layer Id
      *
@@ -10189,6 +10394,18 @@ export type ServicePreviewRequest = {
      * Structured credential for a protected service. Mutually exclusive with the token field.
      */
     auth?: ServiceAuthRequest | null;
+    /**
+     * Item Id
+     *
+     * ArcGIS portal item ID the layer was published from, at most 64 characters (longer is refused with 422). Stored as provenance when it is 32 hex characters, otherwise dropped and reported in origin_link_loss. Dropped for a non-ArcGIS service type.
+     */
+    item_id?: string | null;
+    /**
+     * Portal Url
+     *
+     * ArcGIS portal address for the item link, at most 2048 characters (longer is refused with 422). Stored only when it is https and shares a registrable domain with the service URL, otherwise dropped and reported in origin_link_loss.
+     */
+    portal_url?: string | null;
 };
 
 /**
@@ -10247,6 +10464,12 @@ export type ServicePreviewResponse = {
      * Layer name as it appears in the remote service.
      */
     layer_name: string;
+    /**
+     * Origin Link Loss
+     *
+     * Reasons the item link was dropped: 'item_id_invalid', 'portal_url_invalid', 'portal_url_domain_mismatch' or 'origin_link_unsupported'. Empty when nothing was dropped.
+     */
+    origin_link_loss?: Array<string>;
 };
 
 /**
@@ -25913,6 +26136,63 @@ export type ImportMapStyleEndpointMapsImportPostResponses = {
 };
 
 export type ImportMapStyleEndpointMapsImportPostResponse = ImportMapStyleEndpointMapsImportPostResponses[keyof ImportMapStyleEndpointMapsImportPostResponses];
+
+export type ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostData = {
+    body: ArcgisWebmapImportRequest;
+    path?: never;
+    query?: never;
+    url: '/maps/import/arcgis-webmap/';
+};
+
+export type ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostErrors = {
+    /**
+     * Bad request — invalid payload
+     */
+    400: ProblemDetail;
+    /**
+     * Unauthorized — missing or invalid credentials
+     */
+    401: ProblemDetail;
+    /**
+     * Forbidden — caller lacks write access
+     */
+    403: ProblemDetail;
+    /**
+     * Not found
+     */
+    404: ProblemDetail;
+    /**
+     * Conflict — resource state prevents the operation
+     */
+    409: ProblemDetail;
+    /**
+     * Validation error
+     */
+    422: ProblemDetail;
+    /**
+     * Too many requests — retry after the advertised interval
+     */
+    429: ProblemDetail;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetail;
+    /**
+     * Service unavailable — the database could not serve the request
+     */
+    503: ProblemDetail;
+};
+
+export type ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostError = ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostErrors[keyof ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostErrors];
+
+export type ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: ArcgisWebmapImportResponse;
+};
+
+export type ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostResponse = ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostResponses[keyof ImportArcgisWebmapEndpointMapsImportArcgisWebmapPostResponses];
 
 export type GetSharedMapEndpointMapsSharedTokenGetData = {
     body?: never;

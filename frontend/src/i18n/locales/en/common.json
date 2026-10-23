@@ -196,7 +196,9 @@
       "booleanFalse": "False",
       "resultSummary_one": "{{count}} visible feature",
       "resultSummary_other": "{{count}} visible features",
-      "resultSummaryTruncated": "Showing {{shown}} of {{total}} visible features"
+      "resultSummaryTruncated": "Showing {{shown}} of {{total}} visible features",
+      "truncatedHint": "Zoom in or pan the map to list the rest of the features.",
+      "openDatasetData": "View all data for {{name}}"
     },
     "heatmapLow": "Low",
     "heatmapHigh": "High",
@@ -446,6 +448,7 @@
     "userNotFound": "User not found",
     "apiKeyNotFound": "API key not found",
     "datasetKeyLimit": "This dataset already has 100 active write keys. Revoke one to create another.",
+    "valueLabelsTooLarge": "The value labels for this dataset are over the 1 MB limit. Remove some labels to add more.",
     "accessDenied": "Access denied",
     "couldNotValidateCredentials": "Could not validate credentials",
     "inactiveUser": "Inactive user",

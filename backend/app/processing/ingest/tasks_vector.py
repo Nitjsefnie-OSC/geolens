@@ -12,7 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from app.core.db.tenant_session import tenant_task
 from app.core.failure_reason import FixedReason
 from app.core.url_redaction import scrub_secret_from_exception
-from app.platform.dataset_origin import service_layer_identity
+from app.platform.dataset_origin import portal_link_fields, service_layer_identity
 from app.platform.jobs import ledger
 from app.platform.jobs.heartbeat import (
     JOB_ERROR_WRITE_TIMEOUT_MS,
@@ -375,6 +375,35 @@ async def _fetch_arcgis_import_page_info(
         return None, max_record_count, supports_pagination, order_field
 
 
+async def _fetch_arcgis_field_labels(
+    source_url: str, layer_id: int | str | None, token: str | None
+) -> dict | None:
+    """The layer's current field labels, or None when they can't be read.
+
+    None leaves the stored labels alone: a refresh must neither fail nor drop
+    them because this read did.
+    """
+    if layer_id is None:
+        return None
+    from app.modules.catalog.sources.adapters.arcgis import fetch_arcgis_field_labels
+    from app.core.url_redaction import redact_exception_text
+    from app.platform.security import make_safe_client
+
+    try:
+        async with make_safe_client(timeout=30.0) as client:
+            return await fetch_arcgis_field_labels(source_url, layer_id, client, token)
+    except (
+        Exception
+    ) as exc:  # broad: labels are optional; the refresh must not fail on them
+        structlog.get_logger().warning(
+            "arcgis_field_labels_fetch_failed",
+            source_url=source_url,
+            layer_id=str(layer_id),
+            error=redact_exception_text(exc),
+        )
+        return None
+
+
 @task_app.task(queue="ingest", retry=0, aliases=["app.ingest.tasks.ingest_file"])
 @tenant_task
 async def ingest_file(
@@ -654,7 +683,10 @@ async def ingest_file(
                     attempt_id=attempt_uuid,
                     # No file_hash: only the re-upload path computes it, and the
                     # allowlist omits absent keys.
-                    origin_ref={"filename": source_filename},
+                    origin_ref={
+                        "filename": source_filename,
+                        **portal_link_fields(um),
+                    },
                     archive_from=file_path,
                     source_columns=source_columns_for(info, layer_name),
                 )
@@ -1062,6 +1094,7 @@ async def ingest_service(
                         # requires authentication; refresh probes without a
                         # token before refusing.
                         "auth_required": True if token else None,
+                        **portal_link_fields(um),
                     },
                 )
             )
