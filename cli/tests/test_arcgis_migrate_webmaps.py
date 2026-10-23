@@ -319,3 +319,19 @@ def test_only_this_maps_basemap_entry_is_sent(runner, plan_file, geolens):
     assert result.exit_code == 0, result.output
     [request] = [s.json() for s in _sent(geolens)]
     assert request["basemap_map"] == {HILLSHADE: "dark"}
+
+
+def test_a_saved_map_resumes_without_a_portal_credential(runner, plan_file, geolens):
+    _services(geolens)
+    geolens.routes[IMPORT] = (201, _response())
+    patch = "PATCH /maps/" + MAP_ID
+    ok = geolens.routes[patch]
+    geolens.routes[patch] = (500, _problem(500, "boom"))
+    first, _ = _run(runner, plan_file)
+    geolens.routes[patch] = ok
+
+    second, _ = _migrate(runner, plan_file, "--only", B1)
+
+    assert first.exit_code == 1
+    assert second.exit_code == 0, second.output
+    assert len(_sent(geolens)) == 1

@@ -787,6 +787,10 @@ def _portal_client(
             item["action"] == _plan.IMPORT_FILE
             and _resumes_without_download(state.items.get(item["id"]))
         )
+        and not (
+            item["action"] == _plan.IMPORT_MAP
+            and getattr(state.items.get(item["id"]), "map_id", None)
+        )
     )
     files = any(i["action"] != _plan.IMPORT_LAYERS for i in wanted)
     supplied = bool(opts.token or opts.token_stdin or opts.username)
