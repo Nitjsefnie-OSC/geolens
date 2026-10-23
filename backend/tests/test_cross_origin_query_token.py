@@ -283,6 +283,16 @@ async def test_a_short_token_inside_an_unrelated_value_is_not_an_echo(
     assert len(recorded) == 2
 
 
+async def test_a_token_spelled_by_an_escape_s_hex_digits_is_not_an_echo(
+    one_redirect,
+):
+    recorded = one_redirect("https://cdn.example/%E4%B8%AD")
+    async with make_safe_client() as client:
+        response = await client.get(f"https://{SERVICE_HOST}/data?token=e4")
+    assert response.status_code == 200
+    assert len(recorded) == 2
+
+
 async def test_the_parameter_name_is_matched_case_insensitively(one_redirect):
     recorded = one_redirect(f"https://{ELSEWHERE_HOST}/data?Token={ENCODED}")
     async with make_safe_client() as client:

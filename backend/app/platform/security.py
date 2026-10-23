@@ -209,8 +209,11 @@ def _names_query_credential(tokens: set[str], target: httpx.URL) -> bool:
             break
         spellings.append(decoded)
     spellings += [unquote_plus(spelled) for spelled in spellings]
+    # A match may not start on the hex digits of a %XX escape: they aren't
+    # content, and the next spelling holds what the escape encodes.
     patterns = [
-        re.compile(rf"(?<![^\W_]){re.escape(token)}(?![^\W_])") for token in tokens
+        re.compile(rf"(?<![^\W_])(?!(?<=%)[0-9a-f]{{2}}){re.escape(token)}(?![^\W_])")
+        for token in tokens
     ]
     return any(
         pattern.search(spelled.lower()) for pattern in patterns for spelled in spellings
