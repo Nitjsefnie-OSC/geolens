@@ -17,6 +17,7 @@ from app.modules.catalog.datasets.domain.models import (
 from app.modules.catalog.maps.models import Map, MapLayer
 from tests.factories import create_user, get_user_id
 from tests.test_tile_signature_revocation_1963 import _evict_tile_meta, _make_vector
+from tests.test_vrt_member_audience import _servable_vrt
 from tests.test_vrt_source_authz_1172 import (
     _create_raster_dataset,
     _create_vrt_dataset,
@@ -200,34 +201,89 @@ async def test_adding_a_member_grants_reads_and_rolls_the_publication_version(
     assert await test_db_session.scalar(version) == (before or 0) + 1
 
 
-async def test_removal_that_cuts_a_member_off_an_owners_shared_map_is_refused(
-    client: AsyncClient, admin_auth_header: dict, shared: _Shared, test_db_session
-):
-    owner_id = await test_db_session.scalar(
+async def _team_map_shows(client, session, shared: _Shared) -> tuple[str, bool]:
+    """Put the dataset on an internal map its owner made; return the map id
+    and whether the member sees the layer."""
+    owner_id = await session.scalar(
         select(Record.created_by).where(Record.id == shared.dataset.record_id)
     )
-    map_name = f"Team map {uuid.uuid4().hex[:6]}"
-    team_map = Map(name=map_name, visibility="internal", created_by=owner_id)
-    test_db_session.add(team_map)
-    await test_db_session.flush()
-    test_db_session.add(
+    team_map = Map(
+        name=f"Team map {uuid.uuid4().hex[:6]}",
+        visibility="internal",
+        created_by=owner_id,
+    )
+    session.add(team_map)
+    await session.flush()
+    session.add(
         MapLayer(map_id=team_map.id, dataset_id=shared.dataset.id, sort_order=0)
     )
-    await test_db_session.commit()
+    await session.commit()
+    return str(team_map.id), await _member_sees_layer(client, str(team_map.id), shared)
 
+
+async def _member_sees_layer(client, map_id: str, shared: _Shared) -> bool:
+    resp = await client.get(f"/maps/{map_id}", headers=shared.member)
+    assert resp.status_code == 200, resp.text
+    return any(
+        layer["dataset_id"] == str(shared.dataset.id) for layer in resp.json()["layers"]
+    )
+
+
+@pytest.mark.parametrize("revoke", ["remove_member", "delete_group"])
+async def test_revoking_drops_the_layer_from_an_owners_shared_map(
+    client: AsyncClient,
+    admin_auth_header: dict,
+    shared: _Shared,
+    test_db_session,
+    revoke: str,
+):
+    map_id, saw_layer = await _team_map_shows(client, test_db_session, shared)
+    url = f"/admin/groups/{shared.group_id}"
+    if revoke == "remove_member":
+        url += f"/members/{shared.member_id}"
+
+    revoked = await client.delete(url, headers=admin_auth_header)
+
+    assert saw_layer
+    assert revoked.status_code == 204, revoked.text
+    assert not await _member_sees_layer(client, map_id, shared)
+
+
+async def test_removing_a_member_with_their_own_vrt_over_a_granted_source(
+    client: AsyncClient, admin_auth_header: dict, test_db_session
+):
+    """Removal is not refused; the member's mosaic stops serving instead."""
+    member, member_id = await create_user(client, admin_auth_header, "editor")
+    source = await _create_raster_dataset(
+        test_db_session,
+        created_by=await get_user_id(test_db_session, "admin"),
+        visibility="restricted",
+    )
+    group_id = await _new_group(client, admin_auth_header, [member_id])
+    await _grant(test_db_session, source, group_id)
+    vrt = await _servable_vrt(
+        test_db_session, created_by=uuid.UUID(member_id), visibility="private"
+    )
+    await _link_source(test_db_session, vrt, source, 0)
+
+    async def vrt_tiles():
+        _evict_tile_meta()
+        return await client.get(
+            "/tiles/raster-auth-check/",
+            params={"dataset_id": str(vrt)},
+            headers=member,
+        )
+
+    assert (await vrt_tiles()).status_code == 200
     removed = await client.delete(
-        f"/admin/groups/{shared.group_id}/members/{shared.member_id}",
-        headers=admin_auth_header,
-    )
-    deleted = await client.delete(
-        f"/admin/groups/{shared.group_id}", headers=admin_auth_header
+        f"/admin/groups/{group_id}/members/{member_id}", headers=admin_auth_header
     )
 
-    assert removed.status_code == 422, removed.text
-    assert map_name in removed.json()["detail"]
-    assert deleted.status_code == 422, deleted.text
-    url = f"/datasets/{shared.dataset.id}"
-    assert (await client.get(url, headers=shared.member)).status_code == 200
+    assert removed.status_code == 204, removed.text
+    lost = await client.get(f"/datasets/{source}", headers=member)
+    assert lost.status_code == 404, lost.text
+    tiles = await vrt_tiles()
+    assert tiles.status_code == 409, tiles.text
 
 
 async def test_adding_a_member_a_vrt_would_reach_past_a_source_is_refused(

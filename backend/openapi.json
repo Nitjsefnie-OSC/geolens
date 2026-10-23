@@ -24126,7 +24126,7 @@
     },
     "/admin/groups/{group_id}": {
       "delete": {
-        "description": "Delete a sharing group and all its memberships (admin only).\n\n422 when removing the members' access to the group's datasets would leave\na VRT reaching past a source, or cut a member off a dataset its owner's\npublic or internal maps show.",
+        "description": "Delete a sharing group and all its memberships (admin only).\n\nIts members lose the group's datasets at once, signed tile URLs included.",
         "operationId": "delete_group_admin_groups__group_id__delete",
         "parameters": [
           {
@@ -24836,7 +24836,7 @@
     },
     "/admin/groups/{group_id}/members/{user_id}": {
       "delete": {
-        "description": "Remove one user from a sharing group (admin only).\n\n422 when losing the group's datasets would leave a VRT reaching past a\nsource, or cut the user off a dataset its owner's public or internal maps\nshow.",
+        "description": "Remove one user from a sharing group (admin only).\n\nThe user loses the group's datasets at once, signed tile URLs included.",
         "operationId": "remove_group_member_admin_groups__group_id__members__user_id__delete",
         "parameters": [
           {

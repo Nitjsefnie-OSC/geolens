@@ -309,9 +309,7 @@ export const createGroupAdminGroupsPost = <ThrowOnError extends boolean = false>
  *
  * Delete a sharing group and all its memberships (admin only).
  *
- * 422 when removing the members' access to the group's datasets would leave
- * a VRT reaching past a source, or cut a member off a dataset its owner's
- * public or internal maps show.
+ * Its members lose the group's datasets at once, signed tile URLs included.
  */
 export const deleteGroupAdminGroupsGroupIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteGroupAdminGroupsGroupIdDeleteData, ThrowOnError>): RequestResult<DeleteGroupAdminGroupsGroupIdDeleteResponses, DeleteGroupAdminGroupsGroupIdDeleteErrors, ThrowOnError> => (options.client ?? client).delete<DeleteGroupAdminGroupsGroupIdDeleteResponses, DeleteGroupAdminGroupsGroupIdDeleteErrors, ThrowOnError>({
     security: [
@@ -420,9 +418,7 @@ export const addGroupMembersAdminGroupsGroupIdMembersPost = <ThrowOnError extend
  *
  * Remove one user from a sharing group (admin only).
  *
- * 422 when losing the group's datasets would leave a VRT reaching past a
- * source, or cut the user off a dataset its owner's public or internal maps
- * show.
+ * The user loses the group's datasets at once, signed tile URLs included.
  */
 export const removeGroupMemberAdminGroupsGroupIdMembersUserIdDelete = <ThrowOnError extends boolean = false>(options: Options<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteData, ThrowOnError>): RequestResult<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses, RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors, ThrowOnError> => (options.client ?? client).delete<RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteResponses, RemoveGroupMemberAdminGroupsGroupIdMembersUserIdDeleteErrors, ThrowOnError>({
     security: [
