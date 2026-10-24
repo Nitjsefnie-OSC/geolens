@@ -1325,8 +1325,11 @@ def test_a_rerun_of_an_item_whose_import_finished_skips_the_probe(
     )
 
     assert result.exit_code == 0, result.output
-    assert service.bodies(PROBE) == []
-    assert service.bodies(PREVIEW) == []
+    assert not [
+        s
+        for s in geolens.seen
+        if "/services/" in s.url or "/ingest/" in s.url or "/jobs/" in s.url
+    ]
     entry = _state(plan_file)["items"][A1]
     assert entry["status"] == "done"
     assert entry["owner_id"] == OPERATOR
@@ -1370,8 +1373,11 @@ def test_a_plan_edit_reaches_the_recorded_datasets_without_a_probe(
     result, _ = _migrate(runner, plan_file, "--only", A2)
 
     assert result.exit_code == 0, result.output
-    assert service.bodies(PROBE) == []
-    assert service.bodies(PREVIEW) == []
+    assert not [
+        s
+        for s in geolens.seen
+        if "/services/" in s.url or "/ingest/" in s.url or "/jobs/" in s.url
+    ]
     patches = [
         (s.url.rsplit("/", 1)[-1], s.json())
         for s in geolens.seen
@@ -1453,9 +1459,108 @@ def test_a_rerun_reports_the_left_out_layers_the_import_recorded(
     result, _ = _migrate(runner, plan_file, "--only", A2)
 
     assert result.exit_code == 0, result.output
-    assert service.bodies(PROBE) == []
+    assert not [
+        s
+        for s in geolens.seen
+        if "/services/" in s.url or "/ingest/" in s.url or "/jobs/" in s.url
+    ]
     notes = _state(plan_file)["items"][A2]["notes"]
     assert notes == ["Districts: Group Layer layer, not imported"]
+
+
+def test_a_rerun_of_a_private_item_whose_import_finished_needs_no_credential(
+    runner, tmp_path, geolens
+):
+    """A rerun of a private item whose import finished starts without an ArcGIS credential and still transfers its dataset."""
+    plan_file = _write_plan(tmp_path, rows={A1: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")], needs_auth=True)
+    keyword = f"POST /records/{dataset_id('Parcels')}/keywords/"
+    preview = service.preview
+
+    def preview_then_break_keywords(seen):
+        reply = preview(seen)
+        geolens.routes[keyword] = (500, _problem(500, "database unavailable"))
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_keywords
+    result, _ = _migrate(
+        runner, plan_file, "--only", A1, "--token", secrets.token_urlsafe(16)
+    )
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][A1]["status"] == "failed"
+
+    service._serve_dataset(dataset_id("Parcels"))
+    geolens.routes[PROBE] = (503, _problem(503, "the service is unavailable"))
+    geolens.seen.clear()
+
+    result, _ = _migrate(runner, plan_file, "--only", A1)
+
+    assert result.exit_code == 0, result.output
+    assert not [
+        s
+        for s in geolens.seen
+        if "/services/" in s.url or "/ingest/" in s.url or "/jobs/" in s.url
+    ]
+    entry = _state(plan_file)["items"][A1]
+    assert entry["status"] == "done"
+    assert list(entry["last_update"]) == [dataset_id("Parcels")]
+    assert entry["owner_id"] == OPERATOR
+
+
+def test_a_rerun_with_a_password_signs_no_portal_in(
+    runner, tmp_path, geolens, monkeypatch
+):
+    """A rerun of a private item whose import finished signs no portal in, even with a password at hand."""
+    plan_file = _write_plan(tmp_path, rows={A1: ITEM_TEXT})
+    portal = FakePortal(portal_routes())
+    monkeypatch.setattr(migrate, "build_opener", lambda: portal)
+    service = FakeImport(geolens, [_layer(0, "Parcels")], needs_auth=True)
+    keyword = f"POST /records/{dataset_id('Parcels')}/keywords/"
+    preview = service.preview
+
+    def preview_then_break_keywords(seen):
+        reply = preview(seen)
+        geolens.routes[keyword] = (500, _problem(500, "database unavailable"))
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_keywords
+    result, _ = _migrate(
+        runner,
+        plan_file,
+        "--only",
+        A1,
+        "--username",
+        "gis_admin",
+        env={"ARCGIS_PASSWORD": secrets.token_urlsafe(16)},
+    )
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][A1]["status"] == "failed"
+
+    service._serve_dataset(dataset_id("Parcels"))
+    geolens.routes[PROBE] = (503, _problem(503, "the service is unavailable"))
+    geolens.seen.clear()
+    before = len(portal.seen)
+
+    result, _ = _migrate(
+        runner,
+        plan_file,
+        "--only",
+        A1,
+        "--username",
+        "gis_admin",
+        env={"ARCGIS_PASSWORD": secrets.token_urlsafe(22)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert portal.seen[before:] == []
+    assert not [
+        s
+        for s in geolens.seen
+        if "/services/" in s.url or "/ingest/" in s.url or "/jobs/" in s.url
+    ]
+    entry = _state(plan_file)["items"][A1]
+    assert entry["status"] == "done"
+    assert list(entry["last_update"]) == [dataset_id("Parcels")]
 
 
 def test_a_state_file_without_the_recorded_import_resumes_the_full_import(

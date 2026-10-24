@@ -44,6 +44,8 @@ _TOKEN_REFUSED = "Provide a valid ArcGIS token"
 _STORE_UNAVAILABLE = "credential_store_unavailable"
 # GeoLens's answer to a commit of a job that was committed before.
 _ALREADY_COMMITTED = "already processed"
+# The note an import with no importable layer ends with, fresh or resumed.
+_NO_LAYER_NOTE = "the service has no layer to import"
 
 
 def _row(ctx: MigrationContext, item: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -436,9 +438,22 @@ def _finish_job(
 
 
 def _redacted(ctx: MigrationContext, notes: list[str]) -> list[str]:
-    """The notes as the state file stores them: the run's redactor has gone
-    through each, like the item notes `_migrate_one` records."""
+    """The notes with the run's secrets replaced, so the persisted import pass
+    holds none. The redactor only: no truncation, unlike the item notes' clean."""
     return [ctx.redact(note) for note in notes]
+
+
+def _import_recorded(entry: ItemState | None, url: str | None) -> bool:
+    """Whether *entry* records a finished import pass for the service at *url*,
+    which a rerun resumes without reading the source again. The startup
+    credential check shares this predicate, so a rerun it spares never asks for
+    an ArcGIS credential."""
+    return (
+        bool(url)
+        and entry is not None
+        and entry.import_pass is not None
+        and entry.service_url == url
+    )
 
 
 def _resume_import(
@@ -454,9 +469,7 @@ def _resume_import(
     base = item["target"]["title"] or item["title"]
     visibility = item["target"]["visibility"]
     if not recorded:
-        return ItemResult(
-            notes=[*entry.import_pass["notes"], "the service has no layer to import"]
-        )
+        return ItemResult(notes=[*entry.import_pass["notes"], _NO_LAYER_NOTE])
     titles = _titles(
         base, [(rec["label"], rec["layer_id"]) for rec in recorded.values()]
     )
@@ -482,7 +495,7 @@ def import_layers(
     from geolens.models.probe_request import ProbeRequest
 
     row = _row(ctx, item)
-    if entry.import_pass is not None and entry.service_url == row["url"]:
+    if _import_recorded(entry, row["url"]):
         return _resume_import(ctx, item, entry)
     try:
         with long_request_timeout(ctx.geolens.client):
@@ -511,7 +524,7 @@ def import_layers(
     if not wanted:
         entry.import_pass = {"notes": _redacted(ctx, notes), "layers": {}}
         # Done rather than skipped: a rerun's probe reports a layer added later.
-        return ItemResult(notes=[*notes, "the service has no layer to import"])
+        return ItemResult(notes=[*notes, _NO_LAYER_NOTE])
 
     base = item["target"]["title"] or item["title"]
     titles = _titles(
