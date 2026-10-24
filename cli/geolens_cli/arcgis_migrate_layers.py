@@ -523,7 +523,8 @@ def import_layers(
     entry.attachments = attachment_flags(wanted)
     if not wanted:
         entry.import_pass = {"notes": _redacted(ctx, notes), "layers": {}}
-        # Done rather than skipped: a rerun's probe reports a layer added later.
+        # Done rather than skipped: the refresh pass probes a finished item on
+        # a later run, and that probe reports a layer added later.
         return ItemResult(notes=[*notes, _NO_LAYER_NOTE])
 
     base = item["target"]["title"] or item["title"]
