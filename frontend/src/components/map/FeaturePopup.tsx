@@ -401,6 +401,10 @@ function ValueDisplay({
             rel="noopener noreferrer"
             className="text-primary underline break-all text-2xs"
             onClick={(e) => e.stopPropagation()}
+            // Preserve native link activation inside the copyable property row.
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+            }}
           >
             {truncateGraphemes(srcUrl, MAX_VALUE_LENGTH)}
           </a>
@@ -454,6 +458,10 @@ function ValueDisplay({
                 rel="noopener noreferrer"
                 className="text-primary underline break-all"
                 onClick={(e) => e.stopPropagation()}
+                // Preserve native link activation inside the copyable property row.
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+                }}
               >
                 {seg.value}
               </a>
