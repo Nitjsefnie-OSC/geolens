@@ -9,6 +9,12 @@ and releases use semantic versioning.
 
 ### Changed
 
+- `GET /datasets/{id}/rows/` takes an optional CQL2-JSON `filter` parameter,
+  compiled with the same helpers the OGC items route uses and combined with the
+  column filters, sort and keyset paging. A malformed filter or one naming an
+  unknown column returns 400. The map builder uses it to open a read-only
+  attribute table for a layer, with the layer's filter applied and a clicked
+  row found on the map.
 - GeoLens no longer sends a service credential (token, username and password,
   or API key) to a plain `http://` service address. Probe, preview, import,
   re-upload and refresh requests that would do so, STAC requests included,
