@@ -845,4 +845,39 @@ describe('ServiceUrlForm portal URL guidance', () => {
     expect(screen.getByRole('button', { name: 'Probe →' })).toBeDisabled();
     expect(mockProbeService).not.toHaveBeenCalled();
   });
+  it('announces a probe failure and ties it to the URL field', async () => {
+    const user = userEvent.setup();
+    mockProbeService.mockRejectedValue(new ApiError('Plain HTTP is refused.', 400, null));
+    render(<ServiceUrlForm />);
+
+    const input = screen.getByLabelText(/Service URL/);
+    await user.type(input, 'http://example.test/wfs');
+    await user.click(screen.getByRole('button', { name: 'Probe →' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Plain HTTP is refused.');
+    const field = screen.getByLabelText(/Service URL/);
+    expect(field).toHaveAttribute('aria-invalid', 'true');
+    expect(field).toHaveAccessibleDescription('Plain HTTP is refused.');
+  });
+  it.each([
+    ['a URL refusal', 400, false],
+    ['a credential refusal', 403, true],
+  ])('ties %s to the matching field only', async (_label, status, credential) => {
+    const user = userEvent.setup();
+    mockProbeService.mockRejectedValue(new ApiError('Probe refused.', status, null));
+    render(<ServiceUrlForm />);
+
+    await enterUrl(user, screen.getByPlaceholderText('serviceUrl.placeholder'), 'https://example.test/wfs');
+    await user.click(screen.getByRole('combobox', { name: 'Authentication' }));
+    await user.click(await screen.findByRole('option', { name: 'Bearer token' }));
+    await user.click(screen.getByRole('button', { name: 'Probe →' }));
+
+    await screen.findByRole('alert');
+    const urlField = screen.getByLabelText(/Service URL/);
+    const tokenField = screen.getByLabelText('Bearer token');
+    expect(urlField.hasAttribute('aria-invalid')).toBe(!credential);
+    expect(tokenField.hasAttribute('aria-invalid')).toBe(credential);
+    expect(tokenField.hasAttribute('aria-describedby')).toBe(credential);
+  });
 });

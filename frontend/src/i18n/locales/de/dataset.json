@@ -881,7 +881,7 @@
       },
       "drift": {
         "none": "Keine Änderung",
-        "drifted": "Änderung erkannt",
+        "drifted": "Spalten bei der letzten Aktualisierung geändert",
         "unknown": "Nicht verglichen"
       }
     },
