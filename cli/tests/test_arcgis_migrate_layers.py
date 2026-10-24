@@ -1295,6 +1295,195 @@ def test_a_rerun_gives_layers_imported_earlier_the_edited_target(
     ]
 
 
+def test_a_rerun_of_an_item_whose_import_finished_skips_the_probe(
+    runner, tmp_path, geolens
+):
+    """A rerun of an item whose import finished reads the source never, and still writes the item metadata and transfers its dataset."""
+    plan_file = _write_plan(tmp_path, rows={A1: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels")], needs_auth=True)
+    keyword = f"POST /records/{dataset_id('Parcels')}/keywords/"
+    preview = service.preview
+
+    def preview_then_break_keywords(seen):
+        reply = preview(seen)
+        geolens.routes[keyword] = (500, _problem(500, "database unavailable"))
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_keywords
+    result, _ = _migrate(
+        runner, plan_file, "--only", A1, "--token", secrets.token_urlsafe(16)
+    )
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][A1]["status"] == "failed"
+
+    service._serve_dataset(dataset_id("Parcels"))
+    geolens.routes[PROBE] = (503, _problem(503, "the service is unavailable"))
+    geolens.seen.clear()
+
+    result, _ = _migrate(
+        runner, plan_file, "--only", A1, "--token", secrets.token_urlsafe(16)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert service.bodies(PROBE) == []
+    assert service.bodies(PREVIEW) == []
+    entry = _state(plan_file)["items"][A1]
+    assert entry["status"] == "done"
+    assert entry["owner_id"] == OPERATOR
+    assert list(entry["last_update"]) == [dataset_id("Parcels")]
+    assert [
+        s for s in geolens.seen if s.method == "POST" and "/keywords/" in s.url
+    ]
+
+
+def test_a_plan_edit_reaches_the_recorded_datasets_without_a_probe(
+    runner, tmp_path, geolens
+):
+    """A plan title and visibility edit reaches the recorded datasets on a rerun, which probes the source never."""
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(geolens, [_layer(0, "Parcels"), _layer(1, "Owners", "Table")])
+    keyword = f"POST /records/{dataset_id('Parcels')}/keywords/"
+    preview = service.preview
+    previews: list[str] = []
+
+    def preview_then_break_keywords(seen):
+        reply = preview(seen)
+        previews.append(seen.json()["layer_name"])
+        if previews == ["Parcels", "Owners"]:
+            geolens.routes[keyword] = (500, _problem(500, "database unavailable"))
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_keywords
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 1
+
+    plan = json.loads(plan_file.read_text())
+    for item_ in plan["items"]:
+        if item_["id"] == A2:
+            item_["target"]["title"] = "Renamed"
+            item_["target"]["visibility"] = "private"
+    plan_file.write_text(json.dumps(plan))
+    service._serve_dataset(dataset_id("Parcels"))
+    geolens.routes[PROBE] = (503, _problem(503, "the service is unavailable"))
+    geolens.seen.clear()
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.bodies(PROBE) == []
+    assert service.bodies(PREVIEW) == []
+    patches = [
+        (s.url.rsplit("/", 1)[-1], s.json())
+        for s in geolens.seen
+        if s.method == "PATCH" and "visibility" in s.json()
+    ]
+    assert patches == [
+        (
+            dataset_id("Parcels"),
+            {
+                "title": "Renamed - Parcels",
+                "visibility": "private",
+                "expected_updated_at": "2026-10-01T00:00:00+00:00",
+            },
+        ),
+        (
+            dataset_id("Owners"),
+            {
+                "title": "Renamed - Owners",
+                "visibility": "private",
+                "expected_updated_at": "2026-10-01T00:00:00+00:00",
+            },
+        ),
+    ]
+    entry = _state(plan_file)["items"][A2]
+    assert entry["status"] == "done"
+    assert list(entry["last_update"]) == [dataset_id("Parcels"), dataset_id("Owners")]
+
+
+def test_a_rerun_after_a_partly_failed_import_probes_again(runner, plan_file, geolens):
+    """A rerun after a layer import failed part way probes the source again and imports the layer that failed."""
+    service = FakeImport(geolens, [_layer(0, "Parcels"), _layer(1, "Owners")])
+    service.job_errors["Owners"] = "boom"
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 1
+    assert _state(plan_file)["items"][A2]["layer_datasets"] == {
+        "0": dataset_id("Parcels")
+    }
+    del service.job_errors["Owners"]
+    geolens.seen.clear()
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert len(service.bodies(PROBE)) == 1
+    assert [b["layer_name"] for b in service.bodies(PREVIEW)] == ["Owners"]
+    entry = _state(plan_file)["items"][A2]
+    assert entry["status"] == "done"
+    assert entry["dataset_ids"] == [dataset_id("Parcels"), dataset_id("Owners")]
+
+
+def test_a_rerun_reports_the_left_out_layers_the_import_recorded(
+    runner, tmp_path, geolens
+):
+    """A rerun of an item whose import finished reports the same left-out layer notes, which it takes from the state file."""
+    plan_file = _write_plan(tmp_path, rows={A2: ITEM_TEXT})
+    service = FakeImport(
+        geolens,
+        [
+            _layer(0, "Districts", "Group Layer"),
+            _layer(1, "Parcels", parent_layer_id=0),
+        ],
+    )
+    keyword = f"POST /records/{dataset_id('Parcels')}/keywords/"
+    preview = service.preview
+
+    def preview_then_break_keywords(seen):
+        reply = preview(seen)
+        geolens.routes[keyword] = (500, _problem(500, "database unavailable"))
+        return reply
+
+    geolens.routes[PREVIEW] = preview_then_break_keywords
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 1
+
+    service._serve_dataset(dataset_id("Parcels"))
+    geolens.routes[PROBE] = (503, _problem(503, "the service is unavailable"))
+    geolens.seen.clear()
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert service.bodies(PROBE) == []
+    notes = _state(plan_file)["items"][A2]["notes"]
+    assert notes == ["Districts: Group Layer layer, not imported"]
+
+
+def test_a_state_file_without_the_recorded_import_resumes_the_full_import(
+    runner, plan_file, geolens
+):
+    """A state file written without the recorded import loads, and a rerun probes the service and imports as before."""
+    service = FakeImport(geolens, [_layer(0, "Parcels")])
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+    assert result.exit_code == 0, result.output
+    state_path = plan_file.parent / "arcgis-migration-state.json"
+    state = json.loads(state_path.read_text())
+    assert state["items"][A2].get("import_pass") == {
+        "notes": [],
+        "layers": {"0": {"label": "Parcels", "layer_id": "0"}},
+    }
+    del state["items"][A2]["import_pass"]
+    state["items"][A2]["status"] = "pending"
+    state["items"][A2]["last_update"] = {}
+    state_path.write_text(json.dumps(state))
+
+    result, _ = _migrate(runner, plan_file, "--only", A2)
+
+    assert result.exit_code == 0, result.output
+    assert len(service.bodies(PROBE)) == 2
+    assert len(service.bodies(PREVIEW)) == 1
+    assert _state(plan_file)["items"][A2]["status"] == "done"
+
+
 ITEM_TEXT = {
     "snippet": "Tax parcels",
     "description": "<p>Parcels from the <b>assessor</b> &amp; the clerk.</p><p>Updated weekly.</p>",
