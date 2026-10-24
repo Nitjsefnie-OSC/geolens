@@ -1,15 +1,15 @@
 """Retain each version's column metadata for restores.
 
-Revision ID: 0093_dataset_version_columns
-Revises: 0092_dataset_group_grant_tenant
+Revision ID: 0094_dataset_version_columns
+Revises: 0093_map_group_grants
 """
 
 from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "0093_dataset_version_columns"
-down_revision: Union[str, None] = "0092_dataset_group_grant_tenant"
+revision: str = "0094_dataset_version_columns"
+down_revision: Union[str, None] = "0093_map_group_grants"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
