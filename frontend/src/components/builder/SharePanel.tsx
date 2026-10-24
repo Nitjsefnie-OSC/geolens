@@ -41,13 +41,15 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { usePublishMap, useCreateShareToken, useRevokeShareToken, useMapShareToken, useUpdateShareToken } from '@/hooks/use-maps';
+import { usePublishMap, useMapAudienceBusy, useCreateShareToken, useRevokeShareToken, useMapShareToken, useUpdateShareToken, useLayersHiddenFromMapGroups } from '@/hooks/use-maps';
 import { checkMapVisibility, nonPublicDatasetsFromError } from '@/api/maps';
 import { useCreateEmbedToken, useMapEmbedTokens, useUpdateEmbedToken, useRevokeEmbedToken } from '@/components/builder/hooks/use-embed-tokens';
 import { normalizeOrigin, WildcardOriginError } from '@/lib/builder/url-normalize';
 // Reuse the same audience-visibility check as the layer-stack badge.
 import { isLayerHiddenFromMapAudience } from '@/components/builder/map-stack';
-import type { MapLayerResponse, MapVisibility } from '@/types/api';
+import { LiveAnnouncement } from '@/components/ui/live-announcement';
+import { MapGroupShare } from '@/components/builder/MapGroupShare';
+import type { GroupRef, MapLayerResponse, MapVisibility } from '@/types/api';
 import { Textarea } from '@/components/ui/textarea';
 
 /**
@@ -153,6 +155,13 @@ const VISIBILITY_OPTIONS: Array<{
     iconClass: 'text-muted-foreground',
     titleKey: 'share.privateTitle',
     descKey: 'share.privateDescription',
+  },
+  {
+    value: 'restricted',
+    icon: Users,
+    iconClass: 'text-primary',
+    titleKey: 'share.restrictedTitle',
+    descKey: 'share.restrictedDescription',
   },
   {
     value: 'internal',
@@ -718,6 +727,8 @@ interface ShareDialogProps {
   layers?: MapLayerResponse[];
   /** Names the embed snippet's iframe; a generic label is used when absent. */
   mapName?: string;
+  /** The groups the map is shared with. The server sends them to the owner and admins only. */
+  groups?: GroupRef[] | null;
 }
 
 /**
@@ -726,7 +737,16 @@ interface ShareDialogProps {
  * ONE place instead of being copied across the get/regenerate handlers.
  * ShareDialog consumes it for presentation only.
  */
-function useShareTokens({ mapId, open }: { mapId: string; open: boolean }) {
+function useShareTokens({
+  mapId,
+  open,
+  probeEmbedTokens = false,
+}: {
+  mapId: string;
+  open: boolean;
+  /** Loads the embed tokens although no share link exists. */
+  probeEmbedTokens?: boolean;
+}) {
   const { t } = useTranslation('builder');
   const createShareToken = useCreateShareToken();
   const revokeShareToken = useRevokeShareToken();
@@ -748,7 +768,7 @@ function useShareTokens({ mapId, open }: { mapId: string; open: boolean }) {
   const shareExpires = shareTokenQuery.data?.expires_at ?? null;
   const isExpired = shareExpires ? new Date(shareExpires) < new Date() : false;
 
-  const embedTokensQuery = useMapEmbedTokens(open && hasShareToken ? mapId : undefined);
+  const embedTokensQuery = useMapEmbedTokens(open && (hasShareToken || probeEmbedTokens) ? mapId : undefined);
   const activeEmbedToken = embedTokensQuery.data?.tokens?.find(
     token => token.is_active && new Date(token.expires_at) > new Date()
   );
@@ -906,10 +926,14 @@ export function ShareDialog({
   saveStatus = hasUnsavedChanges ? 'unsaved' : 'saved',
   layers = [],
   mapName,
+  groups = null,
 }: ShareDialogProps) {
   const { t } = useTranslation('builder');
   const { isEnterprise } = useEdition();
-  const publishMap = usePublishMap();
+  const publishMap = usePublishMap(mapId);
+  const audienceBusy = useMapAudienceBusy();
+  // While the group picker's list is open, Escape closes the list, not the dialog.
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
   // The restrict_public_visibility instance setting caps
   // non-admins at non-public; the server enforces it with a 403, this only
   // disables the Public choice.
@@ -957,7 +981,46 @@ export function ShareDialog({
     [layers, visibility],
   );
 
-  const tokens = useShareTokens({ mapId, open });
+  // Only the owner and admins receive the group list, and only they may change it.
+  const canManageGroups = groups !== null;
+  // Layers the predicate above already lists are left to its stronger warning.
+  const groupHiddenIds = useLayersHiddenFromMapGroups(mapId, visibility as MapVisibility, groups);
+  const groupHiddenLayers = useMemo(
+    () =>
+      layers
+        .filter((layer) => groupHiddenIds.has(layer.id) && !isLayerHiddenFromMapAudience(layer, visibility as MapVisibility))
+        .map((layer) => layer.display_name ?? layer.dataset_name),
+    [layers, groupHiddenIds, visibility],
+  );
+  const groupCount = groups?.length ?? 0;
+  // The level the owner picked but the server has not confirmed. "Specific
+  // groups" on a private map stays here until groups are saved; any change of
+  // the visibility prop discards it.
+  const [choice, setChoice] = useState<{ from: MapVisibility; level: MapVisibility } | null>(null);
+  // A visibility change settles the pending choice, so it cannot come back
+  // if the map later returns to the level it was picked from.
+  if (choice && choice.from !== visibility) setChoice(null);
+  const selectedLevel = choice?.from === visibility ? choice.level : (visibility as MapVisibility);
+  const radioGroupRef = useRef<HTMLDivElement>(null);
+  const [savedNote, setSavedNote] = useState({ text: '', n: 0 });
+  // The level to focus once the audience controls are enabled again: they are
+  // still disabled while the save that cleared the last group settles.
+  const [levelToFocus, setLevelToFocus] = useState<MapVisibility | null>(null);
+  useEffect(() => {
+    if (!levelToFocus || audienceBusy) return;
+    radioGroupRef.current?.querySelector<HTMLElement>(`[data-level="${levelToFocus}"]`)?.focus();
+    setLevelToFocus(null);
+  }, [levelToFocus, audienceBusy]);
+  const groupEditorOpen = canManageGroups && (visibility !== 'private' || selectedLevel === 'restricted');
+  const openedFromChoice = choice?.from === visibility && choice.level === 'restricted';
+
+  // Sharing with groups revokes share links and embed tokens, so the warning
+  // needs the token list even when the map has no share link yet.
+  const tokens = useShareTokens({
+    mapId,
+    open,
+    probeEmbedTokens: groupEditorOpen && visibility === 'private',
+  });
   const {
     hasNonPublic,
     embedTokenRaw,
@@ -1098,7 +1161,32 @@ export function ShareDialog({
       });
   }
 
+  // Restricted is reached by saving groups; from internal or public it needs
+  // groups already on file, and only the owner or an admin can change them.
+  const restrictedBlocked = !canManageGroups || (visibility !== 'private' && groupCount === 0);
+
+  function optionDescription(opt: (typeof VISIBILITY_OPTIONS)[number], publicBlocked: boolean): string {
+    if (publicBlocked) return t('common:visibilityPublicAdminOnly');
+    if (opt.value === 'restricted' && restrictedBlocked && canManageGroups) {
+      return t('share.restrictedNeedsGroups');
+    }
+    if (opt.value === 'private' && visibility === 'restricted') {
+      return t('share.privateDescriptionRestricted');
+    }
+    return t(opt.descKey);
+  }
+
+  // Clearing the last group leaves the map private and closes the editor, so
+  // the result is read out here and focus moves to the level that is now checked.
+  function handleGroupsSaved(saved: string) {
+    if (saved !== 'private') return;
+    setChoice(null);
+    setSavedNote((prev) => ({ text: t('share.groups.savedPrivate'), n: prev.n + 1 }));
+    setLevelToFocus('private');
+  }
+
   function handleVisibilitySelect(newVisibility: MapVisibility) {
+    setChoice(newVisibility === 'restricted' && visibility === 'private' ? { from: 'private', level: 'restricted' } : null);
     if (newVisibility === visibility) return;
     // A fresh attempt clears any stale refusal from a previous one.
     setPublishBlocked(null);
@@ -1111,6 +1199,8 @@ export function ShareDialog({
       if (newVisibility === 'public') checkPublicEligibility();
       return;
     }
+    // From private, the group editor does the work: saving groups restricts the map.
+    if (newVisibility === 'restricted' && visibility === 'private') return;
     void handleVisibilityChange(newVisibility);
   }
 
@@ -1127,18 +1217,19 @@ export function ShareDialog({
     // stale once it lands (a mapId change instead remounts the dialog).
     const requestId = ++publishRequestId.current;
     try {
-      const updated = await publishMap.mutateAsync({ id: mapId, visibility: newVisibility });
+      const { clearedGroups, visibility: effective } = await publishMap.mutateAsync({ id: mapId, visibility: newVisibility });
       if (!isMountedRef.current || publishRequestId.current !== requestId) return;
-      // A map still shared with groups stays restricted when Private is picked.
-      const effective = updated?.visibility ?? newVisibility;
       if (effective === 'public') {
         toast.success(t('toasts.mapNowPublic'));
       } else if (effective === 'internal') {
         toast.success(t('toasts.mapNowInternal'));
+      } else if (effective === 'restricted' && newVisibility === 'restricted') {
+        toast.success(t('toasts.mapNowRestricted'));
       } else if (effective === 'restricted') {
+        // A map still shared with groups stays restricted when Private is picked.
         toast.warning(t('toasts.mapStillRestricted'));
       } else {
-        toast.success(t('toasts.mapNowPrivate'));
+        toast.success(t(clearedGroups ? 'toasts.mapNowPrivateGroupsCleared' : 'toasts.mapNowPrivate'));
       }
       if (effective !== 'public') {
         tokens.clearSharedState();
@@ -1220,7 +1311,12 @@ export function ShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      <DialogContent
+        className="sm:max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto"
+        onEscapeKeyDown={(event) => {
+          if (groupPickerOpen) event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{t('share.title')}</DialogTitle>
           <DialogDescription>{t('share.dialogDescription')}</DialogDescription>
@@ -1276,40 +1372,56 @@ export function ShareDialog({
               </p>
             </div>
           )}
+          {groupHiddenLayers.length > 0 && (
+            <div
+              data-testid="share-group-hidden-warning"
+              className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-foreground"
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />
+              <p>{t('share.groupHiddenWarning', { layers: groupHiddenLayers.join(', ') })}</p>
+            </div>
+          )}
 
           {/* Visibility selector */}
           <div className="space-y-2">
             <p className="text-sm font-semibold">{t('share.visibilityTitle')}</p>
-            <div className="space-y-1.5" role="radiogroup" aria-label={t('share.visibilityTitle')}>
-              {VISIBILITY_OPTIONS.map((opt) => {
+            <div
+              ref={radioGroupRef}
+              className="space-y-1.5"
+              role="radiogroup"
+              aria-label={t('share.visibilityTitle')}
+            >
+              {VISIBILITY_OPTIONS.filter(
+                (opt) => opt.value !== 'restricted' || canManageGroups || visibility === 'restricted',
+              ).map((opt) => {
                 const Icon = opt.icon;
-                const isActive = visibility === opt.value;
+                const isActive = selectedLevel === opt.value;
                 // A non-admin cannot move a map TO public while
                 // the instance restricts public visibility to admins.
                 const publicBlocked = opt.value === 'public' && !canSetPublic;
+                const blocked = publicBlocked || (opt.value === 'restricted' && !isActive && restrictedBlocked);
                 return (
                   <button
                     key={opt.value}
                     type="button"
                     role="radio"
+                    data-level={opt.value}
                     aria-checked={isActive}
                     className={cn(
                       'cursor-pointer w-full flex items-start gap-3 rounded-lg border px-3 py-2.5 text-start transition-colors',
                       isActive
                         ? 'ring-2 ring-ring border-primary bg-primary/5'
                         : 'border-border hover:border-muted-foreground/30 hover:bg-accent/50',
-                      publicBlocked && 'cursor-not-allowed opacity-60',
+                      blocked && 'cursor-not-allowed opacity-60',
                     )}
                     onClick={() => handleVisibilitySelect(opt.value)}
-                    disabled={publishMap.isPending || publicBlocked}
+                    disabled={audienceBusy || blocked}
                   >
                     <Icon className={cn('h-4 w-4 mt-0.5 shrink-0', opt.iconClass)} />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold">{t(opt.titleKey)}</p>
                       <p className="text-xs text-muted-foreground">
-                        {publicBlocked
-                          ? t('common:visibilityPublicAdminOnly')
-                          : t(opt.descKey)}
+                        {optionDescription(opt, publicBlocked)}
                       </p>
                     </div>
                   </button>
@@ -1442,6 +1554,20 @@ export function ShareDialog({
               <Loader2 className="h-3 w-3 animate-spin" />
               {t('share.updatingVisibility')}
             </div>
+          )}
+
+          <LiveAnnouncement text={savedNote.text} trigger={String(savedNote.n)} />
+
+          {groups && groupEditorOpen && (
+            <MapGroupShare
+              mapId={mapId}
+              visibility={visibility}
+              groups={groups}
+              hasLinks={hasShareToken || Boolean(activeEmbedToken)}
+              focusOnOpen={openedFromChoice}
+              onSaved={handleGroupsSaved}
+              onPickerOpenChange={setGroupPickerOpen}
+            />
           )}
 
           {/* Share link section (only for public maps) */}
