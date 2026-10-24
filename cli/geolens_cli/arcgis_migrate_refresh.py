@@ -101,19 +101,9 @@ def _find_run(
 ) -> Any | None:
     """The refresh run *marker* names, by its id or its ingest job, looked for
     through the dataset's whole history, newest first."""
-    from geolens.api.datasets import (
-        list_dataset_refresh_runs_datasets_dataset_id_refresh_runs_get as list_runs,
-    )
-
     skip = 0
     while True:
-        page = ctx.geolens.call(
-            list_runs.sync_detailed,
-            dataset_id=UUID(dataset_id),
-            skip=skip,
-            limit=RUN_PAGE,
-            **kwargs,
-        )
+        page = _run_page(ctx, dataset_id, skip, RUN_PAGE, **kwargs)
         for run in page.runs:
             if str(run.id) == marker.get("run") or (
                 marker.get("job") and str(_value(run.ingest_job_id)) == marker["job"]
@@ -122,6 +112,84 @@ def _find_run(
         skip += len(page.runs)
         if not page.runs or skip >= page.total:
             return None
+
+
+def _verification(run: Any) -> dict:
+    found = _value(getattr(run, "verification", None))
+    if hasattr(found, "to_dict"):
+        found = found.to_dict()
+    return found if isinstance(found, dict) else {}
+
+
+def _acceptance_outcome(
+    ctx: MigrationContext, dataset_id: str, blocked_id: str
+) -> tuple[Any | None, str]:
+    """The run carrying out the acceptance of blocked run *blocked_id*, through
+    successors that were blocked again and accepted in turn, and the last
+    blocked run of that chain. No run while that one awaits acceptance."""
+    held, seen = blocked_id, set()
+    while held not in seen:
+        seen.add(held)
+        run = _find_run(ctx, dataset_id, {"run": held})
+        taken = (
+            None
+            if run is None
+            else _verification(run).get("acceptance_consumed_by_run_id")
+        )
+        if taken is None:
+            return None, held
+        run = _find_run(ctx, dataset_id, {"run": str(taken)})
+        if run is None or str(run.status) != "blocked":
+            return run, held
+        held = str(run.id)
+    return None, held
+
+
+def _run_page(
+    ctx: MigrationContext, dataset_id: str, skip: int, limit: int, **kwargs: Any
+) -> Any:
+    from geolens.api.datasets import (
+        list_dataset_refresh_runs_datasets_dataset_id_refresh_runs_get as list_runs,
+    )
+
+    return ctx.geolens.call(
+        list_runs.sync_detailed,
+        dataset_id=UUID(dataset_id),
+        skip=skip,
+        limit=limit,
+        **kwargs,
+    )
+
+
+def _adopt_pending(
+    ctx: MigrationContext, entry: ItemState, dataset_id: str, marker: Mapping[str, Any]
+) -> str | None:
+    """Settle a refresh request whose answer the last run never saw: the one
+    run the operator started since is adopted as the marker's run, and none
+    means the request never landed. Why it can't be settled, or None."""
+    before = whole_number(marker.get("pending")) or 0
+    page = _run_page(ctx, dataset_id, 0, RUN_PAGE)
+    added = max(page.total - before, 0)
+    if added > len(page.runs):
+        return (
+            "more refreshes were started since a request whose answer was lost "
+            "than one page of history shows, so the one it sent can't be found"
+        )
+    # Newest first, so the runs added since the request are the first.
+    started = page.runs[:added]
+    ours = [run for run in started if str(_value(run.triggered_by)) == marker.get("by")]
+    if len(ours) > 1:
+        return (
+            "more than one refresh was started since a request whose answer was "
+            "lost, so none can be told from the one it sent"
+        )
+    settled = {k: v for k, v in marker.items() if k != "pending"}
+    if ours:
+        entry.refreshing[dataset_id] = {**settled, "run": str(ours[0].id)}
+    else:
+        del entry.refreshing[dataset_id]
+    ctx.save()
+    return None
 
 
 def _published_unchanged(
@@ -145,6 +213,37 @@ def _owner(dataset: Any) -> str | None:
     return None if owner is None else str(owner)
 
 
+def _marker_run(
+    ctx: MigrationContext, entry: ItemState, dataset_id: str, marker: dict
+) -> tuple[Any | None, dict, str | None]:
+    """The run *marker* answers to, a blocked one followed to the run carrying
+    out its acceptance; the marker as saved; and, while the last blocked run
+    awaits acceptance, why the dataset must be left alone."""
+    if "blocked" not in marker:
+        run = _find_run(ctx, dataset_id, marker)
+        if run is None or str(run.status) != "blocked":
+            return run, marker, None
+        # Blocked after the run that sent it stopped watching.
+        marker = {k: v for k, v in marker.items() if k not in ("run", "job")}
+        marker["blocked"] = str(run.id)
+    run, held = _acceptance_outcome(ctx, dataset_id, marker["blocked"])
+    marker = {**marker, "blocked": held}
+    if entry.refreshing.get(dataset_id) != marker:
+        entry.refreshing[dataset_id] = marker
+        ctx.save()
+    if run is not None:
+        return run, marker, None
+    # A new refresh would replace the run the acceptance has to name.
+    return (
+        None,
+        marker,
+        (
+            "its refresh stopped for review and hasn't been accepted. Accept "
+            f"with: geolens refresh {dataset_id} --accept-blocked-run {held}"
+        ),
+    )
+
+
 def changed_in_geolens(
     ctx: MigrationContext, entry: ItemState, dataset_id: str, dataset: Any
 ) -> str | None:
@@ -158,10 +257,26 @@ def changed_in_geolens(
     finished.
     """
     marker = entry.refreshing.get(dataset_id)
-    run = _find_run(ctx, dataset_id, marker) if marker else None
+    if marker and "pending" in marker:
+        unsettled = _adopt_pending(ctx, entry, dataset_id, marker)
+        if unsettled:
+            return unsettled
+        marker = entry.refreshing.get(dataset_id)
+    run = None
+    if marker:
+        run, marker, held = _marker_run(ctx, entry, dataset_id, marker)
+        if held:
+            return held
     if run is not None:
         if str(run.status) not in _ENDED:
             return "a refresh an earlier run started is still running"
+        if "blocked" in marker:
+            # The accepted successor is started by whoever accepted the run, and
+            # publishes over the live revision it found.
+            found = whole_number(_verification(run).get("data_revision"))
+            marker = {**marker, "by": str(_value(run.triggered_by))}
+            if found is not None:
+                marker["revision"] = found
         # The admin who started the run, who may not be this run's operator.
         if str(run.status) == "succeeded" and _published_unchanged(
             ctx, dataset, marker
@@ -214,6 +329,12 @@ def _wait_for_run(
     if status == "succeeded":
         return True, None
     if status == "blocked":
+        # Kept so a rerun finds the run the operator accepts it with.
+        entry.refreshing[dataset_id] = {
+            **{k: v for k, v in marker.items() if k not in ("run", "job")},
+            "blocked": str(run.id),
+        }
+        ctx.save()
         found = _value(run.verification)
         poll = RefreshPollResult(
             status,
@@ -256,6 +377,19 @@ def _start_refresh(
     url = _origin_url(dataset)
     if url is None and (row.get("sharing") or {}).get("access") != "public":
         return "its stored source can't be read, so the ArcGIS token was not sent"
+    # Recorded before the request: if its answer is lost, a rerun adopts the
+    # run it started.
+    try:
+        runs_before = _run_page(ctx, dataset_id, 0, 1).total
+    except GeoLensError as exc:
+        return f"reading the dataset's refresh history failed, {exc}"
+    entry.refreshing[dataset_id] = {
+        "pending": runs_before,
+        "revision": revision,
+        "by": ctx.operator_id,
+        "owner": _owner(dataset),
+    }
+    ctx.save()
     try:
         accepted = _send(
             ctx,
@@ -267,9 +401,15 @@ def _start_refresh(
             expected=202,
         )
     except GeoLensError as exc:
-        return f"GeoLens refused the refresh, {exc}"
+        if exc.status >= 500:
+            # A gateway can answer 5xx after GeoLens queued the run, so the
+            # marker stays for the next run to adopt it.
+            return f"the refresh got no usable answer, {exc}"
+        return _settle_unrecorded(
+            ctx, entry, dataset_id, f"GeoLens refused the refresh, {exc}"
+        )
     except ItemFailed as exc:
-        return str(exc)
+        return _settle_unrecorded(ctx, entry, dataset_id, str(exc))
     entry.refreshing[dataset_id] = {
         "run": str(accepted.run_id),
         "revision": revision,
@@ -492,6 +632,8 @@ def _bring_one(
     if not ended:
         return problem
     if problem:
+        if "blocked" in entry.refreshing[dataset_id]:
+            return problem
         return _settle_unrecorded(ctx, entry, dataset_id, problem)
     marker = entry.refreshing[dataset_id]
     published = get_dataset(ctx, dataset_id)
@@ -566,7 +708,7 @@ def _settle_unrecorded(
 ) -> str:
     """Drop the marker of an ended run whose result isn't recorded, so the
     next run compares with the record from before it."""
-    del entry.refreshing[dataset_id]
+    entry.refreshing.pop(dataset_id, None)
     ctx.save()
     return problem
 
