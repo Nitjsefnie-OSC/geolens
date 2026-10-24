@@ -1381,7 +1381,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     "backend/app/modules/auth/oauth/service.py": 1130,
     # Admin mutations share locking and audit outcomes; the catalog stats measure
     # live and kept-version storage.
-    "backend/app/modules/admin/service.py": 1050,
+    "backend/app/modules/admin/service.py": 1054,
     # Ingest admission, staging, job settlement and table registration share one
     # orchestration boundary.
     "backend/app/processing/ingest/service.py": 1559,
@@ -1401,7 +1401,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # Feature writes, single and batch, share the dataset guards, the database
     # error mapping and the catalog refresh; create also carries idempotent
     # repeats and the dry run.
-    "backend/app/modules/catalog/features/router.py": 1726,
+    "backend/app/modules/catalog/features/router.py": 1725,
     # Native search and OGC Records share visibility, query parsing and pagination.
     "backend/app/modules/catalog/search/router.py": 1419,
     # STAC endpoints share visibility, extent, lineage and pagination conformance rules.
@@ -1430,7 +1430,7 @@ _MODULE_LOC_CAPS: dict[str, int] = {
     # capture, and the create dry run checks the table's kind, insert triggers
     # and rules, and the shapes that run user code on insert, with the same
     # catalog probes.
-    "backend/app/modules/catalog/features/service.py": 1639,
+    "backend/app/modules/catalog/features/service.py": 1643,
     # Dataset visibility, and the VRT member counts and extents each requester
     # may see, share the permission extension's one filter; map reads share
     # the one map guard beside it.
