@@ -340,7 +340,9 @@ export function AttributeTableDrawer({
           {layerName}
         </h2>
       )}
-      {pickerShown && (
+      {/* The raw condition, not pickerShown: it is the same truthiness and it
+          narrows pickerLayers and onLayerChange for the handler below. */}
+      {pickerLayers && onLayerChange && (
         <select
           ref={pickerRef}
           aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
