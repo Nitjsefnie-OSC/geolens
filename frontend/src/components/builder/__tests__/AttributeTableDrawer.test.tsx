@@ -63,6 +63,9 @@ vi.mock('@/api/features', () => ({
 function makeFakeMap() {
   const layers = new Set<string>();
   const sources = new Set<string>();
+  // Registered 'style.load' listeners: the round-5 tests fire a style
+  // replacement through these and assert the drawer unsubscribed on unmount.
+  const styleLoadListeners = new Set<() => void>();
   return {
     getLayer: vi.fn((id: string) => (layers.has(id) ? {} : undefined)),
     removeLayer: vi.fn((id: string) => layers.delete(id)),
@@ -76,7 +79,24 @@ function makeFakeMap() {
     }),
     fitBounds: vi.fn(),
     resize: vi.fn(),
-  } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>>;
+    on: vi.fn((event: string, handler: () => void) => {
+      if (event === 'style.load') styleLoadListeners.add(handler);
+    }),
+    off: vi.fn((event: string, handler: () => void) => {
+      if (event === 'style.load') styleLoadListeners.delete(handler);
+    }),
+    // A style replacement drops the custom sources and layers, then runs the
+    // registered 'style.load' listeners.
+    fireStyleLoad: () => {
+      sources.clear();
+      layers.clear();
+      for (const handler of [...styleLoadListeners]) handler();
+    },
+    styleLoadListenerCount: () => styleLoadListeners.size,
+  } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>> & {
+    fireStyleLoad: () => void;
+    styleLoadListenerCount: () => number;
+  };
 }
 
 beforeAll(() => {
@@ -1237,5 +1257,426 @@ describe('docked attribute table (round 4)', () => {
     expect(map.addSource).toHaveBeenCalledTimes(1);
     expect(map.addLayer).toHaveBeenCalledTimes(2);
     expect(map.fitBounds).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 5: the rows filter never carries a literal the rows endpoint rejects
+// (red until the round-5 guard lands). One incompatible literal anywhere makes
+// the WHOLE filter unsupported: the drawer then requests every row and shows
+// the notice, exactly as for a filter that has no CQL2 form at all.
+// ---------------------------------------------------------------------------
+
+describe('round 5: filter literal compatibility', () => {
+  interface Column {
+    name: string;
+    type: string;
+  }
+
+  const GID: Column = { name: 'gid', type: 'integer' };
+
+  function typedLayer(column: Column, extraColumns: Column[], filter: unknown) {
+    return makeLayer({
+      dataset_column_info: [GID, ...extraColumns, column],
+      filter: filter as never,
+    });
+  }
+
+  function expectAllRowsFallback() {
+    // The unsupported path requests EVERY row: no `filter` param goes out, and
+    // the notice tells the reader why the table disagrees with the map.
+    expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[5]).toBeUndefined();
+    expect(screen.getByTestId('attribute-table-filter-unsupported')).toBeInTheDocument();
+  }
+
+  function expectFilterSent(filter: unknown) {
+    expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[5]).toBe(JSON.stringify(filter));
+    expect(screen.queryByTestId('attribute-table-filter-unsupported')).toBeNull();
+  }
+
+  const INT_WIDTHS = [
+    { width: 'smallint', outOfRange: 32768, boundary: 32767 },
+    { width: 'integer', outOfRange: 2147483648, boundary: 2147483647 },
+    // 2**63 - 1 is not representable as a JS number, so the largest value the
+    // guard must still send on bigint is the safe-integer boundary.
+    { width: 'bigint', outOfRange: 2 ** 63, boundary: Number.MAX_SAFE_INTEGER },
+  ];
+
+  it.each(INT_WIDTHS)(
+    'a fractional literal on a $width column makes the whole filter unsupported',
+    ({ width }) => {
+      render(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], 1.5])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectAllRowsFallback();
+    },
+  );
+
+  it.each(INT_WIDTHS)(
+    'a literal just out of the $width range drops the filter while the boundary value still converts',
+    ({ width, outOfRange, boundary }) => {
+      const view = render(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], outOfRange])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectAllRowsFallback();
+
+      // The exact boundary is compatible: it goes out verbatim as CQL2.
+      view.rerender(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], boundary])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectFilterSent({ op: '>', args: [{ property: 'n' }, boundary] });
+    },
+  );
+
+  it('one incompatible member of an in list drops the whole filter, never a partial one', () => {
+    const view = render(
+      <AttributeTableDrawer
+        layer={typedLayer({ name: 'n', type: 'integer' }, [], ['in', ['get', 'n'], ['literal', [1, 2.5, 3]]])}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+    expectAllRowsFallback();
+
+    // The same list with every member compatible converts and is sent whole.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={typedLayer({ name: 'n', type: 'integer' }, [], ['in', ['get', 'n'], ['literal', [1, 3]]])}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+    expectFilterSent({ op: 'in', args: [{ property: 'n' }, [1, 3]] });
+  });
+
+  it('one incompatible condition combined with a compatible one drops the whole filter', () => {
+    const text: Column = { name: 'name', type: 'text' };
+    const view = render(
+      <AttributeTableDrawer
+        layer={typedLayer(
+          { name: 'n', type: 'integer' },
+          [text],
+          ['all', ['==', ['get', 'name'], 'a'], ['>', ['get', 'n'], 1.5]],
+        )}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+    expectAllRowsFallback();
+
+    // Both conditions compatible: the full combined filter converts and goes
+    // out as one CQL2 `and`, alongside the composed requireKnownFields guard.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={typedLayer(
+          { name: 'n', type: 'integer' },
+          [text],
+          ['all', ['==', ['get', 'name'], 'a'], ['>', ['get', 'n'], 2]],
+        )}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+    expectFilterSent({
+      op: 'and',
+      args: [
+        { op: '=', args: [{ property: 'name' }, 'a'] },
+        { op: '>', args: [{ property: 'n' }, 2] },
+      ],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 5: the row selection mirrors the map highlight across style reloads
+// (red until the drawer re-adds its highlight after 'style.load', the
+// builder's repaint precedent — use-ephemeral-layers re-adds its overlay the
+// same way). At every moment a row shows as selected iff the map draws the
+// highlight.
+// ---------------------------------------------------------------------------
+
+describe('round 5: selection vs style reload', () => {
+  const LINE_LAYER = 'attribute-table-highlight-line';
+  const POINT_LAYER = 'attribute-table-highlight-point';
+  const SOURCE = 'attribute-table-highlight';
+
+  const highlightPainted = (map: ReturnType<typeof makeFakeMap>) =>
+    Boolean(map.getLayer(LINE_LAYER) && map.getLayer(POINT_LAYER) && map.getSource(SOURCE));
+
+  function selectedRows(): HTMLElement[] {
+    return Array.from(document.querySelectorAll<HTMLElement>('tr[data-index]')).filter(
+      (row) => row.getAttribute('aria-selected') === 'true',
+    );
+  }
+
+  async function highlightRow(map: ReturnType<typeof makeFakeMap>, rowName: string) {
+    const row = screen.getByRole('row', { name: rowName });
+    fireEvent.click(row);
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalled());
+    return row;
+  }
+
+  it('a style reload repaints the highlight and the row stays selected', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    const row = await highlightRow(map, 'Show row 2 on the map');
+    expect(highlightPainted(map)).toBe(true);
+    expect(selectedRows()).toEqual([row]);
+
+    act(() => {
+      map.fireStyleLoad();
+    });
+
+    // Repaint-then-keep-selection: the highlight is back on the fresh style
+    // and the same row still reads as selected — never one without the other.
+    expect(highlightPainted(map)).toBe(true);
+    expect(selectedRows()).toEqual([row]);
+  });
+
+  it('two consecutive style reloads keep the highlight and the selection aligned', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    const row = await highlightRow(map, 'Show row 2 on the map');
+    for (let reload = 0; reload < 2; reload++) {
+      act(() => {
+        map.fireStyleLoad();
+      });
+      expect(highlightPainted(map)).toBe(true);
+      expect(selectedRows()).toEqual([row]);
+    }
+  });
+
+  it('a style reload while a row request is in flight still leaves the token in charge', async () => {
+    const map = makeFakeMap();
+    const pending: Array<(value: Awaited<ReturnType<typeof getFeature>>) => void> = [];
+    vi.mocked(getFeature).mockImplementation(
+      () => new Promise((resolve) => { pending.push(resolve); }),
+    );
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    // Two clicks; the FIRST response is the stale one. The reload fires while
+    // both are unresolved.
+    const row2 = screen.getByRole('row', { name: 'Show row 2 on the map' });
+    const row1 = screen.getByRole('row', { name: 'Show row 1 on the map' });
+    fireEvent.click(row2);
+    fireEvent.click(row1);
+    act(() => {
+      map.fireStyleLoad();
+    });
+
+    // The stale (first) response is dropped by the token: nothing paints and
+    // nothing is selected.
+    await act(async () => {
+      pending[0]({
+        type: 'Feature',
+        id: 2,
+        geometry: { type: 'Point', coordinates: [12.5, 48.1] },
+        properties: {},
+      });
+    });
+    expect(highlightPainted(map)).toBe(false);
+    expect(selectedRows()).toEqual([]);
+
+    // The fresh (second) response paints into the new style: highlight and
+    // selection arrive together.
+    await act(async () => {
+      pending[1]({
+        type: 'Feature',
+        id: 1,
+        geometry: { type: 'Point', coordinates: [3, 3] },
+        properties: {},
+      });
+    });
+    expect(highlightPainted(map)).toBe(true);
+    expect(selectedRows()).toEqual([row1]);
+  });
+
+  it('a style reload after a layer switch or after close paints nothing and selects nothing', async () => {
+    const map = makeFakeMap();
+    const view = render(
+      <AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />,
+    );
+    await highlightRow(map, 'Show row 2 on the map');
+    expect(highlightPainted(map)).toBe(true);
+
+    // Switch the drawer to another layer: the old highlight is cleared.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={makeLayer({ id: 'layer-2', dataset_id: 'dataset-2' })}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: map }}
+      />,
+    );
+    expect(highlightPainted(map)).toBe(false);
+    expect(selectedRows()).toEqual([]);
+    const sourcesAtSwitch = vi.mocked(map.addSource).mock.calls.length;
+    const layersAtSwitch = vi.mocked(map.addLayer).mock.calls.length;
+
+    // A reload now must not resurrect the previous layer's highlight.
+    act(() => {
+      map.fireStyleLoad();
+    });
+    expect(vi.mocked(map.addSource).mock.calls.length).toBe(sourcesAtSwitch);
+    expect(vi.mocked(map.addLayer).mock.calls.length).toBe(layersAtSwitch);
+    expect(selectedRows()).toEqual([]);
+
+    // After close the same reload paints nothing either.
+    view.unmount();
+    act(() => {
+      map.fireStyleLoad();
+    });
+    expect(vi.mocked(map.addSource).mock.calls.length).toBe(sourcesAtSwitch);
+    expect(vi.mocked(map.addLayer).mock.calls.length).toBe(layersAtSwitch);
+    expect(selectedRows()).toEqual([]);
+  });
+
+  it('the drawer unsubscribes its style.load listener on unmount', async () => {
+    const map = makeFakeMap();
+    const view = render(
+      <AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />,
+    );
+    await highlightRow(map, 'Show row 2 on the map');
+    // The drawer holds a style.load subscription while its highlight can come
+    // back.
+    expect(map.styleLoadListenerCount()).toBeGreaterThan(0);
+
+    view.unmount();
+    expect(map.styleLoadListenerCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 5: the header shows the layer name exactly once in every state (red
+// until the picker stops doubling the title).
+// ---------------------------------------------------------------------------
+
+describe('round 5: the layer name appears exactly once', () => {
+  function rowsWithExactTotal() {
+    const rows = makeRowsReturn();
+    (rows.data as { total_kind?: string }).total_kind = 'exact';
+    vi.mocked(useDatasetRows).mockReturnValue(rows as never);
+  }
+
+  function assertNameOnce(table: HTMLElement, name: string) {
+    const header = table.querySelector('header');
+    expect(header).not.toBeNull();
+    // Once, counting BOTH the title element and the picker's rendered selected
+    // option text: one of the two is enough.
+    expect(within(header as HTMLElement).getAllByText(name)).toHaveLength(1);
+    // The section's accessible name still resolves to the layer name.
+    expect(screen.getByRole('region', { name })).toBe(table);
+  }
+
+  function assertSqueezeOrder(header: HTMLElement) {
+    // Nothing that can squeeze the name away carries shrink-0.
+    const count = within(header).getByText('attributes.showingExact');
+    expect(count.className).not.toContain('shrink-0');
+  }
+
+  it.each([
+    { label: 'picker hidden (no other table-capable layer)', withLayers: false },
+    { label: 'picker shown', withLayers: true },
+  ])('the name occurs exactly once: $label', ({ withLayers }) => {
+    rowsWithExactTotal();
+    const trails = makeLayer({ id: 'l-trails', display_name: 'Trails' });
+    const parcels = makeLayer({ id: 'l-parcels', display_name: 'Parcels' });
+    render(
+      <AttributeTableDrawer
+        layer={trails}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+        layers={withLayers ? [trails, parcels] : undefined}
+        onLayerChange={withLayers ? vi.fn() : undefined}
+      />,
+    );
+
+    const table = screen.getByRole('region', { name: 'Trails' });
+    assertNameOnce(table, 'Trails');
+    const header = table.querySelector('header')!;
+
+    const picker = within(table).queryByRole('combobox');
+    if (picker) {
+      // The picker keeps its accessible name and its width cap while it
+      // carries the name.
+      expect(picker).toHaveAccessibleName();
+      expect(picker.className).toMatch(/max-w-/);
+    } else {
+      // Without the picker the title is the name carrier: min-width plus
+      // truncation, exactly as the merged header has always pinned.
+      const title = within(header).getByTestId('attribute-table-drawer-title');
+      expect(title).toHaveClass('truncate');
+      expect(title.className).toMatch(/min-w-/);
+    }
+    assertSqueezeOrder(header);
+  });
+
+  it('adding and removing the other table-capable layer flips the picker and the name stays single', () => {
+    rowsWithExactTotal();
+    const trails = makeLayer({ id: 'l-trails', display_name: 'Trails' });
+    const parcels = makeLayer({ id: 'l-parcels', display_name: 'Parcels' });
+    const view = render(
+      <AttributeTableDrawer
+        layer={trails}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+
+    const table = () => screen.getByRole('region', { name: 'Trails' });
+    const nameCount = () => within(table().querySelector('header')!).getAllByText('Trails').length;
+    expect(within(table()).queryByRole('combobox')).toBeNull();
+    expect(nameCount()).toBe(1);
+
+    // A second eligible layer appears: the picker shows up and the name shows
+    // only once — as the picker's selected value.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={trails}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+        layers={[trails, parcels]}
+        onLayerChange={vi.fn()}
+      />,
+    );
+    expect(within(table()).getByRole('combobox')).toBeInTheDocument();
+    expect(nameCount()).toBe(1);
+
+    // The other layer is removed again: the picker goes and the name is back
+    // to the title alone.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={trails}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: makeFakeMap() }}
+      />,
+    );
+    expect(within(table()).queryByRole('combobox')).toBeNull();
+    expect(nameCount()).toBe(1);
   });
 });

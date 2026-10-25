@@ -51,11 +51,15 @@ vi.mock('react-router', async (importOriginal) => {
 // (mockPageMap is null unless a test installs one), so the docked table's
 // fit-and-highlight can be observed at page level.
 let mockPageMap: (MaplibreMap & Record<string, ReturnType<typeof vi.fn>>) | null = null;
+// Round 5: set before a (re)render to make the BuilderMap module mock throw,
+// exercising MapErrorBoundary's fallback.
+let mockBuilderMapThrows = false;
 
 vi.mock('@/components/builder/BuilderMap', async () => {
   const { useEffect } = await import('react');
   return {
     BuilderMap: ({ onMapRef }: { onMapRef?: (map: unknown) => void }) => {
+      if (mockBuilderMapThrows) throw new Error('BuilderMap crashed for the round-5 test');
       useEffect(() => {
         onMapRef?.(mockPageMap);
         return () => { onMapRef?.(null); };
@@ -112,15 +116,28 @@ vi.mock('@/components/builder/SettingsEditorScene', () => ({
   SettingsEditorScene: () => <div data-testid="settings-editor-scene" />,
 }));
 
-vi.mock('@/components/map-plugins', () => ({
-  PluginHost: () => null,
-  PluginSidebar: () => null,
-  getPlugins: () => [],
-  getEnabledPluginDefinitions: () => [],
-  getDefaultPluginIds: () => [],
-  resolveAvailablePluginIds: () => [],
-  usePartitionedPlugins: () => ({ byAnchor: {} }),
-}));
+// The round-5 boundary tests need the host's anchor slots in the DOM (the
+// filter chips live in topLeftSlot on the real page) and count its mounts, so
+// the host renders its topLeftSlot inside a testid div.
+const pluginHostMounts = vi.fn();
+
+vi.mock('@/components/map-plugins', async () => {
+  const { useEffect } = await import('react');
+  return {
+    PluginHost: ({ topLeftSlot }: { topLeftSlot?: unknown }) => {
+      useEffect(() => {
+        pluginHostMounts();
+      }, []);
+      return <div data-testid="plugin-host">{topLeftSlot}</div>;
+    },
+    PluginSidebar: () => null,
+    getPlugins: () => [],
+    getEnabledPluginDefinitions: () => [],
+    getDefaultPluginIds: () => [],
+    resolveAvailablePluginIds: () => [],
+    usePartitionedPlugins: () => ({ byAnchor: {} }),
+  };
+});
 
 const loadedMapQuery = {
   data: {
@@ -881,5 +898,138 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     // A close after a switch returns focus to the ORIGINAL opener.
     fireEvent.click(screen.getByRole('button', { name: 'attributeTableDrawer.close' }));
     expect(document.activeElement).toBe(kebabTrigger('l-trails'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 5: the map error boundary wraps BuilderMap alone (red until the
+// overlays move out of MapErrorBoundary). When BuilderMap throws, the fallback
+// replaces only the map; every other part of the map column stays mounted, and
+// Retry remounts BuilderMap without touching PluginHost.
+// ---------------------------------------------------------------------------
+
+describe('MapBuilderPage round 5: the map error boundary wraps BuilderMap alone', () => {
+  beforeEach(() => {
+    mockUseParams.mockReturnValue({ id: 'map-1' });
+    mockIsRail = false;
+    mockIsEditorHidden = false;
+    mockExpandedLayerId = null;
+    mockLocalLayers = [
+      makeLayer({
+        id: 'l-trails',
+        display_name: 'Trails',
+        filter: ['==', ['get', 'name'], 'b'] as never,
+      }),
+    ];
+    mockPageMap = makeFakeMap();
+    mockBuilderMapThrows = false;
+    pluginHostMounts.mockClear();
+    localStorage.clear();
+    vi.mocked(useDatasetRows).mockReturnValue(makeRowsReturn() as never);
+    vi.mocked(useUpdateFeature).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as never);
+    vi.mocked(getFeature).mockResolvedValue({
+      type: 'Feature',
+      id: 2,
+      geometry: { type: 'Point', coordinates: [3, 3] },
+      properties: {},
+    });
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(performance.now());
+      return 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    mockBuilderMapThrows = false;
+    mockPageMap = null;
+  });
+
+  const fallbackHeading = () => screen.getByRole('heading', { name: 'errorBoundary.mapTitle' });
+
+  function openTableViaKebab(layerId: string) {
+    const row = document.getElementById(`stack-row-${layerId}`);
+    if (!row) throw new Error(`missing stack row for ${layerId}`);
+    fireEvent.pointerDown(row.querySelector<HTMLElement>('[data-kebab-trigger]')!, { button: 0 });
+    fireEvent.click(screen.getByTestId('kebab-open-attribute-table'));
+  }
+
+  it('when BuilderMap throws the fallback replaces only the map: toolbar, chips, plugin host and the open table stay mounted', () => {
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+    expect(screen.getByRole('region', { name: 'Trails' })).toBeInTheDocument();
+
+    mockBuilderMapThrows = true;
+    view.rerender(<MapBuilderPage />);
+
+    expect(fallbackHeading()).toBeInTheDocument();
+    expect(screen.queryByTestId('builder-map')).toBeNull();
+    // The overlays that used to sit inside the boundary stay mounted.
+    expect(screen.getByRole('button', { name: 'toolbar.pan' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'filters.toggle' })).toBeInTheDocument();
+    expect(screen.getByTestId('plugin-host')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Trails' })).toBeInTheDocument();
+  });
+
+  it('below 800px the panel buttons survive a BuilderMap crash', () => {
+    mockIsEditorHidden = true;
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+
+    mockBuilderMapThrows = true;
+    view.rerender(<MapBuilderPage />);
+
+    expect(fallbackHeading()).toBeInTheDocument();
+    expect(document.body.querySelector('button[title="dock.notes"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'toolbar.pan' })).toBeInTheDocument();
+    expect(screen.getByTestId('plugin-host')).toBeInTheDocument();
+  });
+
+  it('retry remounts BuilderMap only: PluginHost stays mounted throughout', () => {
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    expect(pluginHostMounts).toHaveBeenCalledTimes(1);
+
+    mockBuilderMapThrows = true;
+    view.rerender(<MapBuilderPage />);
+    expect(fallbackHeading()).toBeInTheDocument();
+    // The host survived the crash: it sits outside the boundary.
+    expect(pluginHostMounts).toHaveBeenCalledTimes(1);
+
+    mockBuilderMapThrows = false;
+    fireEvent.click(screen.getByRole('button', { name: 'errorBoundary.mapRetry' }));
+    expect(screen.getByTestId('builder-map')).toBeInTheDocument();
+    // The retry remounted BuilderMap, never the host.
+    expect(pluginHostMounts).toHaveBeenCalledTimes(1);
+  });
+
+  it('the round-4 dock structure holds against the new map wrapper', () => {
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    const table = screen.getByRole('region', { name: 'Trails' });
+    const mapEl = screen.getByTestId('builder-map');
+    // The plain wrapper carrying the map area's sizing hosts the map and every
+    // round-4 overlay; the table docks as its following sibling.
+    const wrap = table.previousElementSibling as HTMLElement | null;
+    expect(wrap).not.toBeNull();
+    expect(wrap).toHaveClass('relative', 'min-h-0', 'flex-1');
+    expect(wrap).toContainElement(mapEl);
+    expect(wrap).toContainElement(screen.getByTestId('plugin-host'));
+    expect(wrap).toContainElement(screen.getByRole('button', { name: 'toolbar.pan' }));
+    expect(wrap).toContainElement(screen.getByRole('button', { name: 'filters.toggle' }));
+
+    const column = mapEl.closest<HTMLElement>('.relative.min-h-0.min-w-0');
+    expect(column).not.toBeNull();
+    expect(column!.className).toContain('flex-col');
+    expect(column).toContainElement(table);
+    // Every positioned child of the column is a descendant of the wrapper, so
+    // the overlays keep their anchor when the boundary restructures.
+    for (const child of Array.from(column!.children)) {
+      const positioned = child instanceof HTMLElement
+        && (child.classList.contains('absolute') || child.classList.contains('fixed'));
+      if (positioned) expect(wrap.contains(child)).toBe(true);
+    }
   });
 });
