@@ -121,24 +121,24 @@ export function useBuilderLayers(
   const [layersMapId, setLayersMapId] = useState<string | null>(null);
   const layersMapIdRef = useRef<string | null>(null);
   const [localBasemap, setLocalBasemap] = useState<string>('openfreemap-positron');
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const hasUnsavedChangesRef = useRef(false);
-  hasUnsavedChangesRef.current = hasUnsavedChanges;
+  // Unsaved edits other than the camera; these ask before leaving. A moved
+  // camera only enables Save, through hasUnsavedChanges below.
+  const [hasUnsavedEdits, setHasUnsavedChanges] = useState(false);
   // Live camera sampled on moveend, tagged with the map it was taken on. Null
   // until the map has settled once, since a map that never moved can't have
   // changed the view a save would store. The tag matters because direct
-  // /maps/:id navigation keeps this hook and the MapGL instance mounted, and a
-  // sample from the previous map must not be judged against the next map's
-  // saved view. The sample lives in a ref; state holds only whether it differs
+  // /maps/:id navigation keeps this hook mounted, and a sample from the
+  // previous map must not be judged against the next map's saved view. The
+  // sample lives in a ref; state holds only whether it differs
   // from the saved view, so a pan that doesn't flip that answer doesn't
   // re-render the page.
   const liveCameraRef = useRef<CameraSample | null>(null);
   const mapDataRef = useRef(mapData);
   mapDataRef.current = mapData;
   const [cameraUnsaved, setCameraUnsaved] = useState<boolean | null>(null);
-  // The camera the current map was entered on, until the camera leaves it: the
-  // saved view on a fresh load, or the previous map's position after in-page
-  // navigation (nothing repositions the shared instance). Not an edit.
+  const hasUnsavedChanges = hasUnsavedEdits || cameraUnsaved === true;
+  // The camera the current map opened at, until the camera leaves it: its
+  // saved view, or the fit to its layers when it has none. Not an edit.
   const cameraEntryRef = useRef<CameraSample | null>(null);
   // Dirt this hook can't re-derive from server state: plugin toggles and other
   // page-owned edits through markDirty. recheckClean refuses to clear the flag
@@ -946,9 +946,6 @@ export function useBuilderLayers(
     if (showBasemapLabels !== (mapData.show_basemap_labels ?? true)) return false;
     if (!deepEqual(basemapConfig, mapData.basemap_config ?? null)) return false;
     if (!deepEqual(localTerrainConfig, savedTerrainConfig(mapData))) return false;
-    // Every save rewrites center, zoom, bearing and pitch from the live map, so
-    // an unsaved pan here is a pending change to the stored view.
-    if (unsavedCamera()) return false;
 
     // Folder expansion is persisted (prepareLayersForPersistence reads
     // groupMeta) and handleToggleGroupExpand dirties the map, so an
@@ -964,7 +961,7 @@ export function useBuilderLayers(
     return true;
   }, [
     mapData, localName, localDescription, localLegendTitle, localBasemap,
-    showBasemapLabels, basemapConfig, localTerrainConfig, groupMeta, unsavedCamera,
+    showBasemapLabels, basemapConfig, localTerrainConfig, groupMeta,
   ]);
 
   // The recheck must observe the reverted layers, so it runs in an effect after
@@ -986,9 +983,9 @@ export function useBuilderLayers(
     setHasUnsavedChanges(false);
   }, [recheckNonce, computeMapIsClean]);
 
-  // Camera a change of map identity starts from. Re-read on every identity
-  // change: the shared MapGL instance isn't repositioned, so the screen still
-  // shows the previous map's view.
+  // Re-read on every identity change and map instance. MapBuilderPage gives
+  // each map its own BuilderMap, which positions it (saved view or a fit) in a
+  // child effect that runs before this one.
   const currentMapId = mapData?.id ?? null;
   useEffect(() => {
     const map = mapInstance ?? mapInstanceRef.current;
@@ -1020,25 +1017,16 @@ export function useBuilderLayers(
         !(cameraEntryRef.current?.mapId === data.id && sameMapCamera(sample.camera, cameraEntryRef.current.camera)) &&
         !sameMapCamera(sample.camera, savedMapCamera(data));
       setCameraUnsaved(unsaved);
-      // A save clears the flag while the camera stays unsaved-looking, so the
-      // next pan has no flip to re-dirty it through.
-      if (unsaved && !hasUnsavedChangesRef.current) setHasUnsavedChanges(true);
     };
     map.on('moveend', handleMoveEnd);
     return () => { map.off?.('moveend', handleMoveEnd); };
   }, [currentMapId, mapInstance, mapInstanceRef]);
 
-  // An unsaved camera edit is unsaved work (the navigation blocker and
-  // beforeunload read hasUnsavedChanges); anything else asks for the ordinary
-  // recheck, which clears the flag only if nothing else is outstanding.
+  // A save publishes the camera it stored into mapData, and a map switch
+  // replaces mapData, so the last sample is judged again against the new one.
   useEffect(() => {
-    if (cameraUnsaved === null) return;
-    if (unsavedCamera()) {
-      setHasUnsavedChanges(true);
-      return;
-    }
-    requestCleanRecheck();
-  }, [cameraUnsaved, unsavedCamera, requestCleanRecheck]);
+    setCameraUnsaved((prev) => (prev === null ? null : !!unsavedCamera()));
+  }, [unsavedCamera]);
 
   // Identity-stable "is this row a folder group?" lookup. Reads through
   // layersRef so MapBuilderPage's memoized onToggleVisibility needn't depend on
@@ -1163,6 +1151,7 @@ export function useBuilderLayers(
     savedLayerBaseline: savedLayerBaselineRef.current,
     localBasemap, setLocalBasemap,
     hasUnsavedChanges, setHasUnsavedChanges: setHasUnsavedChangesTracked,
+    hasUnsavedEdits,
     requestCleanRecheck,
     expandedLayerId,
     activeEditorTab,

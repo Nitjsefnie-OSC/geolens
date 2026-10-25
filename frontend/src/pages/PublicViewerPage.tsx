@@ -156,6 +156,9 @@ function PublicViewer() {
 
   const parsedCenter = parseCenter(centerParam);
   const parsedZoom = parseZoom(zoomParam);
+  // A map with no saved view opens fitted to its visible layers, as the Builder
+  // does, unless the URL picks the view.
+  const fitLayers = data.has_saved_view === false && !parsedCenter && parsedZoom === null;
 
   const viewState = {
     center_lng: parsedCenter?.lng ?? data.center_lng,
@@ -181,6 +184,7 @@ function PublicViewer() {
             showBasemapLabels={data.show_basemap_labels ?? true}
             terrainConfig={data.terrain_config ?? null}
             initialViewState={viewState}
+            fitLayers={fitLayers}
             visibleLayers={visibleLayers}
             embedToken={embedToken}
             onDrawnChange={setDrawnLayers}
