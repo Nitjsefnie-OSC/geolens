@@ -105,9 +105,6 @@ export function AttributeTableDrawer({
   // paints (a click without usable geometry leaves it), cleared when the
   // layer changes and with the drawer itself.
   const [selectedGid, setSelectedGid] = useState<number | null>(null);
-  useEffect(() => {
-    setSelectedGid(null);
-  }, [layer.id]);
 
   // The layer picker keeps focus across a switch: switching remounts
   // AttributeTable (key={datasetId}) and the focused select with it, so the
