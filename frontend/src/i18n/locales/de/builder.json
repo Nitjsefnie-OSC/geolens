@@ -1458,7 +1458,6 @@
   },
   "attributeTableDrawer": {
     "layerPicker": "Layer der Attributtabelle",
-    "description": "Attributtabelle für {{name}}",
     "filterUnsupported": "Der Filter der Ebene konnte nicht angewendet werden – alle Zeilen werden angezeigt.",
     "resizeHandle": "Attributtabelle in der Größe ändern",
     "close": "Attributtabelle schließen"
