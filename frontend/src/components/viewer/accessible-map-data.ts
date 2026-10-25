@@ -64,6 +64,7 @@ export function geometryBounds(
 
   if (geometry.type === 'GeometryCollection') {
     for (const item of geometry.geometries) {
+      if (item.type === 'GeometryCollection') continue;
       const bounds = geometryBounds(item);
       if (!bounds) continue;
       west = Math.min(west, bounds[0]);
