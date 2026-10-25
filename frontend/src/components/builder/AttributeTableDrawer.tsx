@@ -107,6 +107,47 @@ export function AttributeTableDrawer({
     if (map.getSource(HIGHLIGHT_SOURCE)) map.removeSource(HIGHLIGHT_SOURCE);
   }, [mapRef]);
 
+  // The feature the highlight currently paints, kept so a style replacement
+  // can repaint it: a style.load drops every imperatively added source/layer,
+  // and the analysis mask re-adds its overlay the same way.
+  const highlightFeatureRef = useRef<Awaited<ReturnType<typeof getFeature>> | null>(null);
+
+  // Re-add the highlight source and both layers for a feature, with no fit —
+  // the row-click path adds its fit after painting.
+  const paintHighlight = useCallback(
+    (feature: Awaited<ReturnType<typeof getFeature>>) => {
+      const map = mapRef.current;
+      if (!map) return;
+      map.addSource(HIGHLIGHT_SOURCE, {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: feature.geometry, properties: {} },
+      });
+      map.addLayer({
+        id: HIGHLIGHT_LINE_LAYER,
+        type: 'line',
+        source: HIGHLIGHT_SOURCE,
+        filter: ['!=', '$type', 'Point'],
+        paint: {
+          'line-color': MAP_COLORS.selection.stroke,
+          'line-width': 3,
+        },
+      });
+      map.addLayer({
+        id: HIGHLIGHT_POINT_LAYER,
+        type: 'circle',
+        source: HIGHLIGHT_SOURCE,
+        filter: ['==', '$type', 'Point'],
+        paint: {
+          'circle-radius': 8,
+          'circle-color': MAP_COLORS.selection.fill,
+          'circle-stroke-color': MAP_COLORS.selection.stroke,
+          'circle-stroke-width': 2,
+        },
+      });
+    },
+    [mapRef],
+  );
+
   // Monotonic token for the row-click request: bumped at every click start
   // below, and again in the cleanup (layer change and unmount), so neither an
   // older click on the same layer nor a response from the previous layer can
@@ -120,9 +161,29 @@ export function AttributeTableDrawer({
     if (!open) return;
     return () => {
       rowRequestSeqRef.current += 1;
+      highlightFeatureRef.current = null;
       clearHighlight();
     };
   }, [open, layer.id, clearHighlight]);
+
+  // A style replacement repaints the kept feature's highlight, exactly as long
+  // as it can come back: the subscription ends with the close, the layer
+  // switch, and the unmount, whose cleanup above drops the kept feature, so
+  // nothing repaints after either. Redraw only — never a fit, never a camera
+  // move; the stale-request token still rules any in-flight row response.
+  useEffect(() => {
+    if (!open) return;
+    const map = mapRef.current;
+    if (!map) return;
+    const repaint = () => {
+      const feature = highlightFeatureRef.current;
+      if (feature) paintHighlight(feature);
+    };
+    map.on('style.load', repaint);
+    return () => {
+      map.off('style.load', repaint);
+    };
+  }, [open, layer.id, mapRef, paintHighlight]);
 
   // The selected row mirrors the map highlight: set where the highlight
   // paints (a click without usable geometry leaves it), cleared when the
@@ -166,39 +227,15 @@ export function AttributeTableDrawer({
       if (!bbox) return;
       setSelectedGid(gid);
       clearHighlight();
-      map.addSource(HIGHLIGHT_SOURCE, {
-        type: 'geojson',
-        data: { type: 'Feature', geometry: feature.geometry, properties: {} },
-      });
-      map.addLayer({
-        id: HIGHLIGHT_LINE_LAYER,
-        type: 'line',
-        source: HIGHLIGHT_SOURCE,
-        filter: ['!=', '$type', 'Point'],
-        paint: {
-          'line-color': MAP_COLORS.selection.stroke,
-          'line-width': 3,
-        },
-      });
-      map.addLayer({
-        id: HIGHLIGHT_POINT_LAYER,
-        type: 'circle',
-        source: HIGHLIGHT_SOURCE,
-        filter: ['==', '$type', 'Point'],
-        paint: {
-          'circle-radius': 8,
-          'circle-color': MAP_COLORS.selection.fill,
-          'circle-stroke-color': MAP_COLORS.selection.stroke,
-          'circle-stroke-width': 2,
-        },
-      });
+      highlightFeatureRef.current = feature;
+      paintHighlight(feature);
       try {
         map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
       } catch {
         // Out-of-range coordinates: keep the highlight, skip the fit.
       }
     },
-    [datasetId, mapRef, clearHighlight],
+    [datasetId, mapRef, clearHighlight, paintHighlight],
   );
 
   // --- Resizing -------------------------------------------------------------
