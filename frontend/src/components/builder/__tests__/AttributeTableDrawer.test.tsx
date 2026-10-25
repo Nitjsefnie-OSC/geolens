@@ -344,15 +344,16 @@ describe('AttributeTableDrawer', () => {
     expect(screen.getByText('attributes.noData')).toBeInTheDocument();
   });
 
-  it('closes with Escape and with the close button', () => {
+  it('Escape does not close the docked table; the close button does', () => {
     const onClose = vi.fn();
     render(<AttributeTableDrawer layer={makeLayer()} open onClose={onClose} mapRef={{ current: makeFakeMap() }} />);
 
+    // Escape stays with the map: no Escape handler closes the table.
     fireEvent.keyDown(screen.getByTestId('attribute-table-drawer-title'), { key: 'Escape' });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close attribute table' }));
-    expect(onClose).toHaveBeenCalledTimes(2);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('fits the map to a clicked row and highlights it', async () => {
