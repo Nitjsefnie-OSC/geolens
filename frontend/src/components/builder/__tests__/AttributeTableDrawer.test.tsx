@@ -1605,6 +1605,38 @@ describe('round 5: selection vs style reload', () => {
     expect(selectedRows()).toEqual([]);
   });
 
+  it('close deregisters the style.load listener: a reload after close paints nothing', async () => {
+    const map = makeFakeMap();
+    const view = render(
+      <AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />,
+    );
+    await highlightRow(map, 'Show row 2 on the map');
+    expect(highlightPainted(map)).toBe(true);
+
+    // Close without unmounting: the subscription and the kept feature end
+    // with it, exactly as on unmount.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={makeLayer()}
+        open={false}
+        onClose={vi.fn()}
+        mapRef={{ current: map }}
+      />,
+    );
+    expect(map.styleLoadListenerCount()).toBe(0);
+
+    // A reload now paints nothing and selects nothing new.
+    const sourcesAtClose = vi.mocked(map.addSource).mock.calls.length;
+    const layersAtClose = vi.mocked(map.addLayer).mock.calls.length;
+    const selectedAtClose = selectedRows();
+    act(() => {
+      map.fireStyleLoad();
+    });
+    expect(vi.mocked(map.addSource).mock.calls.length).toBe(sourcesAtClose);
+    expect(vi.mocked(map.addLayer).mock.calls.length).toBe(layersAtClose);
+    expect(selectedRows()).toEqual(selectedAtClose);
+  });
+
   it('the drawer unsubscribes its style.load listener on unmount', async () => {
     const map = makeFakeMap();
     const view = render(
