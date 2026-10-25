@@ -97,7 +97,6 @@ export function AttributeTableDrawer({
     if (!open) return;
     return () => {
       rowRequestSeqRef.current += 1;
-      clearHighlight();
     };
   }, [open, layer.id, clearHighlight]);
 
