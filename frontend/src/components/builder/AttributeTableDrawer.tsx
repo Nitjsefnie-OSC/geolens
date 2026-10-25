@@ -329,7 +329,7 @@ export function AttributeTableDrawer({
 
   // Docked under the map at >=800px: a plain section beside the map, no dialog
   // semantics and no Escape handler — Escape stays with the map; the ✕ closes.
-  if (!isEditorHidden) {
+  if (true) {
     return (
       <section
         aria-labelledby={titleId}
