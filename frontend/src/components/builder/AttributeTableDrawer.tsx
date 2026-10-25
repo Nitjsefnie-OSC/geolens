@@ -269,7 +269,7 @@ export function AttributeTableDrawer({
       <h2
         id={titleId}
         data-testid="attribute-table-drawer-title"
-        className="min-w-0 flex-1 truncate text-sm"
+        className="flex-1 truncate text-sm"
       >
         {layerName}
       </h2>
