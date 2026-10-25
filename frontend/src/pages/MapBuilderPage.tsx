@@ -1993,29 +1993,29 @@ export function MapBuilderPage() {
         )}
 
         {/* Column 3 (or 2 when no editor): map canvas with the docked
-            attribute table under it. The map's wrapper carries the flex-1
-            sizing (MapErrorBoundary renders it via its className prop) and
-            hosts the map overlays; the table docks as the following sibling. */}
+            attribute table under it. The plain wrapper carries the map area's
+            flex-1 sizing and hosts the map overlays; the boundary wraps the
+            map alone, so a crash or a retry never touches the overlays; the
+            table docks as the wrapper's following sibling. */}
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <MapErrorBoundary
-            hasUnsavedChanges={layers.hasUnsavedChanges}
-            className="relative min-h-0 flex-1"
-          >
-            <Suspense fallback={<LoadingState />}>
-              {/* Keyed by map so in-page navigation opens the next map the way a
-                  fresh load does: at its saved view, or fitted to its layers. */}
-              <BuilderMap
-                key={id}
-                layers={layers.localLayers}
-                // Hiding the basemap keeps data layers and drops the imagery.
-                basemapStyle={basemapVisible ? basemapState.basemapStyle : BLANK_BASEMAP_ID}
-                initialViewState={layers.initialViewState}
-                terrainConfig={basemapState.terrainConfig}
-                onMapRef={handleMapRef}
-                showBasemapLabels={basemapState.showBasemapLabels}
-                basemapConfig={basemapState.config}
-              />
-            </Suspense>
+          <div className="relative min-h-0 flex-1">
+            <MapErrorBoundary hasUnsavedChanges={layers.hasUnsavedChanges}>
+              <Suspense fallback={<LoadingState />}>
+                {/* Keyed by map so in-page navigation opens the next map the way a
+                    fresh load does: at its saved view, or fitted to its layers. */}
+                <BuilderMap
+                  key={id}
+                  layers={layers.localLayers}
+                  // Hiding the basemap keeps data layers and drops the imagery.
+                  basemapStyle={basemapVisible ? basemapState.basemapStyle : BLANK_BASEMAP_ID}
+                  initialViewState={layers.initialViewState}
+                  terrainConfig={basemapState.terrainConfig}
+                  onMapRef={handleMapRef}
+                  showBasemapLabels={basemapState.showBasemapLabels}
+                  basemapConfig={basemapState.config}
+                />
+              </Suspense>
+            </MapErrorBoundary>
             {/* The preview's surface is the stack row above — but the
               stack panel only exists at ≥1100px; below that the sidebar
               collapses to SidebarRail, which has no rows. Keep the badge for
@@ -2096,7 +2096,7 @@ export function MapBuilderPage() {
                 />
               }
             />
-          </MapErrorBoundary>
+          </div>
 
           {/* Read-only attribute table for one layer, docked under the map.
               Unmounts when the layer is removed, taking its highlight with it. */}
