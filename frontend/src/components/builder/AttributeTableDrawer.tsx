@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Table2, X } from 'lucide-react';
 import type { Map as MaplibreMap } from 'maplibre-gl';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { useBuilderLayout } from '@/components/builder/hooks/use-builder-layout';
+import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
 import { geometryBounds } from '@/components/viewer/accessible-map-data';
 import { getFeature } from '@/api/features';
@@ -31,14 +32,18 @@ export interface AttributeTableDrawerProps {
 }
 
 /**
- * Read-only attribute table for one builder layer, in a resizable drawer under
- * the map. The layer's filter applies to the table via the rows endpoint's
- * CQL2 `filter` param; when the layer filter cannot be converted to CQL2 the
- * table falls back to every row plus a notice, so the table never silently
- * disagrees with the map.
+ * Read-only attribute table for one builder layer, docked under the map at
+ * >=800px and a full-screen sheet below that. The layer's filter applies to
+ * the table via the rows endpoint's CQL2 `filter` param; when the layer filter
+ * cannot be converted to CQL2 the table falls back to every row plus a notice,
+ * so the table never silently disagrees with the map.
  */
 export function AttributeTableDrawer({ layer, open, onClose, mapRef }: AttributeTableDrawerProps) {
   const { t } = useTranslation('builder');
+  // The layer editor's breakpoint: the table docks at >=800px and goes
+  // full-screen sheet below it. Never a separate media-query helper.
+  const { isEditorHidden } = useBuilderLayout();
+  const titleId = useId();
   const [height, setHeight] = useState(320);
   const heightRef = useRef(height);
   heightRef.current = height;
@@ -170,15 +175,56 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
 
   const layerName = layer.display_name ?? layer.dataset_name;
 
-  return (
-    <Sheet open={open} modal={false} onOpenChange={(next) => { if (!next) onClose(); }}>
-      <SheetContent
-        side="bottom"
-        overlay={false}
-        showCloseButton={false}
-        className="gap-0 border-t p-0"
+  const header = (
+    <header className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
+      <Table2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+      <h2
+        id={titleId}
+        data-testid="attribute-table-drawer-title"
+        className="min-w-0 flex-1 truncate text-sm"
+      >
+        {layerName}
+      </h2>
+      {filterUnsupported && (
+        <p
+          role="status"
+          data-testid="attribute-table-filter-unsupported"
+          className="shrink-0 text-xs text-muted-foreground"
+        >
+          {t('attributeTableDrawer.filterUnsupported', {
+            defaultValue: "The layer's filter could not be applied — showing every row.",
+          })}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label={t('attributeTableDrawer.close', { defaultValue: 'Close attribute table' })}
+        className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--surface-2)] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </button>
+    </header>
+  );
+
+  const rows = datasetId && (
+    <AttributeTable
+      key={datasetId}
+      datasetId={datasetId}
+      compact
+      cql2Filter={cql2Filter}
+      onRowClick={handleRowClick}
+    />
+  );
+
+  // Docked under the map at >=800px: a plain section beside the map, no dialog
+  // semantics and no Escape handler — Escape stays with the map; the ✕ closes.
+  if (!isEditorHidden) {
+    return (
+      <section
+        aria-labelledby={titleId}
+        className="flex flex-col overflow-hidden border-t bg-background shrink-0"
         style={{ height }}
-        aria-describedby={undefined}
       >
         {/* Resize handle: pointer drag or Arrow/Home/End keys. */}
         {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- role="separator" with aria-orientation is the WAI-ARIA separator (resizable) pattern; the rules' default interactive lists lag it. */}
@@ -197,49 +243,27 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
         >
           <span aria-hidden="true" className="h-1 w-10 rounded-full bg-muted-foreground/40 group-hover/handle:bg-muted-foreground/70" />
         </div>
+        {header}
+        {rows}
+      </section>
+    );
+  }
 
-        <div className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
-          <Table2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          <SheetHeader className="min-w-0 flex-1 p-0">
-            <SheetTitle className="truncate text-sm" data-testid="attribute-table-drawer-title">
-              {layerName}
-            </SheetTitle>
-            <SheetDescription className="sr-only">
-              {t('attributeTableDrawer.description', {
-                name: layerName,
-                defaultValue: 'Attribute table for {{name}}',
-              })}
-            </SheetDescription>
-          </SheetHeader>
-          {filterUnsupported && (
-            <p
-              role="status"
-              data-testid="attribute-table-filter-unsupported"
-              className="shrink-0 text-xs text-muted-foreground"
-            >
-              {t('attributeTableDrawer.filterUnsupported', {
-                defaultValue: "The layer's filter could not be applied — showing every row.",
-              })}
-            </p>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('attributeTableDrawer.close', { defaultValue: 'Close attribute table' })}
-            className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--surface-2)] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-        {datasetId && (
-          <AttributeTable
-            key={datasetId}
-            datasetId={datasetId}
-            compact
-            cql2Filter={cql2Filter}
-            onRowClick={handleRowClick}
-          />
-        )}
+  // Below 800px: full-screen sheet on the editor's breakpoint; Escape stays
+  // with the map, the ✕ closes.
+  return (
+    <Sheet open={open} modal={false} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <SheetContent
+        side="bottom"
+        overlay={false}
+        showCloseButton={false}
+        onEscapeKeyDown={(event) => event.preventDefault()}
+        className="h-full w-full gap-0 border-t p-0"
+        aria-labelledby={titleId}
+        aria-describedby={undefined}
+      >
+        {header}
+        {rows}
       </SheetContent>
     </Sheet>
   );
