@@ -90,7 +90,7 @@ export function AttributeTableDrawer({
     const incompatibleLiteral =
       canonical.kind === 'editable' &&
       canonical.conditions.some((condition) => {
-        const values = condition.listValues ?? (condition.rawValue == null ? [] : [condition.rawValue]);
+        const values = condition.rawValue == null ? [] : [condition.rawValue];
         return values.some((value) => !isCql2LiteralCompatible(value, types.get(condition.field)));
       });
     return incompatibleLiteral ? 'unsupported' : converted;
