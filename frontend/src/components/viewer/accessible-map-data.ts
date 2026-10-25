@@ -62,18 +62,7 @@ export function geometryBounds(
     for (const item of value) visitCoordinates(item);
   };
 
-  if (geometry.type === 'GeometryCollection') {
-    for (const item of geometry.geometries) {
-      const bounds = geometryBounds(item);
-      if (!bounds) continue;
-      west = Math.min(west, bounds[0]);
-      south = Math.min(south, bounds[1]);
-      east = Math.max(east, bounds[2]);
-      north = Math.max(north, bounds[3]);
-    }
-  } else {
-    visitCoordinates(geometry.coordinates);
-  }
+  visitCoordinates(geometry.coordinates);
 
   return Number.isFinite(west) ? [west, south, east, north] : null;
 }
