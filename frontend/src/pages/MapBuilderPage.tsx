@@ -964,10 +964,6 @@ export function MapBuilderPage() {
   // layer's activation replaces it.
   const handleOpenAttributeTable = useCallback(
     (layerId: string, path: 'stack' | 'editor' = 'stack') => {
-      if (attributeTableLayerId === layerId) {
-        handleCloseAttributeTable();
-        return;
-      }
       attributeTableOpenerRef.current = { path, layerId };
       setAttributeTableLayerId(layerId);
     },
