@@ -2016,6 +2016,12 @@ export function MapBuilderPage() {
                   basemapConfig={basemapState.config}
                 />
               </Suspense>
+            <div className="absolute top-12 left-3 z-10 flex flex-col gap-2">
+                <ActiveFilterChips
+                  layers={layers.localLayers}
+                  onClearFilter={handleClearFilter}
+                />
+            </div>
             </MapErrorBoundary>
             {/* The preview's surface is the stack row above — but the
               stack panel only exists at ≥1100px; below that the sidebar
@@ -2090,12 +2096,6 @@ export function MapBuilderPage() {
             <PluginHost
               byAnchor={byAnchor}
               ctx={pluginCtx}
-              topLeftSlot={
-                <ActiveFilterChips
-                  layers={layers.localLayers}
-                  onClearFilter={handleClearFilter}
-                />
-              }
             />
           </div>
 
