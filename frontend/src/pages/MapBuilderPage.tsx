@@ -937,6 +937,7 @@ export function MapBuilderPage() {
   const attributeTableWasOpenRef = useRef(false);
   useEffect(() => {
     const isOpen = attributeTableLayer !== null;
+    if (!isOpen && attributeTableLayerId !== null) setAttributeTableLayerId(null);
     const wasOpen = attributeTableWasOpenRef.current;
     attributeTableWasOpenRef.current = isOpen;
     if (!wasOpen || isOpen) return;
@@ -956,7 +957,7 @@ export function MapBuilderPage() {
         : null;
       (openerEl ?? document.querySelector<HTMLElement>('[data-row-id]'))?.focus();
     });
-  }, [attributeTableLayer]);
+  }, [attributeTableLayer, attributeTableLayerId]);
 
   const handleCloseAttributeTable = useCallback(() => {
     setAttributeTableLayerId(null);
