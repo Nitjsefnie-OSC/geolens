@@ -335,7 +335,7 @@ export function AttributeTableDrawer({
   const renderHeader = ({ count, columns }: { count: ReactNode; columns: ReactNode }) => (
     <header className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
       <Table2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-      {!pickerShown && (
+      {(!pickerShown || pickerShown) && (
         <h2
           id={titleId}
           data-testid="attribute-table-drawer-title"
