@@ -1462,7 +1462,6 @@
   },
   "attributeTableDrawer": {
     "layerPicker": "属性表图层",
-    "description": "{{name}}的属性表",
     "filterUnsupported": "无法应用图层过滤器——显示所有行。",
     "resizeHandle": "调整属性表大小",
     "close": "关闭属性表"
