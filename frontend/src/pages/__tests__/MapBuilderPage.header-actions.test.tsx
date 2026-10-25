@@ -1,4 +1,5 @@
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { useParams } from 'react-router';
 import { toast } from 'sonner';
 import { act, fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
@@ -124,7 +125,7 @@ const pluginHostMounts = vi.fn();
 vi.mock('@/components/map-plugins', async () => {
   const { useEffect } = await import('react');
   return {
-    PluginHost: ({ topLeftSlot }: { topLeftSlot?: unknown }) => {
+    PluginHost: ({ topLeftSlot }: { topLeftSlot?: ReactNode }) => {
       useEffect(() => {
         pluginHostMounts();
       }, []);
@@ -1012,7 +1013,7 @@ describe('MapBuilderPage round 5: the map error boundary wraps BuilderMap alone'
     const mapEl = screen.getByTestId('builder-map');
     // The plain wrapper carrying the map area's sizing hosts the map and every
     // round-4 overlay; the table docks as its following sibling.
-    const wrap = table.previousElementSibling as HTMLElement | null;
+    const wrap = table.previousElementSibling as HTMLElement;
     expect(wrap).not.toBeNull();
     expect(wrap).toHaveClass('relative', 'min-h-0', 'flex-1');
     expect(wrap).toContainElement(mapEl);
