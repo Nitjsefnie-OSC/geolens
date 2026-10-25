@@ -763,6 +763,23 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     expect(document.activeElement).toBe(fallback);
   });
 
+  it('deleting the open layer returns focus even when the first stack row is a folder row', () => {
+    const folderLayer = () => makeLayer({ id: 'l-group', display_name: 'Folder', layer_type: 'group:folder-1' as never });
+    mockLocalLayers = [folderLayer(), makeLayer({ id: 'l-trails', display_name: 'Trails' })];
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    // The layer disappears while its table is open and the first remaining
+    // row is the folder-group row (its wrapper carries [data-row-id] too).
+    mockLocalLayers = [folderLayer()];
+    view.rerender(<MapBuilderPage />);
+
+    const fallback = document.querySelector<HTMLElement>('[data-row-id]');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.getAttribute('data-row-id')).toBe('l-group');
+    expect(document.activeElement).toBe(fallback);
+  });
+
   it('below 800px the table is a full-screen sheet and its close returns focus to the opener', () => {
     mockIsEditorHidden = true;
     render(<MapBuilderPage />, { route: '/maps/map-1' });
