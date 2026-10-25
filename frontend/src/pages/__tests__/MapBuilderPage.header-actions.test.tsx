@@ -795,7 +795,7 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
       makeLayer({ id: 'l-raster', display_name: 'Hillshade', dataset_record_type: 'raster_dataset' }),
       makeLayer({ id: 'l-rasterized', display_name: 'Rasterized', layer_type: 'raster_geolens' }),
       makeLayer({ id: 'l-dem', display_name: 'Terrain', is_dem: true }),
-      makeLayer({ id: 'l-group', display_name: 'Folder', layer_type: 'group:folder-1' }),
+      makeLayer({ id: 'l-group', display_name: 'Folder', layer_type: 'group:folder-1' as never }),
       makeLayer({ id: 'l-nodataset', display_name: 'No dataset', dataset_id: null as never }),
       makeLayer({ id: 'l-parcels', display_name: 'Parcels' }),
     ];
