@@ -1999,8 +1999,7 @@ export function MapBuilderPage() {
             map alone, so a crash or a retry never touches the overlays; the
             table docks as the wrapper's following sibling. */}
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <div className="relative min-h-0 flex-1">
-            <MapErrorBoundary hasUnsavedChanges={layers.hasUnsavedChanges}>
+          <MapErrorBoundary hasUnsavedChanges={layers.hasUnsavedChanges} className="relative min-h-0 flex-1">
               <Suspense fallback={<LoadingState />}>
                 {/* Keyed by map so in-page navigation opens the next map the way a
                     fresh load does: at its saved view, or fitted to its layers. */}
@@ -2016,7 +2015,6 @@ export function MapBuilderPage() {
                   basemapConfig={basemapState.config}
                 />
               </Suspense>
-            </MapErrorBoundary>
             {/* The preview's surface is the stack row above — but the
               stack panel only exists at ≥1100px; below that the sidebar
               collapses to SidebarRail, which has no rows. Keep the badge for
@@ -2097,7 +2095,7 @@ export function MapBuilderPage() {
                 />
               }
             />
-          </div>
+          </MapErrorBoundary>
 
           {/* Read-only attribute table for one layer, docked under the map.
               Unmounts when the layer is removed, taking its highlight with it. */}
