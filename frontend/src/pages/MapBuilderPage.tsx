@@ -2093,21 +2093,21 @@ export function MapBuilderPage() {
               }
             />
           </MapErrorBoundary>
-
-          {/* Read-only attribute table for one layer, docked under the map.
-              Unmounts when the layer is removed, taking its highlight with it. */}
-          {attributeTableLayer && (
-            <AttributeTableDrawer
-              layer={attributeTableLayer}
-              open
-              onClose={handleCloseAttributeTable}
-              mapRef={mapInstanceRef}
-              layers={layers.localLayers}
-              onLayerChange={setAttributeTableLayerId}
-            />
-          )}
         </div>
       </div>
+
+      {/* Read-only attribute table for one layer, docked under the map.
+          Unmounts when the layer is removed, taking its highlight with it. */}
+      {attributeTableLayer && (
+        <AttributeTableDrawer
+          layer={attributeTableLayer}
+          open
+          onClose={handleCloseAttributeTable}
+          mapRef={mapInstanceRef}
+          layers={layers.localLayers}
+          onLayerChange={setAttributeTableLayerId}
+        />
+      )}
 
       {/* Right rail + panel */}
       {/* A HistoryPanel/Notes render error must not take down the builder. */}
