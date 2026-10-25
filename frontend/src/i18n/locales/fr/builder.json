@@ -1457,6 +1457,7 @@
     "toggleExpand": "Basculer le groupe de dossiers"
   },
   "attributeTableDrawer": {
+    "layerPicker": "Couche de la table attributaire",
     "description": "Table attributaire de {{name}}",
     "filterUnsupported": "Le filtre de la couche n'a pas pu être appliqué — toutes les lignes sont affichées.",
     "resizeHandle": "Redimensionner la table attributaire",
