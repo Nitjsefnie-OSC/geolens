@@ -746,6 +746,30 @@ describe('docked attribute table (round 4)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('Escape on the below-800px sheet does not close it and does not lose focus', () => {
+    // Below the editor's breakpoint the table renders as a sheet; the drawer
+    // reads the real useBuilderLayout, whose initial state takes innerWidth.
+    vi.stubGlobal('innerWidth', 640);
+    const onClose = vi.fn();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={onClose} mapRef={{ current: makeFakeMap() }} />);
+
+    expect(screen.queryByRole('region', { name: 'Population' })).toBeNull();
+    const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]')!;
+    expect(sheet).not.toBeNull();
+
+    // Escape stays with the map: the sheet stays open and focused.
+    const close = within(sheet).getByRole('button', { name: 'Close attribute table' });
+    close.focus();
+    fireEvent.keyDown(sheet, { key: 'Escape' });
+    expect(document.querySelector('[data-slot="sheet-content"]')).not.toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(close);
+
+    // The close button still closes it.
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('fits with exactly { padding: 40, maxZoom: 18 } at several table heights', async () => {
     const map = makeFakeMap();
     render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
