@@ -832,6 +832,44 @@ class TestRowsCql2Filter:
         )
         assert fake.status_code == 404
 
+    @pytest.mark.anyio
+    async def test_a_cql2_only_filter_counts_its_matches(
+        self,
+        client: AsyncClient,
+        admin_auth_header: dict,
+        rows_dataset,
+    ):
+        """A request whose only filter is the CQL2 ``filter`` counts the rows
+        the filter matches, not the table's planner estimate."""
+        resp = await client.get(
+            f"/datasets/{rows_dataset.id}/rows/",
+            params={"filter": _cql2_eq("name", "b")},
+            headers=admin_auth_header,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["approximate_total"], data["total_kind"]) == (1, "exact")
+
+    @pytest.mark.anyio
+    async def test_a_cql2_filter_matching_every_row_counts_them(
+        self,
+        client: AsyncClient,
+        admin_auth_header: dict,
+        rows_dataset,
+    ):
+        """A CQL2 filter matching all five rows counts them ``"exact"``, where
+        the estimate branch would report reltuples as ``"estimate"``."""
+        resp = await client.get(
+            f"/datasets/{rows_dataset.id}/rows/",
+            params={
+                "filter": json.dumps({"op": ">=", "args": [{"property": "value"}, 1]})
+            },
+            headers=admin_auth_header,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["approximate_total"], data["total_kind"]) == (5, "exact")
+
 
 # ---------------------------------------------------------------------------
 # Validation tests
