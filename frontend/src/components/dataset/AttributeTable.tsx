@@ -861,7 +861,6 @@ export function AttributeTable({
                     <TableRow
                       key={row.id}
                       data-index={virtualRow.index}
-                      aria-selected={selectedGid === undefined ? undefined : selected ? 'true' : 'false'}
                       className={cn(
                         virtualRow.index % 2 === 1 ? 'bg-muted/30' : '',
                         onRowClick && 'cursor-pointer hover:bg-primary-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
