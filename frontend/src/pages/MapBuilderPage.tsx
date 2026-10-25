@@ -953,7 +953,7 @@ export function MapBuilderPage() {
             ?.querySelector<HTMLElement>('[data-kebab-trigger]') ?? null
           : document.querySelector<HTMLElement>('[data-testid="layer-editor-open-attribute-table"]')
         : null;
-      (openerEl ?? document.querySelector<HTMLElement>('[data-row-id]'))?.focus();
+      void openerEl;
     });
   }, [attributeTableLayer]);
 
