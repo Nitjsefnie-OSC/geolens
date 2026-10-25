@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Table2, X } from 'lucide-react';
 import type { Map as MaplibreMap } from 'maplibre-gl';
 import { useBuilderLayout } from '@/components/builder/hooks/use-builder-layout';
+import { canOpenAttributeTable } from '@/lib/layer-capabilities';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
 import { geometryBounds } from '@/components/viewer/accessible-map-data';
@@ -29,6 +30,13 @@ export interface AttributeTableDrawerProps {
   onClose: () => void;
   /** The builder map, for the fit-and-highlight on a row click. */
   mapRef: React.RefObject<MaplibreMap | null>;
+  /**
+   * The map's layers in map order, for the header's layer picker (options:
+   * the ones passing canOpenAttributeTable). Omitted, no picker renders.
+   */
+  layers?: MapLayerResponse[];
+  /** Receives the picker's chosen layer id; omitted, the picker never renders. */
+  onLayerChange?: (layerId: string) => void;
 }
 
 /**
@@ -38,7 +46,14 @@ export interface AttributeTableDrawerProps {
  * cannot be converted to CQL2 the table falls back to every row plus a notice,
  * so the table never silently disagrees with the map.
  */
-export function AttributeTableDrawer({ layer, open, onClose, mapRef }: AttributeTableDrawerProps) {
+export function AttributeTableDrawer({
+  layer,
+  open,
+  onClose,
+  mapRef,
+  layers,
+  onLayerChange,
+}: AttributeTableDrawerProps) {
   const { t } = useTranslation('builder');
   // The layer editor's breakpoint: the table docks at >=800px and goes
   // full-screen sheet below it. Never a separate media-query helper.
@@ -86,6 +101,14 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
     };
   }, [open, layer.id, clearHighlight]);
 
+  // The selected row mirrors the map highlight: set where the highlight
+  // paints (a click without usable geometry leaves it), cleared when the
+  // layer changes and with the drawer itself.
+  const [selectedGid, setSelectedGid] = useState<number | null>(null);
+  useEffect(() => {
+    setSelectedGid(null);
+  }, [layer.id]);
+
   const handleRowClick = useCallback(
     async (gid: number) => {
       if (!datasetId) return;
@@ -105,6 +128,7 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
       // it was — the previous highlight included.
       const bbox = geometryBounds(feature.geometry);
       if (!bbox) return;
+      setSelectedGid(gid);
       clearHighlight();
       map.addSource(HIGHLIGHT_SOURCE, {
         type: 'geojson',
@@ -219,8 +243,14 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
   };
 
   const layerName = layer.display_name ?? layer.dataset_name;
+  const pickerLayers = layers?.filter(canOpenAttributeTable);
 
-  const header = (
+  // The one merged header, composed from AttributeTable's own pieces: name,
+  // (picker,) row count, filter notice, Columns control, close — in the
+  // maintainer's order. The name keeps truncate + min-w-0; nothing that can
+  // squeeze it away carries shrink-0 (the close button sits last and never
+  // competes for width).
+  const renderHeader = ({ count, columns }: { count: ReactNode; columns: ReactNode }) => (
     <header className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
       <Table2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
       <h2
@@ -230,17 +260,34 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
       >
         {layerName}
       </h2>
+      {pickerLayers && onLayerChange && (
+        <select
+          autoFocus
+          aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
+          className="h-7 max-w-40 cursor-pointer rounded-md border bg-transparent px-1.5 text-xs"
+          value={layer.id}
+          onChange={(e) => onLayerChange(e.target.value)}
+        >
+          {pickerLayers.map((pickerLayer) => (
+            <option key={pickerLayer.id} value={pickerLayer.id}>
+              {pickerLayer.display_name ?? pickerLayer.dataset_name}
+            </option>
+          ))}
+        </select>
+      )}
+      {count}
       {filterUnsupported && (
         <p
           role="status"
           data-testid="attribute-table-filter-unsupported"
-          className="shrink-0 text-xs text-muted-foreground"
+          className="text-xs text-muted-foreground"
         >
           {t('attributeTableDrawer.filterUnsupported', {
             defaultValue: "The layer's filter could not be applied — showing every row.",
           })}
         </p>
       )}
+      {columns}
       <button
         type="button"
         onClick={onClose}
@@ -259,6 +306,8 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
       compact
       cql2Filter={cql2Filter}
       onRowClick={handleRowClick}
+      selectedGid={selectedGid}
+      renderHeader={renderHeader}
     />
   );
 
@@ -291,7 +340,6 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
         >
           <span aria-hidden="true" className="h-1 w-10 rounded-full bg-muted-foreground/40 group-hover/handle:bg-muted-foreground/70" />
         </div>
-        {header}
         {rows}
       </section>
     );
@@ -310,7 +358,6 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
         aria-labelledby={titleId}
         aria-describedby={undefined}
       >
-        {header}
         {rows}
       </SheetContent>
     </Sheet>
