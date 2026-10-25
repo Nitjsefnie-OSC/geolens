@@ -1,11 +1,16 @@
 import userEvent from '@testing-library/user-event';
 import { useParams } from 'react-router';
 import { toast } from 'sonner';
-import { render, screen, waitFor } from '@/test/test-utils';
+import { fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
 import { MapBuilderPage } from '@/pages/MapBuilderPage';
 import { AnalysisJobWatcher } from '@/components/analysis/AnalysisJobWatcher';
 import { useJobStatus } from '@/components/import/hooks/use-ingest';
 import { ApiError } from '@/api/client';
+import type { Map as MaplibreMap } from 'maplibre-gl';
+import { useDatasetRows } from '@/components/dataset/hooks/use-dataset';
+import { useUpdateFeature } from '@/hooks/use-features';
+import { getFeature } from '@/api/features';
+import type { MapLayerResponse } from '@/types/api';
 import {
   ANALYSIS_JOB_STORAGE_KEY,
   registerAnalysisAddToMap,
@@ -42,8 +47,53 @@ vi.mock('react-router', async (importOriginal) => {
   };
 });
 
-vi.mock('@/components/builder/BuilderMap', () => ({
-  BuilderMap: () => <div data-testid="builder-map" />,
+// The builder map hands the test's fake map instance to the page via onMapRef
+// (mockPageMap is null unless a test installs one), so the docked table's
+// fit-and-highlight can be observed at page level.
+let mockPageMap: (MaplibreMap & Record<string, ReturnType<typeof vi.fn>>) | null = null;
+
+vi.mock('@/components/builder/BuilderMap', async () => {
+  const { useEffect } = await import('react');
+  return {
+    BuilderMap: ({ onMapRef }: { onMapRef?: (map: unknown) => void }) => {
+      useEffect(() => {
+        onMapRef?.(mockPageMap);
+        return () => { onMapRef?.(null); };
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- hand the test's map once per mount
+      }, []);
+      return <div data-testid="builder-map" />;
+    },
+  };
+});
+
+vi.mock('@/components/dataset/hooks/use-dataset', () => ({
+  useDatasetRows: vi.fn(),
+}));
+
+vi.mock('@/hooks/use-features', () => ({
+  useUpdateFeature: vi.fn(),
+  useDeleteFeatures: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
+vi.mock('@/api/features', () => ({
+  getFeature: vi.fn(),
+}));
+
+// jsdom computes no layout, so the real virtualizer renders a zero window of
+// rows; render them all instead (same stub as
+// AttributeTableDrawer.test.tsx).
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count, estimateSize }: { count: number; estimateSize: () => number }) => ({
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, index) => ({
+        index,
+        key: index,
+        start: index * estimateSize(),
+        size: estimateSize(),
+      })),
+    getTotalSize: () => count * estimateSize(),
+    measure: () => {},
+  }),
 }));
 
 vi.mock('@/components/builder/LayerPanel', () => ({
@@ -130,13 +180,17 @@ vi.mock('@/components/builder/hooks/use-builder-dialogs', () => ({
 
 let mockExpandedLayerId: string | null = null;
 const mockHandleToggleExpand = vi.fn();
+// The layers the builder edits; the docked-table tests install real layers.
+let mockLocalLayers: MapLayerResponse[] = [];
+const mockHandleRemove = vi.fn();
 // Stable identity so the analysis registration below can assert
 // WHICH callback got registered, not just that something did.
 const mockChatAddDataset = vi.fn();
 
 vi.mock('@/components/builder/hooks/use-builder-layers', () => ({
   useBuilderLayers: () => ({
-    localLayers: [],
+    localLayers: mockLocalLayers,
+    savedLayerBaseline: mockLocalLayers,
     layersMapId: mockLayersMapId,
     localName: 'Operations Map',
     setLocalName: vi.fn(),
@@ -172,7 +226,7 @@ vi.mock('@/components/builder/hooks/use-builder-layers', () => ({
     handleMoveDown: vi.fn(),
     handleReorder: vi.fn(),
     handleDisplayNameChange: vi.fn(),
-    handleRemove: vi.fn(),
+    handleRemove: mockHandleRemove,
     handleZoomToLayer: vi.fn(),
     handleToggleLegend: vi.fn(),
     handleAddDataset: vi.fn(),
@@ -446,5 +500,353 @@ describe('MapBuilderPage analysis Add-to-map registration', () => {
       expect(lastToastLabel()).toBe(VIEW_DATASET);
       expect(toast.success).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 4: the docked attribute table (red until round 4 lands)
+// ---------------------------------------------------------------------------
+
+function makeLayer(overrides: Partial<MapLayerResponse> = {}): MapLayerResponse {
+  return {
+    id: overrides.id ?? 'layer-1',
+    dataset_id: overrides.dataset_id ?? 'dataset-1',
+    dataset_name: overrides.dataset_name ?? 'Population',
+    dataset_geometry_type: overrides.dataset_geometry_type ?? 'POLYGON',
+    dataset_table_name: overrides.dataset_table_name ?? 'population',
+    dataset_extent_bbox: overrides.dataset_extent_bbox ?? [0, 0, 1, 1],
+    dataset_column_info: overrides.dataset_column_info ?? null,
+    dataset_feature_count: overrides.dataset_feature_count ?? null,
+    dataset_sample_values: overrides.dataset_sample_values ?? null,
+    display_name: overrides.display_name ?? null,
+    sort_order: overrides.sort_order ?? 0,
+    visible: overrides.visible ?? true,
+    opacity: overrides.opacity ?? 1,
+    paint: overrides.paint ?? {},
+    layout: overrides.layout ?? {},
+    filter: overrides.filter ?? null,
+    label_config: overrides.label_config ?? null,
+    popup_config: overrides.popup_config ?? null,
+    style_config: overrides.style_config ?? null,
+    layer_type: overrides.layer_type ?? null,
+    dataset_record_type: overrides.dataset_record_type ?? 'vector_dataset',
+    show_in_legend: overrides.show_in_legend ?? true,
+    is_dem: overrides.is_dem ?? false,
+    dem_vertical_units: overrides.dem_vertical_units ?? null,
+    ...overrides,
+  };
+}
+
+function makeRowsReturn() {
+  return {
+    data: {
+      columns: [
+        { name: 'gid', type: 'integer' },
+        { name: 'name', type: 'text' },
+      ],
+      rows: [
+        { gid: 1, name: 'a' },
+        { gid: 2, name: 'b' },
+      ],
+      next_cursor: null,
+      approximate_total: 2,
+      total_kind: 'exact',
+      sortable_columns: ['name'],
+      table_id: 't1',
+    },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+    isPlaceholderData: false,
+    error: null,
+  };
+}
+
+// Stateful fake mirroring AttributeTableDrawer.test.tsx's makeFakeMap, plus
+// the page's own on/off listeners and the resize contract.
+function makeFakeMap() {
+  const layers = new Set<string>();
+  const sources = new Set<string>();
+  return {
+    getLayer: vi.fn((id: string) => (layers.has(id) ? {} : undefined)),
+    removeLayer: vi.fn((id: string) => layers.delete(id)),
+    getSource: vi.fn((id: string) => (sources.has(id) ? {} : undefined)),
+    removeSource: vi.fn((id: string) => sources.delete(id)),
+    addSource: vi.fn((_id: string, _def: unknown) => {
+      sources.add(_id);
+    }),
+    addLayer: vi.fn((def: { id: string }) => {
+      layers.add(def.id);
+    }),
+    fitBounds: vi.fn(),
+    resize: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
+  } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>>;
+}
+
+describe('MapBuilderPage docked attribute table (round 4)', () => {
+  // Focus restore runs through requestAnimationFrame (the page's existing
+  // close pattern); running frames synchronously keeps the focus assertions
+  // deterministic in jsdom.
+  beforeEach(() => {
+    mockUseParams.mockReturnValue({ id: 'map-1' });
+    mockIsRail = false;
+    mockIsEditorHidden = false;
+    mockExpandedLayerId = null;
+    mockHandleRemove.mockReset();
+    mockLocalLayers = [
+      makeLayer({ id: 'l-trails', display_name: 'Trails' }),
+      makeLayer({ id: 'l-parcels', display_name: 'Parcels' }),
+    ];
+    mockPageMap = makeFakeMap();
+    localStorage.clear();
+    vi.mocked(useDatasetRows).mockReturnValue(makeRowsReturn() as never);
+    vi.mocked(useUpdateFeature).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as never);
+    vi.mocked(getFeature).mockResolvedValue({
+      type: 'Feature',
+      id: 2,
+      geometry: { type: 'Point', coordinates: [3, 3] },
+      properties: {},
+    });
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(performance.now());
+      return 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    mockPageMap = null;
+  });
+
+  const sheetContent = () => document.querySelector('[data-slot="sheet-content"]');
+  const tableSectionCount = () =>
+    screen.queryAllByRole('region').filter((el) => el.tagName === 'SECTION').length;
+
+  function openTableViaKebab(layerId: string) {
+    const row = document.getElementById(`stack-row-${layerId}`);
+    if (!row) throw new Error(`missing stack row for ${layerId}`);
+    fireEvent.pointerDown(row.querySelector<HTMLElement>('[data-kebab-trigger]')!, { button: 0 });
+    fireEvent.click(screen.getByTestId('kebab-open-attribute-table'));
+  }
+
+  function kebabTrigger(layerId: string): HTMLElement {
+    const row = document.getElementById(`stack-row-${layerId}`);
+    if (!row) throw new Error(`missing stack row for ${layerId}`);
+    return row.querySelector<HTMLElement>('[data-kebab-trigger]')!;
+  }
+
+  function dataRowsIn(scope: HTMLElement): HTMLElement[] {
+    return Array.from(scope.querySelectorAll<HTMLElement>('tr[data-index]'));
+  }
+
+  // Contract (1): the table section lives inside the map column, the map's
+  // wrapper takes flex-1 min-h-0, the section follows it, nothing between the
+  // section and the column is fixed/absolute, no sheet/dialog renders at
+  // >=800px, and every absolutely positioned column child sits inside the
+  // map's wrapper.
+  function expectDockedStructure(layerName: string) {
+    const table = screen.getByRole('region', { name: layerName });
+    expect(table.tagName).toBe('SECTION');
+    const mapEl = screen.getByTestId('builder-map');
+    const wrapper = mapEl.parentElement as HTMLElement;
+    const column = mapEl.closest<HTMLElement>('.relative.min-h-0.min-w-0');
+    expect(column).not.toBeNull();
+    expect(column).toContainElement(table);
+    expect(wrapper.parentElement).toBe(column);
+    expect(table.previousElementSibling).toBe(wrapper);
+    expect(wrapper).toHaveClass('flex-1', 'min-h-0');
+    expect(column!.className).toContain('flex');
+    expect(column!.className).toContain('flex-col');
+
+    // No fixed/absolute positioning between the section and the column.
+    for (let el: HTMLElement | null = table; el && el !== column; el = el.parentElement) {
+      expect(el.classList.contains('fixed')).toBe(false);
+      expect(el.classList.contains('absolute')).toBe(false);
+    }
+
+    // No sheet or dialog role at 800px and wider.
+    expect(sheetContent()).toBeNull();
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0);
+
+    // Every absolutely positioned child of the column is a descendant of the
+    // map's wrapper, not of the column or the section.
+    for (const child of Array.from(column!.children)) {
+      const positioned =
+        child instanceof HTMLElement &&
+        (child.classList.contains('absolute') || child.classList.contains('fixed'));
+      if (positioned) expect(wrapper.contains(child)).toBe(true);
+    }
+    return table;
+  }
+
+  it.each([
+    ['layer-stack menu', 'stack'],
+    ['layer-editor button', 'editor'],
+  ])('docks the table in the map column via the %s', (_label, entry) => {
+    if (entry === 'editor') mockExpandedLayerId = 'l-trails';
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    if (entry === 'stack') openTableViaKebab('l-trails');
+    else fireEvent.click(screen.getByTestId('layer-editor-open-attribute-table'));
+
+    expectDockedStructure('Trails');
+  });
+
+  it('stack entry point: the ✕ and a second activation close it; focus returns to the opener', () => {
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+
+    // ✕ close returns focus to the layer's kebab trigger.
+    openTableViaKebab('l-trails');
+    fireEvent.click(screen.getByRole('button', { name: 'attributeTableDrawer.close' }));
+    expect(document.activeElement).toBe(kebabTrigger('l-trails'));
+
+    // A second activation of the same entry point closes it (toggle), and
+    // focus lands back on the opener again.
+    openTableViaKebab('l-trails');
+    openTableViaKebab('l-trails');
+    expect(sheetContent()).toBeNull();
+    expect(document.activeElement).toBe(kebabTrigger('l-trails'));
+
+    // Escape on the map container does not close the table.
+    openTableViaKebab('l-trails');
+    fireEvent.keyDown(screen.getByTestId('builder-map'), { key: 'Escape' });
+    const stillThere = screen.queryByRole('region', { name: 'Trails' }) ?? sheetContent();
+    expect(stillThere).not.toBeNull();
+  });
+
+  it('opening another layer’s table replaces the open one', () => {
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+    openTableViaKebab('l-parcels');
+
+    expect(sheetContent()).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Parcels' })).toBeInTheDocument();
+    expect(tableSectionCount()).toBe(1);
+  });
+
+  it('editor entry point: a second activation closes it and the ✕ returns focus to the button', () => {
+    mockExpandedLayerId = 'l-trails';
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    const opener = screen.getByTestId('layer-editor-open-attribute-table');
+    fireEvent.click(opener);
+
+    // Toggle: activating the entry point again closes the table.
+    fireEvent.click(screen.getByTestId('layer-editor-open-attribute-table'));
+    expect(sheetContent()).toBeNull();
+
+    // Reopen, then close with the ✕: focus returns to the editor button.
+    fireEvent.click(screen.getByTestId('layer-editor-open-attribute-table'));
+    fireEvent.click(screen.getByRole('button', { name: 'attributeTableDrawer.close' }));
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('deleting the open layer returns focus to the first stack row', () => {
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    // The layer disappears while its table is open.
+    mockLocalLayers = [makeLayer({ id: 'l-parcels', display_name: 'Parcels' })];
+    view.rerender(<MapBuilderPage />);
+
+    const fallback = document.querySelector<HTMLElement>('[data-row-id]');
+    expect(fallback).not.toBeNull();
+    expect(document.activeElement).toBe(fallback);
+  });
+
+  it('below 800px the table is a full-screen sheet and its close returns focus to the opener', () => {
+    mockIsEditorHidden = true;
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    // A full-screen sheet instead of the docked section.
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
+    const sheet = sheetContent() as HTMLElement | null;
+    expect(sheet).not.toBeNull();
+    expect(sheet!.className).toContain('w-full');
+
+    fireEvent.click(screen.getByRole('button', { name: 'attributeTableDrawer.close' }));
+    expect(document.activeElement).toBe(kebabTrigger('l-trails'));
+  });
+
+  it('the layer picker lists exactly the table-capable layers in map order and defaults to the opened layer', () => {
+    mockLocalLayers = [
+      makeLayer({ id: 'l-trails', display_name: 'Trails' }),
+      makeLayer({ id: 'l-raster', display_name: 'Hillshade', dataset_record_type: 'raster_dataset' }),
+      makeLayer({ id: 'l-rasterized', display_name: 'Rasterized', layer_type: 'raster_geolens' }),
+      makeLayer({ id: 'l-dem', display_name: 'Terrain', is_dem: true }),
+      makeLayer({ id: 'l-group', display_name: 'Folder', layer_type: 'group:folder-1' }),
+      makeLayer({ id: 'l-nodataset', display_name: 'No dataset', dataset_id: null as never }),
+      makeLayer({ id: 'l-parcels', display_name: 'Parcels' }),
+    ];
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    const table = screen.getByRole('region', { name: 'Trails' });
+    const picker = within(table).getByRole('combobox');
+    expect(picker).toHaveAccessibleName();
+    expect(within(picker).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Trails',
+      'Parcels',
+    ]);
+    expect(picker).toHaveValue('l-trails');
+  });
+
+  it('switching layers from the picker swaps the table, keeps its height, and keeps focus on the picker', () => {
+    mockLocalLayers = [
+      makeLayer({ id: 'l-trails', display_name: 'Trails', dataset_id: 'ds-trails' }),
+      makeLayer({ id: 'l-parcels', display_name: 'Parcels', dataset_id: 'ds-parcels' }),
+    ];
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    const table = screen.getByRole('region', { name: 'Trails' });
+    const handle = within(table).getByRole('separator');
+    fireEvent.keyDown(handle, { key: 'ArrowUp' });
+    const height = handle.getAttribute('aria-valuenow');
+    expect(height).not.toBeNull();
+
+    fireEvent.change(within(table).getByRole('combobox'), { target: { value: 'l-parcels' } });
+    expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[0]).toBe('ds-parcels');
+
+    const next = screen.getByRole('region', { name: 'Parcels' });
+    expect(next).toBe(table);
+    expect(within(next).getByRole('separator').getAttribute('aria-valuenow')).toBe(height);
+    expect(document.activeElement).toBe(within(next).getByRole('combobox'));
+    expect(tableSectionCount()).toBe(1);
+  });
+
+  it('switching layers clears the highlight and the selection; close returns focus to the original opener', async () => {
+    mockLocalLayers = [
+      makeLayer({ id: 'l-trails', display_name: 'Trails', dataset_id: 'ds-trails' }),
+      makeLayer({ id: 'l-parcels', display_name: 'Parcels', dataset_id: 'ds-parcels' }),
+    ];
+    render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    const table = screen.getByRole('region', { name: 'Trails' });
+    fireEvent.click(dataRowsIn(table)[1]);
+    await waitFor(() => expect(mockPageMap!.fitBounds).toHaveBeenCalledTimes(1));
+    expect(mockPageMap!.getSource('attribute-table-highlight')).toBeTruthy();
+
+    fireEvent.change(within(table).getByRole('combobox'), { target: { value: 'l-parcels' } });
+
+    // The old highlight is gone and no row is selected any more.
+    expect(mockPageMap!.removeLayer).toHaveBeenCalledWith('attribute-table-highlight-line');
+    expect(mockPageMap!.removeLayer).toHaveBeenCalledWith('attribute-table-highlight-point');
+    expect(mockPageMap!.removeSource).toHaveBeenCalledWith('attribute-table-highlight');
+    expect(mockPageMap!.getSource('attribute-table-highlight')).toBeFalsy();
+    const next = screen.getByRole('region', { name: 'Parcels' });
+    expect(
+      dataRowsIn(next).find((row) => row.getAttribute('aria-selected') === 'true'),
+    ).toBeUndefined();
+
+    // A close after a switch returns focus to the ORIGINAL opener.
+    fireEvent.click(screen.getByRole('button', { name: 'attributeTableDrawer.close' }));
+    expect(document.activeElement).toBe(kebabTrigger('l-trails'));
   });
 });
