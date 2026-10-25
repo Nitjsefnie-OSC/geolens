@@ -2030,11 +2030,6 @@ export function MapBuilderPage() {
               />
             )}
 
-            {/* Centered toolbar */}
-            <MapToolbar
-              onStyleJsonClick={() => setShowStyleJson(true)}
-              onShortcutsClick={() => setShowShortcuts(true)}
-            />
             {isEditorHidden && (
               <div className="absolute end-2 top-16 z-30 flex flex-col gap-1 rounded-md border bg-background/95 p-1 shadow-md backdrop-blur-sm">
                 {mobileRailButtons.map((btn) => (
@@ -2093,6 +2088,12 @@ export function MapBuilderPage() {
               }
             />
           </MapErrorBoundary>
+
+            {/* Centered toolbar */}
+            <MapToolbar
+              onStyleJsonClick={() => setShowStyleJson(true)}
+              onShortcutsClick={() => setShowShortcuts(true)}
+            />
 
           {/* Read-only attribute table for one layer, docked under the map.
               Unmounts when the layer is removed, taking its highlight with it. */}
