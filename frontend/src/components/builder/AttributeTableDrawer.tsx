@@ -9,9 +9,7 @@ import { AttributeTable } from '@/components/dataset/AttributeTable';
 import { geometryBounds } from '@/components/viewer/accessible-map-data';
 import { getFeature } from '@/api/features';
 import {
-  isCql2LiteralCompatible,
   maplibreFilterToCql2,
-  parseCanonicalFilter,
 } from '@/lib/maplibre-filter-utils';
 import { toFitBounds } from '@/lib/bbox';
 import { MAP_COLORS } from '@/lib/map-colors';
@@ -80,20 +78,7 @@ export function AttributeTableDrawer({
     const converted = maplibreFilterToCql2(layer.filter ?? null, columns, {
       requireKnownFields: true,
     });
-    if (!converted || converted === 'unsupported') return converted;
-    const canonical = parseCanonicalFilter(layer.filter ?? null);
-    const types = new Map(
-      (columns ?? [])
-        .filter((col) => col.type)
-        .map((col) => [col.name, String(col.type).toLowerCase()]),
-    );
-    const incompatibleLiteral =
-      canonical.kind === 'editable' &&
-      canonical.conditions.some((condition) => {
-        const values = condition.listValues ?? (condition.rawValue == null ? [] : [condition.rawValue]);
-        return values.some((value) => !isCql2LiteralCompatible(value, types.get(condition.field)));
-      });
-    return incompatibleLiteral ? 'unsupported' : converted;
+    return converted;
   }, [layer.filter, columns]);
   const filterUnsupported = cql2 === 'unsupported';
   const cql2Filter = cql2 && cql2 !== 'unsupported' ? JSON.stringify(cql2) : undefined;
