@@ -9644,7 +9644,7 @@ export interface components {
             }[];
             /**
              * Approximate Total
-             * @description Total row count, or with `filter[...]` the matching rows; `total_kind` says how exact it is.
+             * @description Total row count, or with `filter[...]` or the CQL2 `filter` the matching rows; `total_kind` says how exact it is.
              */
             approximate_total: number;
             /**
