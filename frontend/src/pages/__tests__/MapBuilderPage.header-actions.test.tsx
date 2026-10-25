@@ -670,12 +670,15 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     const table = screen.getByRole('region', { name: layerName });
     expect(table.tagName).toBe('SECTION');
     const mapEl = screen.getByTestId('builder-map');
-    const wrapper = mapEl.parentElement as HTMLElement;
+    // The map area's wrapper is the table's previous sibling: since round 5
+    // the boundary wraps the map alone inside it, so the wrapper is the
+    // map's ancestor, not its parent.
+    const wrapper = table.previousElementSibling as HTMLElement;
     const column = mapEl.closest<HTMLElement>('.relative.min-h-0.min-w-0');
     expect(column).not.toBeNull();
     expect(column).toContainElement(table);
     expect(wrapper.parentElement).toBe(column);
-    expect(table.previousElementSibling).toBe(wrapper);
+    expect(wrapper).toContainElement(mapEl);
     expect(wrapper).toHaveClass('flex-1', 'min-h-0');
     expect(column!.className).toContain('flex');
     expect(column!.className).toContain('flex-col');
