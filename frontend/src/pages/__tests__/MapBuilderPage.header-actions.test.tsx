@@ -817,6 +817,13 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
       'Parcels',
     ]);
     expect(picker).toHaveValue('l-trails');
+
+    // The default follows the OPENED layer, not the first option: with a
+    // later option open the picker must show that layer, not the first
+    // eligible one.
+    openTableViaKebab('l-parcels');
+    const parcelsTable = screen.getByRole('region', { name: 'Parcels' });
+    expect(within(parcelsTable).getByRole('combobox')).toHaveValue('l-parcels');
   });
 
   it('switching layers from the picker swaps the table, keeps its height, and keeps focus on the picker', () => {
