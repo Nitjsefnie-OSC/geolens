@@ -832,6 +832,9 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     const height = handle.getAttribute('aria-valuenow');
     expect(height).not.toBeNull();
 
+    // Opening the table does not move focus into the picker; the switch
+    // below is what puts it there and keeps it there.
+    expect(document.activeElement).not.toBe(within(table).getByRole('combobox'));
     fireEvent.change(within(table).getByRole('combobox'), { target: { value: 'l-parcels' } });
     expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[0]).toBe('ds-parcels');
 
