@@ -1343,6 +1343,59 @@ describe('round 5: filter literal compatibility', () => {
     },
   );
 
+  // The sign-asymmetric axis: the guard drops a literal below the lower bound
+  // exactly as it drops one above the upper bound, and the negative boundary
+  // still converts.
+  const LOWER_INT_WIDTHS = [
+    { width: 'smallint', outOfRange: -32769, boundary: -32768 },
+    { width: 'integer', outOfRange: -2147483649, boundary: -2147483648 },
+    // 2**63 is not representable as a JS number either, so the most negative
+    // value the guard must still send on bigint is the negative safe-integer
+    // boundary.
+    { width: 'bigint', outOfRange: -(2 ** 63), boundary: -Number.MAX_SAFE_INTEGER },
+  ];
+
+  it.each(LOWER_INT_WIDTHS)(
+    'a negative fractional literal on a $width column makes the whole filter unsupported',
+    ({ width }) => {
+      render(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], -1.5])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectAllRowsFallback();
+    },
+  );
+
+  it.each(LOWER_INT_WIDTHS)(
+    'a literal just under the $width lower bound drops the filter while the negative boundary still converts',
+    ({ width, outOfRange, boundary }) => {
+      const view = render(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], outOfRange])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectAllRowsFallback();
+
+      // The exact negative boundary is compatible: it goes out verbatim as CQL2.
+      view.rerender(
+        <AttributeTableDrawer
+          layer={typedLayer({ name: 'n', type: width }, [], ['>', ['get', 'n'], boundary])}
+          open
+          onClose={vi.fn()}
+          mapRef={{ current: makeFakeMap() }}
+        />,
+      );
+      expectFilterSent({ op: '>', args: [{ property: 'n' }, boundary] });
+    },
+  );
+
   it('one incompatible member of an in list drops the whole filter, never a partial one', () => {
     const view = render(
       <AttributeTableDrawer
