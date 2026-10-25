@@ -711,6 +711,7 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     openTableViaKebab('l-trails');
     openTableViaKebab('l-trails');
     expect(sheetContent()).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
