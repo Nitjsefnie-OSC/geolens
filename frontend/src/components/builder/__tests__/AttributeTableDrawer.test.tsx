@@ -7,9 +7,10 @@
  * (LayerEditorPanel) so a later refactor that moves the action still fails
  * here until the eligibility contract moves with it.
  */
-import { act, fireEvent, render, screen, waitFor } from '@/test/test-utils';
+import { act, fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import { AttributeTableDrawer } from '../AttributeTableDrawer';
+import { AttributeTable } from '@/components/dataset/AttributeTable';
 import { StackRow } from '../StackRow';
 import { LayerEditorPanel, type LayerEditorHandlers } from '../LayerEditorPanel';
 import { UnifiedStackPanel } from '../UnifiedStackPanel';
@@ -74,6 +75,7 @@ function makeFakeMap() {
       layers.add(def.id);
     }),
     fitBounds: vi.fn(),
+    resize: vi.fn(),
   } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>>;
 }
 
@@ -636,5 +638,533 @@ describe('attribute-table action eligibility', () => {
       />,
     );
     expect(screen.queryByTestId('layer-editor-open-attribute-table')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 4: docked attribute-table contracts (red until round 4 lands)
+// ---------------------------------------------------------------------------
+
+describe('docked attribute table (round 4)', () => {
+  // The post-implementation table root is a <section> (role region) named by
+  // the layer; until the dock lands the component renders a Radix sheet, so
+  // helpers route through whichever shape exists and let the contract
+  // assertions fail.
+  function tableRoot(name: string | RegExp = 'Population'): HTMLElement | null {
+    return (
+      screen.queryByRole('region', { name })
+      ?? document.querySelector<HTMLElement>('[data-slot="sheet-content"]')
+    );
+  }
+
+  /** The rendered data rows (virtualized rows carry data-index). */
+  function dataRows(): HTMLElement[] {
+    return Array.from(document.querySelectorAll<HTMLElement>('tr[data-index]'));
+  }
+
+  function assertOrder(elements: Element[]): void {
+    for (let i = 1; i < elements.length; i++) {
+      expect(
+        elements[i - 1].compareDocumentPosition(elements[i]) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+  }
+
+  const resizeHandle = () => screen.getByRole('separator');
+  const valuenow = () => Number(resizeHandle().getAttribute('aria-valuenow'));
+
+  // jsdom computes no layout; the clamp bounds come from window.innerHeight
+  // (MAX_DRAWER_HEIGHT_RATIO), so pin the window to a known size. jsdom also
+  // has no pointer capture, which the resize handle calls directly.
+  beforeEach(() => {
+    vi.stubGlobal('innerHeight', 1000);
+    Object.defineProperty(Element.prototype, 'setPointerCapture', {
+      configurable: true,
+      writable: true,
+      value: () => {},
+    });
+    Object.defineProperty(Element.prototype, 'releasePointerCapture', {
+      configurable: true,
+      writable: true,
+      value: () => {},
+    });
+  });
+
+  afterEach(() => {
+    delete (Element.prototype as unknown as Record<string, unknown>).setPointerCapture;
+    delete (Element.prototype as unknown as Record<string, unknown>).releasePointerCapture;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('renders the table as a section named by the layer, not a dialog', () => {
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
+
+    const table = screen.getByRole('region', { name: 'Population' });
+    expect(table.tagName).toBe('SECTION');
+    // The name comes from the header's title element via aria-labelledby.
+    expect(table).toHaveAttribute('aria-labelledby');
+    const titleId = (table.getAttribute('aria-labelledby') ?? '').split(/\s+/)[0];
+    expect(document.getElementById(titleId)).toContainElement(
+      screen.getByTestId('attribute-table-drawer-title'),
+    );
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.querySelector('[data-slot="sheet-content"]')).toBeNull();
+  });
+
+  it('Escape on the section and inside the table does not close it; the close button does', () => {
+    const onClose = vi.fn();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={onClose} mapRef={{ current: makeFakeMap() }} />);
+
+    // The section root (a sheet content until the dock lands).
+    fireEvent.keyDown(tableRoot()!, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Inside the table: a data row.
+    fireEvent.keyDown(dataRows()[0], { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close attribute table' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('fits with exactly { padding: 40, maxZoom: 18 } at several table heights', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    const row2 = screen.getByRole('row', { name: 'Show row 2 on the map' });
+    fireEvent.click(row2);
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    expect(map.fitBounds).toHaveBeenNthCalledWith(1, [[12.5, 48.1], [12.5, 48.1]], { padding: 40, maxZoom: 18 });
+
+    // Vary the table height through the resize contract; the fit options must
+    // not depend on it.
+    fireEvent.keyDown(resizeHandle(), { key: 'ArrowUp' });
+    expect(resizeHandle()).toHaveAttribute('aria-valuenow');
+    const afterUp = valuenow();
+    fireEvent.click(row2);
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(2));
+    expect(map.fitBounds).toHaveBeenNthCalledWith(2, [[12.5, 48.1], [12.5, 48.1]], { padding: 40, maxZoom: 18 });
+
+    fireEvent.keyDown(resizeHandle(), { key: 'ArrowDown' });
+    expect(valuenow()).not.toBe(afterUp);
+    fireEvent.click(row2);
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(3));
+    expect(map.fitBounds).toHaveBeenNthCalledWith(3, [[12.5, 48.1], [12.5, 48.1]], { padding: 40, maxZoom: 18 });
+  });
+
+  it('resize: keyboard steps and past-bound drags clamp, and aria-value* track the height', () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    const handle = screen.getByRole('separator');
+    expect(handle).toHaveAttribute('aria-valuenow');
+    expect(handle).toHaveAttribute('aria-valuemin');
+    expect(handle).toHaveAttribute('aria-valuemax');
+    const min = Number(handle.getAttribute('aria-valuemin'));
+    const max = Number(handle.getAttribute('aria-valuemax'));
+    expect(min).toBeGreaterThan(0);
+    expect(max).toBeLessThan(window.innerHeight);
+    expect(min).toBeLessThan(max);
+
+    const section = handle.closest('section');
+    expect(section).not.toBeNull();
+    const heightOf = () => parseFloat(section!.style.height);
+    const now = () => Number(handle.getAttribute('aria-valuenow'));
+    // One consistent unit: the current height is the aria value.
+    expect(heightOf()).toBe(now());
+
+    const beforeUp = heightOf();
+    fireEvent.keyDown(handle, { key: 'ArrowUp' });
+    expect(heightOf()).toBeGreaterThan(beforeUp);
+    expect(heightOf()).toBe(now());
+
+    fireEvent.keyDown(handle, { key: 'ArrowDown' });
+    expect(heightOf()).toBeLessThan(beforeUp);
+    expect(heightOf()).toBe(now());
+
+    fireEvent.keyDown(handle, { key: 'Home' });
+    expect(heightOf()).toBe(max);
+    expect(now()).toBe(max);
+
+    fireEvent.keyDown(handle, { key: 'End' });
+    expect(heightOf()).toBe(min);
+    expect(now()).toBe(min);
+
+    // Pointer drags past either bound pin the height at that bound.
+    fireEvent.pointerDown(handle, { clientY: 400 });
+    fireEvent.pointerMove(handle, { clientY: -10000 });
+    expect(heightOf()).toBe(max);
+    expect(now()).toBe(max);
+    fireEvent.pointerUp(handle, { clientY: -10000 });
+
+    fireEvent.pointerDown(handle, { clientY: 400 });
+    fireEvent.pointerMove(handle, { clientY: 10000 });
+    expect(heightOf()).toBe(min);
+    expect(now()).toBe(min);
+    fireEvent.pointerUp(handle, { clientY: 10000 });
+  });
+
+  it('pointer drag calls map.resize at most once per frame, with a final call on drag end', () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    const handle = screen.getByRole('separator');
+
+    const frames: FrameRequestCallback[] = [];
+    const flushFrame = () => {
+      const due = frames.splice(0);
+      for (const cb of due) cb(performance.now());
+    };
+    const realRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = (cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return frames.length;
+    };
+
+    try {
+      // Two moves inside one frame coalesce into exactly one resize.
+      fireEvent.pointerDown(handle, { clientY: 500 });
+      fireEvent.pointerMove(handle, { clientY: 495 });
+      fireEvent.pointerMove(handle, { clientY: 490 });
+      flushFrame();
+      expect(map.resize).toHaveBeenCalledTimes(1);
+
+      // The next frame with further moves gives another.
+      fireEvent.pointerMove(handle, { clientY: 485 });
+      fireEvent.pointerMove(handle, { clientY: 480 });
+      flushFrame();
+      expect(map.resize).toHaveBeenCalledTimes(2);
+
+      // Drag end gives a final resize.
+      fireEvent.pointerUp(handle, { clientY: 480 });
+      flushFrame();
+      expect(map.resize).toHaveBeenCalledTimes(3);
+    } finally {
+      window.requestAnimationFrame = realRaf;
+    }
+  });
+
+  function expectMergedHeader(table: HTMLElement, opts: { notice: boolean }) {
+    const title = within(table).getByTestId('attribute-table-drawer-title');
+    const header = title.closest('header');
+    expect(header).not.toBeNull();
+    expect(table).toContainElement(header!);
+
+    const count = within(header!).getByText('attributes.showingExact');
+    const columns = within(header!).getByRole('button', { name: /columns/i });
+    const close = within(header!).getByRole('button', { name: 'Close attribute table' });
+    const notice = opts.notice
+      ? within(header!).getByTestId('attribute-table-filter-unsupported')
+      : null;
+    assertOrder([title, count, ...(notice ? [notice] : []), columns, close]);
+
+    // The name keeps a visible minimum width and truncates.
+    expect(title).toHaveClass('truncate');
+    expect(title.className).toMatch(/min-w-/);
+    // The pieces that can squeeze the name yield space first.
+    expect(count.className).not.toContain('shrink-0');
+    if (notice) expect(notice.className).not.toContain('shrink-0');
+  }
+
+  function renderTableWithTotalExact() {
+    const rows = makeRowsReturn();
+    rows.data.total_kind = 'exact' as never;
+    vi.mocked(useDatasetRows).mockReturnValue(rows as never);
+  }
+
+  it('one header holds name, row count, Columns and the close control in order', () => {
+    renderTableWithTotalExact();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
+
+    const table = screen.getByRole('region', { name: 'Population' });
+    expectMergedHeader(table, { notice: false });
+  });
+
+  it('the merged header keeps its order with the unsupported-filter notice present', () => {
+    renderTableWithTotalExact();
+    const layer = makeLayer({ filter: ['match', ['get', 'k'], 'a', true, false] as never });
+    render(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
+
+    const table = screen.getByRole('region', { name: 'Population' });
+    expectMergedHeader(table, { notice: true });
+  });
+
+  it('the dataset render stays as before: no drawer header, no picker, no row selection', () => {
+    renderTableWithTotalExact();
+    render(<AttributeTable datasetId="dataset-1" />);
+
+    expect(document.querySelector('header')).toBeNull();
+    expect(screen.queryByTestId('attribute-table-drawer-title')).toBeNull();
+    // No docked section (and so no header picker) — the pagination bar's own
+    // page-size select is the dataset page's only combobox.
+    expect(document.querySelector('section')).toBeNull();
+    for (const row of document.querySelectorAll('tr[data-index]')) {
+      expect(row.getAttribute('aria-selected')).not.toBe('true');
+    }
+    // The dataset toolbar is unchanged.
+    expect(screen.getByRole('button', { name: /columns/i })).toBeInTheDocument();
+  });
+
+  it('a highlighted click selects exactly one row with the inset primary marker; it moves, keeps through a no-geometry click, and clears on a layer switch', async () => {
+    const map = makeFakeMap();
+    const view = render(
+      <AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />,
+    );
+
+    const row1 = screen.getByRole('row', { name: 'Show row 1 on the map' });
+    const row2 = screen.getByRole('row', { name: 'Show row 2 on the map' });
+    fireEvent.click(row2);
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+
+    const selected = dataRows().filter((row) => row.getAttribute('aria-selected') === 'true');
+    expect(selected).toHaveLength(1);
+    expect(selected[0].className).toContain('selection-inset');
+    // The other rows carry aria-selected="false" or none — all in one form.
+    const otherForms = new Set(
+      dataRows().filter((row) => row !== selected[0]).map((row) => row.getAttribute('aria-selected')),
+    );
+    expect(otherForms.size).toBe(1);
+    expect([...otherForms][0] === 'false' || [...otherForms][0] === null).toBe(true);
+
+    // A second highlighted click moves the selection.
+    fireEvent.click(row1);
+    await waitFor(() => {
+      expect(dataRows().find((row) => row.getAttribute('aria-selected') === 'true')).toBe(row1);
+    });
+
+    // A click without usable geometry leaves it.
+    vi.mocked(getFeature).mockResolvedValueOnce({
+      type: 'Feature',
+      id: 2,
+      geometry: null as never,
+      properties: {},
+    });
+    fireEvent.click(row2);
+    await waitFor(() => expect(vi.mocked(getFeature)).toHaveBeenCalledTimes(3));
+    await act(async () => {});
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+    expect(dataRows().find((row) => row.getAttribute('aria-selected') === 'true')).toBe(row1);
+
+    // A layer switch clears it.
+    view.rerender(
+      <AttributeTableDrawer
+        layer={makeLayer({ id: 'layer-2', dataset_id: 'dataset-2' })}
+        open
+        onClose={vi.fn()}
+        mapRef={{ current: map }}
+      />,
+    );
+    expect(dataRows().find((row) => row.getAttribute('aria-selected') === 'true')).toBeUndefined();
+  });
+
+  const BOUNDS_CASES: Array<{
+    name: string;
+    geometry: Record<string, unknown>;
+    fits: [number, number, number, number] | null;
+  }> = [
+    { name: 'a Point', geometry: { type: 'Point', coordinates: [5, 7] }, fits: [5, 7, 5, 7] },
+    { name: 'a MultiPoint', geometry: { type: 'MultiPoint', coordinates: [[1, 2], [3, 4]] }, fits: [1, 2, 3, 4] },
+    { name: 'a LineString', geometry: { type: 'LineString', coordinates: [[0, 10], [20, -5]] }, fits: [0, -5, 20, 10] },
+    {
+      name: 'a MultiLineString',
+      geometry: { type: 'MultiLineString', coordinates: [[[0, 0], [10, 10]], [[-5, 5], [15, -15]]] },
+      fits: [-5, -15, 15, 10],
+    },
+    {
+      name: 'a Polygon',
+      geometry: { type: 'Polygon', coordinates: [[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]] },
+      fits: [0, 0, 10, 10],
+    },
+    {
+      name: 'a MultiPolygon',
+      geometry: {
+        type: 'MultiPolygon',
+        coordinates: [[[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]], [[[10, 10], [11, 10], [11, 11], [10, 11], [10, 10]]]],
+      },
+      fits: [0, 0, 11, 11],
+    },
+    {
+      name: 'a mixed GeometryCollection',
+      geometry: {
+        type: 'GeometryCollection',
+        geometries: [
+          { type: 'Point', coordinates: [2, 3] },
+          { type: 'LineString', coordinates: [[-1, 8], [30, -2]] },
+          { type: 'Polygon', coordinates: [[[4, 4], [6, 4], [6, 6], [4, 6], [4, 4]]] },
+        ],
+      },
+      fits: [-1, -2, 30, 8],
+    },
+    {
+      name: 'a nested GeometryCollection',
+      geometry: {
+        type: 'GeometryCollection',
+        geometries: [
+          { type: 'GeometryCollection', geometries: [{ type: 'Point', coordinates: [7, 8] }] },
+          { type: 'LineString', coordinates: [[0, 0], [6, -1]] },
+        ],
+      },
+      fits: [0, -1, 7, 8],
+    },
+    {
+      name: 'a collection with an empty member next to a valid one',
+      geometry: {
+        type: 'GeometryCollection',
+        geometries: [{ type: 'LineString', coordinates: [] }, { type: 'Point', coordinates: [3, 4] }],
+      },
+      fits: [3, 4, 3, 4],
+    },
+    {
+      name: 'a collection with a non-finite member',
+      geometry: {
+        type: 'GeometryCollection',
+        geometries: [{ type: 'Point', coordinates: [Infinity, 4] }, { type: 'Point', coordinates: [2, 3] }],
+      },
+      fits: [2, 3, 2, 3],
+    },
+    { name: 'the empty collection', geometry: { type: 'GeometryCollection', geometries: [] }, fits: null },
+    {
+      name: 'an all-non-finite collection',
+      geometry: {
+        type: 'GeometryCollection',
+        geometries: [{ type: 'Point', coordinates: [Infinity, 4] }, { type: 'Point', coordinates: [5, NaN] }],
+      },
+      fits: null,
+    },
+  ];
+
+  it.each(BOUNDS_CASES)('bounds of $name reach fitBounds as the exact envelope', async ({ geometry, fits }) => {
+    vi.mocked(getFeature).mockResolvedValueOnce({
+      type: 'Feature',
+      id: 2,
+      geometry: geometry as never,
+      properties: {},
+    });
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await act(async () => {});
+
+    if (fits === null) {
+      // No usable coordinate: no fit, no highlight.
+      expect(map.fitBounds).not.toHaveBeenCalled();
+      expect(map.addSource).not.toHaveBeenCalled();
+      expect(map.addLayer).not.toHaveBeenCalled();
+      return;
+    }
+    const [w, s, e, n] = fits;
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+    expect(map.fitBounds).toHaveBeenNthCalledWith(1, [[w, s], [e, n]], { padding: 40, maxZoom: 18 });
+    // The highlight source carries the clicked geometry.
+    expect(map.addSource).toHaveBeenCalledWith('attribute-table-highlight', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry, properties: {} },
+    });
+  });
+
+  it('a click without usable geometry leaves the first highlight in place', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 1 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+
+    const noUsableKinds = [
+      null,
+      { type: 'GeometryCollection', geometries: [] },
+      { type: 'GeometryCollection', geometries: [{ type: 'Point', coordinates: [] }] },
+      { type: 'GeometryCollection', geometries: [{ type: 'Point', coordinates: [Infinity, 4] }] },
+    ];
+    for (const geometry of noUsableKinds) {
+      vi.mocked(getFeature).mockResolvedValueOnce({
+        type: 'Feature',
+        id: 2,
+        geometry: geometry as never,
+        properties: {},
+      });
+      fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+      await waitFor(() => expect(vi.mocked(getFeature)).toHaveBeenCalledTimes(noUsableKinds.indexOf(geometry) + 2));
+      await act(async () => {});
+      // The first highlight's source and layers stay; nothing is removed or repainted.
+      expect(map.removeLayer).not.toHaveBeenCalled();
+      expect(map.removeSource).not.toHaveBeenCalled();
+      expect(map.addSource).toHaveBeenCalledTimes(1);
+      expect(map.addLayer).toHaveBeenCalledTimes(2);
+      expect(map.fitBounds).toHaveBeenCalledTimes(1);
+      expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+    }
+  });
+
+  it('a second valid click replaces the highlight: old layers removed before the new added', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 1 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+
+    const lineGeometry = { type: 'LineString', coordinates: [[0, 0], [10, 20]] };
+    vi.mocked(getFeature).mockResolvedValueOnce({
+      type: 'Feature',
+      id: 2,
+      geometry: lineGeometry as never,
+      properties: {},
+    });
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(2));
+
+    // Exactly one highlight, carrying the NEW geometry.
+    expect(map.addSource).toHaveBeenCalledTimes(2);
+    expect(map.addLayer).toHaveBeenCalledTimes(4);
+    expect(map.addSource).toHaveBeenLastCalledWith('attribute-table-highlight', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: lineGeometry, properties: {} },
+    });
+    // The old layers were removed before the new ones were added.
+    expect(map.removeSource.mock.invocationCallOrder[0]).toBeLessThan(map.addSource.mock.invocationCallOrder[1]);
+    expect(map.removeLayer.mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      map.addLayer.mock.invocationCallOrder[2],
+    );
+    expect(map.getLayer('attribute-table-highlight-line')).toBeTruthy();
+    expect(map.getLayer('attribute-table-highlight-point')).toBeTruthy();
+    expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+  });
+
+  it('a stale response dropped by the token leaves the map unchanged', async () => {
+    const map = makeFakeMap();
+    const pending: Array<(value: Awaited<ReturnType<typeof getFeature>>) => void> = [];
+    vi.mocked(getFeature).mockImplementation(
+      () => new Promise((resolve) => { pending.push(resolve); }),
+    );
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 1 on the map' }));
+    await act(async () => {
+      pending[1]({
+        type: 'Feature',
+        id: 1,
+        geometry: { type: 'Point', coordinates: [3, 3] },
+        properties: {},
+      });
+    });
+    expect(map.addSource).toHaveBeenCalledTimes(1);
+    expect(map.addLayer).toHaveBeenCalledTimes(2);
+
+    // The first click's late response is stale: the map stays exactly as the
+    // second click painted it.
+    await act(async () => {
+      pending[0]({
+        type: 'Feature',
+        id: 2,
+        geometry: { type: 'Point', coordinates: [12.5, 48.1] },
+        properties: {},
+      });
+    });
+    expect(map.removeLayer).not.toHaveBeenCalled();
+    expect(map.removeSource).not.toHaveBeenCalled();
+    expect(map.addSource).toHaveBeenCalledTimes(1);
+    expect(map.addLayer).toHaveBeenCalledTimes(2);
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
   });
 });
