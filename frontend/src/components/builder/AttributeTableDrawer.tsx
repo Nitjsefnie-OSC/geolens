@@ -139,10 +139,10 @@ export function AttributeTableDrawer({
       if (!map) return;
       // Bounds before paint: without usable geometry the map stays exactly as
       // it was — the previous highlight included.
+      clearHighlight();
       const bbox = geometryBounds(feature.geometry);
       if (!bbox) return;
       setSelectedGid(gid);
-      clearHighlight();
       map.addSource(HIGHLIGHT_SOURCE, {
         type: 'geojson',
         data: { type: 'Feature', geometry: feature.geometry, properties: {} },
