@@ -227,7 +227,6 @@ export function AttributeTableDrawer({
     if (!dragOrigin.current) return;
     const delta = dragOrigin.current.pointerY - e.clientY;
     setHeight(clampHeight(dragOrigin.current.height + delta));
-    scheduleMapResize();
   };
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     dragOrigin.current = null;
