@@ -1705,9 +1705,11 @@ describe('round 5: the layer name appears exactly once', () => {
     const picker = within(table).queryByRole('combobox');
     if (picker) {
       // The picker keeps its accessible name and its width cap while it
-      // carries the name.
+      // carries the name — plus the name carrier's min-width and truncation.
       expect(picker).toHaveAccessibleName();
       expect(picker.className).toMatch(/max-w-/);
+      expect(picker).toHaveClass('truncate');
+      expect(picker.className).toMatch(/min-w-/);
     } else {
       // Without the picker the title is the name carrier: min-width plus
       // truncation, exactly as the merged header has always pinned.
