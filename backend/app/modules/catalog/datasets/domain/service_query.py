@@ -570,10 +570,11 @@ async def _count_matches(
     db: AsyncSession,
     table_ref: str,
     cols: list[dict],
-    filters: dict[str, str],
+    filters: dict[str, str] | None,
     label_codes: dict[str, list[str]],
+    cql2_filter: LayerFilter | None = None,
 ) -> tuple[int, str]:
-    """``(count, "exact")`` for the rows *filters* match, or
+    """``(count, "exact")`` for the rows *filters* and *cql2_filter* match, or
     ``(FILTERED_COUNT_CAP, "at_least")`` when more match."""
     where_sql, bind_params = _build_where_filters(
         filters,
@@ -583,11 +584,17 @@ async def _count_matches(
         keyset="gid > :after_gid",
         label_codes=label_codes,
     )
+    cql2_binds: list = []
+    if cql2_filter is not None:
+        # The page query's same AND limb: the count answers for the rows the
+        # request would actually return.
+        where_sql += f" AND ({cql2_filter[0]})"
+        cql2_binds = cql2_filter[1]
     result = await db.execute(
         text(
             # codeql[py/sql-injection]
             f"SELECT count(*) FROM (SELECT 1 FROM {table_ref}{where_sql} LIMIT :limit) AS matched"
-        ).bindparams(**bind_params)
+        ).bindparams(*cql2_binds, **bind_params)
     )
     count = result.scalar_one()
     if count > FILTERED_COUNT_CAP:
@@ -613,9 +620,10 @@ async def get_dataset_rows(
     Returns (rows, total, total_kind, column_info, next_cursor). Uses keyset
     pagination (WHERE gid > :after_gid) for constant-time page access at any
     depth. Geometry columns are excluded from SELECT to avoid transferring
-    large binary data. Without filters the total is pg_class.reltuples, an
-    ``"estimate"``; with filters it is the matching rows, ``"exact"`` up to
-    FILTERED_COUNT_CAP and ``"at_least"`` past it.
+    large binary data. Without column filters and without a ``cql2_filter``
+    the total is pg_class.reltuples, an ``"estimate"``; with either it is the
+    matching rows, ``"exact"`` up to FILTERED_COUNT_CAP and ``"at_least"``
+    past it.
 
     ``filters`` is a dict of {column_name: search_term} for ILIKE filtering.
     Column names are validated against column_info to prevent injection.
@@ -671,9 +679,9 @@ async def get_dataset_rows(
             cql2_filter=cql2_filter,
         )
 
-        if filters:
+        if filters or cql2_filter is not None:
             total, total_kind = await _count_matches(
-                db, _table_ref, cols, filters, label_codes
+                db, _table_ref, cols, filters, label_codes, cql2_filter=cql2_filter
             )
         else:
             count_result = await db.execute(
