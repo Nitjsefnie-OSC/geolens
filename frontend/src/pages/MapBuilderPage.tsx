@@ -2016,30 +2016,6 @@ export function MapBuilderPage() {
                   basemapConfig={basemapState.config}
                 />
               </Suspense>
-            </MapErrorBoundary>
-            {/* The preview's surface is the stack row above — but the
-              stack panel only exists at ≥1100px; below that the sidebar
-              collapses to SidebarRail, which has no rows. Keep the badge for
-              exactly that case, so the narrow layout doesn't lose the count,
-              the dismiss, and the #675 hand-off altogether. Still one surface
-              at a time, never both. */}
-            {isRail && previewRowProps && (
-              <EphemeralBadge
-                featureCount={previewRowProps.featureCount}
-                onDismiss={previewRowProps.onDismiss}
-                truncated={previewRowProps.truncated}
-                totalCount={previewRowProps.totalCount}
-                viewportScoped={previewRowProps.viewportScoped}
-                onSaveAsDataset={previewRowProps.onSaveAsDataset}
-                saveDisabledReason={previewRowProps.saveDisabledReason}
-              />
-            )}
-
-            {/* Centered toolbar */}
-            <MapToolbar
-              onStyleJsonClick={() => setShowStyleJson(true)}
-              onShortcutsClick={() => setShowShortcuts(true)}
-            />
             {isEditorHidden && (
               <div className="absolute end-2 top-16 z-30 flex flex-col gap-1 rounded-md border bg-background/95 p-1 shadow-md backdrop-blur-sm">
                 {mobileRailButtons.map((btn) => (
@@ -2086,6 +2062,30 @@ export function MapBuilderPage() {
                 ))}
               </div>
             )}
+            </MapErrorBoundary>
+            {/* The preview's surface is the stack row above — but the
+              stack panel only exists at ≥1100px; below that the sidebar
+              collapses to SidebarRail, which has no rows. Keep the badge for
+              exactly that case, so the narrow layout doesn't lose the count,
+              the dismiss, and the #675 hand-off altogether. Still one surface
+              at a time, never both. */}
+            {isRail && previewRowProps && (
+              <EphemeralBadge
+                featureCount={previewRowProps.featureCount}
+                onDismiss={previewRowProps.onDismiss}
+                truncated={previewRowProps.truncated}
+                totalCount={previewRowProps.totalCount}
+                viewportScoped={previewRowProps.viewportScoped}
+                onSaveAsDataset={previewRowProps.onSaveAsDataset}
+                saveDisabledReason={previewRowProps.saveDisabledReason}
+              />
+            )}
+
+            {/* Centered toolbar */}
+            <MapToolbar
+              onStyleJsonClick={() => setShowStyleJson(true)}
+              onShortcutsClick={() => setShowShortcuts(true)}
+            />
 
             <PluginHost
               byAnchor={byAnchor}
