@@ -143,10 +143,44 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
 
   // --- Resizing -------------------------------------------------------------
   const dragOrigin = useRef<{ pointerY: number; height: number } | null>(null);
-  const clampHeight = useCallback((next: number): number => {
-    const max = Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO);
-    return Math.max(MIN_DRAWER_HEIGHT, Math.min(max, next));
+  // The column's height follows the window (the page root fills <main>'s
+  // remaining viewport under the navbar/footer), so the maximum derives from
+  // window.innerHeight and keeps the map a usable minimum inside the column.
+  const [maxHeight, setMaxHeight] = useState(
+    () => Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO),
+  );
+  const clampHeight = useCallback(
+    (next: number): number => Math.max(MIN_DRAWER_HEIGHT, Math.min(maxHeight, next)),
+    [maxHeight],
+  );
+  // When the window shrinks the maximum with it, an over-tall table reclamps.
+  useEffect(() => {
+    const onWindowResize = () => {
+      const max = Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO);
+      setMaxHeight(max);
+      setHeight((current) => Math.max(MIN_DRAWER_HEIGHT, Math.min(max, current)));
+    };
+    window.addEventListener('resize', onWindowResize);
+    return () => window.removeEventListener('resize', onWindowResize);
   }, []);
+
+  // map.resize() coalesced at most once per animation frame while the handle
+  // drags, plus a final call on drag end: MapLibre re-reads its container's
+  // size only on resize().
+  const resizeFrameRef = useRef<number | null>(null);
+  const scheduleMapResize = useCallback(() => {
+    if (resizeFrameRef.current !== null) return;
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      mapRef.current?.resize();
+    });
+  }, [mapRef]);
+  useEffect(
+    () => () => {
+      if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+    },
+    [],
+  );
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     dragOrigin.current = { pointerY: e.clientY, height: heightRef.current };
@@ -156,21 +190,29 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
     if (!dragOrigin.current) return;
     const delta = dragOrigin.current.pointerY - e.clientY;
     setHeight(clampHeight(dragOrigin.current.height + delta));
+    scheduleMapResize();
   };
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     dragOrigin.current = null;
     e.currentTarget.releasePointerCapture?.(e.pointerId);
+    // Final resize now; drop any queued frame so it cannot double-call.
+    if (resizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(resizeFrameRef.current);
+      resizeFrameRef.current = null;
+    }
+    mapRef.current?.resize();
   };
   const handleResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const step = e.shiftKey ? 64 : 24;
     let next: number | null = null;
     if (e.key === 'ArrowUp') next = heightRef.current + step;
     else if (e.key === 'ArrowDown') next = heightRef.current - step;
-    else if (e.key === 'Home') next = window.innerHeight * MAX_DRAWER_HEIGHT_RATIO;
+    else if (e.key === 'Home') next = maxHeight;
     else if (e.key === 'End') next = MIN_DRAWER_HEIGHT;
     if (next === null) return;
     e.preventDefault();
     setHeight(clampHeight(next));
+    scheduleMapResize();
   };
 
   const layerName = layer.display_name ?? layer.dataset_name;
@@ -232,6 +274,9 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
           role="separator"
           aria-orientation="horizontal"
           aria-label={t('attributeTableDrawer.resizeHandle', { defaultValue: 'Resize attribute table' })}
+          aria-valuenow={height}
+          aria-valuemin={MIN_DRAWER_HEIGHT}
+          aria-valuemax={maxHeight}
           tabIndex={0}
           data-testid="attribute-table-drawer-resize"
           className="group/handle flex h-3 shrink-0 cursor-row-resize items-center justify-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
