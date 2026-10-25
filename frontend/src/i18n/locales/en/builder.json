@@ -1462,7 +1462,6 @@
   },
   "attributeTableDrawer": {
     "layerPicker": "Attribute table layer",
-    "description": "Attribute table for {{name}}",
     "filterUnsupported": "The layer's filter could not be applied — showing every row.",
     "resizeHandle": "Resize attribute table",
     "close": "Close attribute table"
