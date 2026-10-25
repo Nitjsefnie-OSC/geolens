@@ -273,6 +273,8 @@ export function AttributeTableDrawer({
       >
         {layerName}
       </h2>
+    </header>
+    <div className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
       {pickerLayers && onLayerChange && (
         <select
           ref={pickerRef}
@@ -312,7 +314,7 @@ export function AttributeTableDrawer({
       >
         <X className="h-4 w-4" aria-hidden="true" />
       </button>
-    </header>
+    </div>
   );
 
   const rows = datasetId && (
