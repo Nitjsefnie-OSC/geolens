@@ -333,6 +333,7 @@ export function AttributeTableDrawer({
     return (
       <section
         aria-labelledby={titleId}
+        onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
         className="flex flex-col overflow-hidden border-t bg-background shrink-0"
         style={{ height }}
       >
