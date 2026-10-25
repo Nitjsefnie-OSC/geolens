@@ -21,6 +21,7 @@
 #   - monitoring-rules: not in the keep list
 #   - mcp-test: not in the keep list
 #   - alembic-clean-db: not in the keep list
+#   - previous-release-compat: not in the keep list
 #   - license-check: not in the keep list
 #   - security-scan: not in the keep list
 #   - ci-ok: not in the keep list
@@ -75,8 +76,15 @@ jobs:
     - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
       with:
         node-version: 22
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+      with:
+        version: 0.10.2
+        enable-cache: true
+        cache-dependency-glob: backend/uv.lock
     - name: Install pre-commit
-      run: python -m pip install pre-commit
+      run: |
+        uv sync --project backend --locked --only-group pre-commit
+        echo "$PWD/backend/.venv/bin" >> "$GITHUB_PATH"
     - name: Run pre-commit hooks
       env:
         SKIP: ruff-check,ruff-format,gitleaks
@@ -355,8 +363,7 @@ jobs:
         retention-days: 14
   backend-coverage:
     name: Backend Coverage
-    needs:
-    - backend-test
+    needs: backend-test
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
@@ -622,6 +629,9 @@ jobs:
         uv sync --locked --dev
         uv pip install -e ../sdks/python
         uv pip install -e "../cli[dev]"
+    - name: CLI ruff check
+      working-directory: cli
+      run: uv run --project ../backend ruff check .
     - name: "OCCLI-06 \u2014 no httpx/requests imports in cli/geolens_cli/"
       working-directory: cli
       run: |
