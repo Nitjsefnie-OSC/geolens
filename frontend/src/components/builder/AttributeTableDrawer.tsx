@@ -109,6 +109,19 @@ export function AttributeTableDrawer({
     setSelectedGid(null);
   }, [layer.id]);
 
+  // The layer picker keeps focus across a switch: switching remounts
+  // AttributeTable (key={datasetId}) and the focused select with it, so the
+  // drawer — which persists — flags the switch and the fresh picker takes
+  // focus here. Opening never steals focus: the flag starts false and is set
+  // only in the picker's onChange.
+  const pickerRef = useRef<HTMLSelectElement | null>(null);
+  const pickerFocusOnSwitchRef = useRef(false);
+  useEffect(() => {
+    if (!pickerFocusOnSwitchRef.current) return;
+    pickerFocusOnSwitchRef.current = false;
+    pickerRef.current?.focus();
+  }, [layer.id]);
+
   const handleRowClick = useCallback(
     async (gid: number) => {
       if (!datasetId) return;
@@ -262,11 +275,14 @@ export function AttributeTableDrawer({
       </h2>
       {pickerLayers && onLayerChange && (
         <select
-          autoFocus
+          ref={pickerRef}
           aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
           className="h-7 max-w-40 cursor-pointer rounded-md border bg-transparent px-1.5 text-xs"
           value={layer.id}
-          onChange={(e) => onLayerChange(e.target.value)}
+          onChange={(e) => {
+            pickerFocusOnSwitchRef.current = true;
+            onLayerChange(e.target.value);
+          }}
         >
           {pickerLayers.map((pickerLayer) => (
             <option key={pickerLayer.id} value={pickerLayer.id}>
