@@ -960,7 +960,9 @@ describe('docked attribute table (round 4)', () => {
     fireEvent.click(row2);
     await waitFor(() => expect(vi.mocked(getFeature)).toHaveBeenCalledTimes(3));
     await act(async () => {});
-    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+    // Both valid clicks fitted (the default response carries usable geometry),
+    // so the no-geometry click must leave the map at two fits, not revert it.
+    expect(map.fitBounds).toHaveBeenCalledTimes(2);
     expect(dataRows().find((row) => row.getAttribute('aria-selected') === 'true')).toBe(row1);
 
     // A layer switch clears it.
