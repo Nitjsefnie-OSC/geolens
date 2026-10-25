@@ -170,7 +170,11 @@ export function AttributeTableDrawer({
   // as it can come back: the subscription ends with the close, the layer
   // switch, and the unmount, whose cleanup above drops the kept feature, so
   // nothing repaints after either. Redraw only — never a fit, never a camera
-  // move; the stale-request token still rules any in-flight row response.
+  // move; the stale-request token still rules any in-flight row response. No
+  // dep array, like the analysis mask's subscription: the map instance can be
+  // replaced under the stable ref (a Retry after a crash builds a new map),
+  // and re-binding on every commit keeps exactly one live subscription, on
+  // the current map.
   useEffect(() => {
     if (!open) return;
     const map = mapRef.current;
@@ -183,7 +187,7 @@ export function AttributeTableDrawer({
     return () => {
       map.off('style.load', repaint);
     };
-  }, [open, layer.id, mapRef, paintHighlight]);
+  });
 
   // The selected row mirrors the map highlight: set where the highlight
   // paints (a click without usable geometry leaves it), cleared when the
