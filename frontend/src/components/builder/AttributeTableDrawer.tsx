@@ -116,6 +116,7 @@ export function AttributeTableDrawer({
   // only in the picker's onChange.
   const pickerRef = useRef<HTMLSelectElement | null>(null);
   const pickerFocusOnSwitchRef = useRef(false);
+  const [switchedLayerId, setSwitchedLayerId] = useState<string | null>(null);
   useEffect(() => {
     if (!pickerFocusOnSwitchRef.current) return;
     pickerFocusOnSwitchRef.current = false;
@@ -281,7 +282,7 @@ export function AttributeTableDrawer({
           value={layer.id}
           onChange={(e) => {
             pickerFocusOnSwitchRef.current = true;
-            onLayerChange(e.target.value);
+            setSwitchedLayerId(e.target.value);
           }}
         >
           {pickerLayers.map((pickerLayer) => (
