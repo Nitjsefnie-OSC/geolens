@@ -856,7 +856,7 @@ export function AttributeTable({
                 {virtualItems.map((virtualRow) => {
                   const row = rows[virtualRow.index];
                   const gid = row.original.gid as number;
-                  const activatable = onRowClick && Number.isSafeInteger(gid);
+                  const activatable = onRowClick;
                   const selected = selectedGid !== undefined && gid === selectedGid;
                   return (
                     <TableRow
