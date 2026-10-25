@@ -256,7 +256,7 @@ export function AttributeTableDrawer({
   };
 
   const layerName = layer.display_name ?? layer.dataset_name;
-  const pickerLayers = layers?.filter(canOpenAttributeTable);
+  const pickerLayers = layers;
 
   // The one merged header, composed from AttributeTable's own pieces: name,
   // (picker,) row count, filter notice, Columns control, close — in the
