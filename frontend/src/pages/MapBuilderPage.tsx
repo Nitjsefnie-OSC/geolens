@@ -2016,6 +2016,10 @@ export function MapBuilderPage() {
                   basemapConfig={basemapState.config}
                 />
               </Suspense>
+            <MapToolbar
+              onStyleJsonClick={() => setShowStyleJson(true)}
+              onShortcutsClick={() => setShowShortcuts(true)}
+            />
             </MapErrorBoundary>
             {/* The preview's surface is the stack row above — but the
               stack panel only exists at ≥1100px; below that the sidebar
@@ -2036,10 +2040,6 @@ export function MapBuilderPage() {
             )}
 
             {/* Centered toolbar */}
-            <MapToolbar
-              onStyleJsonClick={() => setShowStyleJson(true)}
-              onShortcutsClick={() => setShowShortcuts(true)}
-            />
             {isEditorHidden && (
               <div className="absolute end-2 top-16 z-30 flex flex-col gap-1 rounded-md border bg-background/95 p-1 shadow-md backdrop-blur-sm">
                 {mobileRailButtons.map((btn) => (
