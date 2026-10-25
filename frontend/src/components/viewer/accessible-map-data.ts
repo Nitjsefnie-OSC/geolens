@@ -70,6 +70,7 @@ export function geometryBounds(
       south = Math.min(south, bounds[1]);
       east = Math.max(east, bounds[2]);
       north = Math.max(north, bounds[3]);
+      break;
     }
   } else {
     visitCoordinates(geometry.coordinates);
