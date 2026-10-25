@@ -278,7 +278,7 @@ export function AttributeTableDrawer({
           ref={pickerRef}
           aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
           className="h-7 max-w-40 cursor-pointer rounded-md border bg-transparent px-1.5 text-xs"
-          value={layer.id}
+          value={pickerLayers?.[0]?.id ?? layer.id}
           onChange={(e) => {
             pickerFocusOnSwitchRef.current = true;
             onLayerChange(e.target.value);
