@@ -1995,7 +1995,7 @@ export function MapBuilderPage() {
             attribute table under it. The map's wrapper carries the flex-1
             sizing (MapErrorBoundary renders it via its className prop) and
             hosts the map overlays; the table docks as the following sibling. */}
-        <div className="relative flex min-h-0 min-w-0 flex-col">
+        <div className="relative flex min-h-0 min-w-0">
           <MapErrorBoundary
             hasUnsavedChanges={layers.hasUnsavedChanges}
             className="relative min-h-0 flex-1"
