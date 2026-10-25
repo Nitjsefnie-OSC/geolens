@@ -296,7 +296,7 @@ export function AttributeTableDrawer({
         <p
           role="status"
           data-testid="attribute-table-filter-unsupported"
-          className="text-xs text-muted-foreground"
+          className="shrink-0 text-xs text-muted-foreground"
         >
           {t('attributeTableDrawer.filterUnsupported', {
             defaultValue: "The layer's filter could not be applied — showing every row.",
