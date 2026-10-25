@@ -51,7 +51,10 @@ vi.mock('react-router', async (importOriginal) => {
 // The builder map hands the test's fake map instance to the page via onMapRef
 // (mockPageMap is null unless a test installs one), so the docked table's
 // fit-and-highlight can be observed at page level.
-let mockPageMap: (MaplibreMap & Record<string, ReturnType<typeof vi.fn>>) | null = null;
+// makeFakeMap's shape, so a test can hand the page a replacement map and
+// fire style.load on it.
+type FakeMap = ReturnType<typeof makeFakeMap>;
+let mockPageMap: FakeMap | null = null;
 // Round 5: set before a (re)render to make the BuilderMap module mock throw,
 // exercising MapErrorBoundary's fallback.
 let mockBuilderMapThrows = false;
@@ -601,6 +604,9 @@ function makeRowsReturn() {
 function makeFakeMap() {
   const layers = new Set<string>();
   const sources = new Set<string>();
+  // Registered 'style.load' listeners, so a test can fire a style replacement
+  // and assert what repainted (same recording fake as the drawer's).
+  const styleLoadListeners = new Set<() => void>();
   return {
     getLayer: vi.fn((id: string) => (layers.has(id) ? {} : undefined)),
     removeLayer: vi.fn((id: string) => layers.delete(id)),
@@ -614,9 +620,22 @@ function makeFakeMap() {
     }),
     fitBounds: vi.fn(),
     resize: vi.fn(),
-    on: vi.fn(),
-    off: vi.fn(),
-  } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>>;
+    on: vi.fn((event: string, handler: () => void) => {
+      if (event === 'style.load') styleLoadListeners.add(handler);
+    }),
+    off: vi.fn((event: string, handler: () => void) => {
+      if (event === 'style.load') styleLoadListeners.delete(handler);
+    }),
+    fireStyleLoad: () => {
+      sources.clear();
+      layers.clear();
+      for (const handler of [...styleLoadListeners]) handler();
+    },
+    styleLoadListenerCount: () => styleLoadListeners.size,
+  } as unknown as MaplibreMap & Record<string, ReturnType<typeof vi.fn>> & {
+    fireStyleLoad: () => void;
+    styleLoadListenerCount: () => number;
+  };
 }
 
 describe('MapBuilderPage docked attribute table (round 4)', () => {
@@ -970,6 +989,18 @@ describe('MapBuilderPage round 5: the map error boundary wraps BuilderMap alone'
 
   const fallbackHeading = () => screen.getByRole('heading', { name: 'errorBoundary.mapTitle' });
 
+  const LINE_LAYER = 'attribute-table-highlight-line';
+  const POINT_LAYER = 'attribute-table-highlight-point';
+  const HIGHLIGHT_SOURCE = 'attribute-table-highlight';
+  const highlightPaintedOn = (map: ReturnType<typeof makeFakeMap>) =>
+    Boolean(
+      map.getLayer(LINE_LAYER) && map.getLayer(POINT_LAYER) && map.getSource(HIGHLIGHT_SOURCE),
+    );
+  const selectedRows = () =>
+    Array.from(document.querySelectorAll<HTMLElement>('tr[data-index]')).filter(
+      (row) => row.getAttribute('aria-selected') === 'true',
+    );
+
   function openTableViaKebab(layerId: string) {
     const row = document.getElementById(`stack-row-${layerId}`);
     if (!row) throw new Error(`missing stack row for ${layerId}`);
@@ -1022,6 +1053,37 @@ describe('MapBuilderPage round 5: the map error boundary wraps BuilderMap alone'
     expect(screen.getByTestId('builder-map')).toBeInTheDocument();
     // The retry remounted BuilderMap, never the host.
     expect(pluginHostMounts).toHaveBeenCalledTimes(1);
+  });
+
+  it('retry after a crash hands the drawer a new map: a reload on it repaints and the row stays selected', async () => {
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+
+    // The click paints the highlight on the first map and selects the row.
+    const firstMap = mockPageMap!;
+    const table = screen.getByRole('region', { name: 'Trails' });
+    fireEvent.click(table.querySelectorAll('tr[data-index]')[1]);
+    await waitFor(() => expect(firstMap.fitBounds).toHaveBeenCalledTimes(1));
+    expect(selectedRows()).toHaveLength(1);
+    expect(highlightPaintedOn(firstMap)).toBe(true);
+
+    // The map crashes; Retry builds a NEW map instance and hands it over.
+    mockBuilderMapThrows = true;
+    view.rerender(<MapBuilderPage />);
+    mockPageMap = makeFakeMap();
+    mockBuilderMapThrows = false;
+    fireEvent.click(screen.getByRole('button', { name: 'errorBoundary.mapRetry' }));
+    expect(screen.getByTestId('builder-map')).toBeInTheDocument();
+    const secondMap = mockPageMap!;
+    expect(secondMap).not.toBe(firstMap);
+
+    // A style reload on the new map repaints the kept highlight: the row
+    // never reads selected without its map highlight.
+    act(() => {
+      secondMap.fireStyleLoad();
+    });
+    expect(highlightPaintedOn(secondMap)).toBe(true);
+    expect(selectedRows()).toHaveLength(1);
   });
 
   it('the round-4 dock structure holds against the new map wrapper', () => {
