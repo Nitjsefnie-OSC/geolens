@@ -93,6 +93,14 @@ export function AttributeTableDrawer({
         const values = condition.listValues ?? (condition.rawValue == null ? [] : [condition.rawValue]);
         return values.some((value) => !isCql2LiteralCompatible(value, types.get(condition.field)));
       });
+    if (incompatibleLiteral && canonical.kind === 'editable' && canonical.conditions.length > 1) {
+      const parts = converted.args.filter((_, index) => {
+        const condition = canonical.conditions[index];
+        const values = condition.listValues ?? (condition.rawValue == null ? [] : [condition.rawValue]);
+        return values.every((value) => isCql2LiteralCompatible(value, types.get(condition.field)));
+      });
+      return parts.length === 1 ? parts[0] : { ...converted, args: parts };
+    }
     return incompatibleLiteral ? 'unsupported' : converted;
   }, [layer.filter, columns]);
   const filterUnsupported = cql2 === 'unsupported';
