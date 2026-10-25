@@ -823,6 +823,32 @@ describe('docked attribute table (round 4)', () => {
     fireEvent.pointerUp(handle, { clientY: 10000 });
   });
 
+  it('a smaller window lowers the maximum and re-clamps an over-tall table', () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+
+    const handle = screen.getByRole('separator');
+    const section = handle.closest('section')!;
+    fireEvent.keyDown(handle, { key: 'Home' });
+    const maxBefore = Number(handle.getAttribute('aria-valuemax'));
+    expect(parseFloat(section.style.height)).toBe(maxBefore);
+
+    // The column's height follows the window: shrink it under the open table.
+    vi.stubGlobal('innerHeight', 500);
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    // The maximum follows the window and the over-tall table re-clamps to it,
+    // consistently across the section height and all three aria values.
+    const maxAfter = Number(handle.getAttribute('aria-valuemax'));
+    expect(maxAfter).toBe(Math.round(500 * 0.7));
+    expect(maxAfter).toBeLessThan(maxBefore);
+    expect(handle.getAttribute('aria-valuemin')).toBe('120');
+    expect(Number(handle.getAttribute('aria-valuenow'))).toBe(maxAfter);
+    expect(parseFloat(section.style.height)).toBe(maxAfter);
+  });
+
   it('pointer drag calls map.resize at most once per frame, with a final call on drag end', () => {
     const map = makeFakeMap();
     render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
