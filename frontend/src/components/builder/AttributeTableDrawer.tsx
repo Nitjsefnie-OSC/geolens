@@ -170,7 +170,7 @@ export function AttributeTableDrawer({
         },
       });
       try {
-        map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
+        map.fitBounds(toFitBounds(bbox), { padding: { top: 40, right: 40, bottom: heightRef.current + 40, left: 40 }, maxZoom: 18 });
       } catch {
         // Out-of-range coordinates: keep the highlight, skip the fit.
       }
