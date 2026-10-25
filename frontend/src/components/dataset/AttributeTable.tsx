@@ -865,7 +865,6 @@ export function AttributeTable({
                       className={cn(
                         virtualRow.index % 2 === 1 ? 'bg-muted/30' : '',
                         onRowClick && 'cursor-pointer hover:bg-primary-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
-                        selected && 'selection-inset',
                       )}
                       tabIndex={onRowClick ? 0 : undefined}
                       aria-label={onRowClick ? t('attributes.rowActionLabel', { gid, defaultValue: 'Show row {{gid}} on the map' }) : undefined}
