@@ -951,7 +951,7 @@ export function MapBuilderPage() {
           ? document
             .getElementById(`stack-row-${opener.layerId}`)
             ?.querySelector<HTMLElement>('[data-kebab-trigger]') ?? null
-          : document.querySelector<HTMLElement>('[data-testid="layer-editor-open-attribute-table"]')
+          : null
         : null;
       (openerEl ?? document.querySelector<HTMLElement>('[data-row-id]'))?.focus();
     });
