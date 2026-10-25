@@ -317,23 +317,30 @@ export function AttributeTableDrawer({
 
   const layerName = layer.display_name ?? layer.dataset_name;
   const pickerLayers = layers?.filter(canOpenAttributeTable);
+  // The name renders exactly once: with the picker shown it lives only as the
+  // picker's selected option — which then carries titleId for the section's
+  // aria-labelledby — and the title element yields to it.
+  const pickerShown = Boolean(pickerLayers && onLayerChange);
 
   // The one merged header, composed from AttributeTable's own pieces: name,
   // (picker,) row count, filter notice, Columns control, close — in the
-  // maintainer's order. The name keeps truncate + min-w-0; nothing that can
-  // squeeze it away carries shrink-0 (the close button sits last and never
-  // competes for width).
+  // maintainer's order. The visible name carrier keeps truncate + min-w-0
+  // (the picker its max-w-40 cap); nothing that can squeeze the name away
+  // carries shrink-0 (the close button sits last and never competes for
+  // width).
   const renderHeader = ({ count, columns }: { count: ReactNode; columns: ReactNode }) => (
     <header className="flex items-center gap-2 border-b px-4 py-2 shrink-0">
       <Table2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-      <h2
-        id={titleId}
-        data-testid="attribute-table-drawer-title"
-        className="min-w-0 flex-1 truncate text-sm"
-      >
-        {layerName}
-      </h2>
-      {pickerLayers && onLayerChange && (
+      {!pickerShown && (
+        <h2
+          id={titleId}
+          data-testid="attribute-table-drawer-title"
+          className="min-w-0 flex-1 truncate text-sm"
+        >
+          {layerName}
+        </h2>
+      )}
+      {pickerShown && (
         <select
           ref={pickerRef}
           aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
@@ -345,7 +352,11 @@ export function AttributeTableDrawer({
           }}
         >
           {pickerLayers.map((pickerLayer) => (
-            <option key={pickerLayer.id} value={pickerLayer.id}>
+            <option
+              key={pickerLayer.id}
+              value={pickerLayer.id}
+              id={pickerLayer.id === layer.id ? titleId : undefined}
+            >
               {pickerLayer.display_name ?? pickerLayer.dataset_name}
             </option>
           ))}
