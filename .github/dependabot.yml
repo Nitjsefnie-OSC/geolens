@@ -13,6 +13,8 @@ updates:
     directory: "/backend"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "backend"]
     open-pull-requests-limit: 10
     groups:
@@ -39,6 +41,8 @@ updates:
     directory: "/frontend"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "frontend"]
     open-pull-requests-limit: 10
     groups:
@@ -63,6 +67,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "e2e"]
     open-pull-requests-limit: 5
     groups:
@@ -78,6 +84,8 @@ updates:
     directory: "/sdks/typescript"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "sdk"]
     open-pull-requests-limit: 5
     groups:
@@ -156,6 +164,8 @@ updates:
     directory: "/mcp"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels: ["dependencies", "backend"]
     open-pull-requests-limit: 5
     groups:

@@ -1,5 +1,8 @@
 """`geolens arcgis migrate`: the import_map action against a fake GeoLens."""
 
+# Imported fixtures are used as test arguments, which F811 reads as redefinition.
+# ruff: noqa: F811
+
 from __future__ import annotations
 
 import json

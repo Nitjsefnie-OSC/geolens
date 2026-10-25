@@ -78,5 +78,9 @@ Documentation = "https://docs.getgeolens.com/"
 [tool.hatch.build.targets.wheel]
 packages = ["geolens_cli"]
 
+[tool.ruff.lint]
+# Ruff's classic defaults, listed so a ruff upgrade doesn't widen the rule set.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

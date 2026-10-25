@@ -1328,6 +1328,10 @@ jobs:
           uv pip install -e ../sdks/python
           uv pip install -e "../cli[dev]"
 
+      - name: CLI ruff check
+        working-directory: cli
+        run: uv run --project ../backend ruff check .
+
       # Structural gate (1/2): no direct httpx/requests imports.
       # `grep -rE` returns exit 1 when no matches → success for us; flip
       # to fail if we DID match.
