@@ -1,0 +1,54 @@
+# OSC narrowed probe - runs only the Frontend Tests job of the OSC manual CI
+# wrapper (osc-manual.yml), with the vitest invocation narrowed to the two
+# test files a probe round changes. Never edit osc-manual.yml.
+
+name: OSC narrowed probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Git branch, tag, or 40-character commit SHA to validate'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-test:
+    name: Frontend Tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.target_ref }}
+        persist-credentials: false
+    - name: Provenance
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "tested_target_ref=${{ inputs.target_ref }}"
+        checked_out_sha="$(git rev-parse HEAD)"
+        if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+          exit 1
+        fi
+        printf 'checked-out SHA: %s\n' "$checked_out_sha"
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+    - name: Install dependencies
+      env:
+        NPM_CONFIG_FETCH_TIMEOUT: '30000'
+        NPM_CONFIG_FETCH_RETRIES: '2'
+        NPM_CONFIG_LOGLEVEL: http
+      run: npm ci
+    - name: Run tests
+      run: npm run test -- src/components/builder/__tests__/AttributeTableDrawer.test.tsx src/pages/__tests__/MapBuilderPage.header-actions.test.tsx
