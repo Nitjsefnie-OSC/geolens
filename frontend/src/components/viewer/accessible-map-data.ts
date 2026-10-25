@@ -65,7 +65,7 @@ export function geometryBounds(
   if (geometry.type === 'GeometryCollection') {
     for (const item of geometry.geometries) {
       const bounds = geometryBounds(item);
-      if (!bounds) continue;
+      if (!bounds) return null;
       west = Math.min(west, bounds[0]);
       south = Math.min(south, bounds[1]);
       east = Math.max(east, bounds[2]);
