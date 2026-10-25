@@ -387,6 +387,30 @@ describe('AttributeTableDrawer', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    Number('9007199254740993'),
+    '9007199254740993',
+    BigInt('9007199254740993'),
+  ])('does not activate an unsafe gid (%s)', (gid) => {
+    const response = makeRowsReturn();
+    vi.mocked(useDatasetRows).mockReturnValue({
+      ...response,
+      data: { ...response.data, rows: [{ gid, name: 'unsafe' }] },
+    } as never);
+    const onRowClick = vi.fn();
+    render(<AttributeTable datasetId="dataset-1" onRowClick={onRowClick} />);
+    const row = screen.getByText('unsafe').closest('tr')!;
+
+    fireEvent.click(row);
+    expect(onRowClick).not.toHaveBeenCalled();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(onRowClick).not.toHaveBeenCalled();
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(onRowClick).not.toHaveBeenCalled();
+    expect(row).not.toHaveAttribute('tabindex');
+    expect(row).not.toHaveAttribute('aria-label');
+  });
+
   it('fits the map to a clicked row and highlights it', async () => {
     const map = makeFakeMap();
     render(
