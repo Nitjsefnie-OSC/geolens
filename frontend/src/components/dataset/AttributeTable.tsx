@@ -945,21 +945,7 @@ export function AttributeTable({
       {/* Pagination */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          {!renderHeader && (
-            <span className="text-muted-foreground">
-              {t(
-                totalKind === 'at_least'
-                  ? 'attributes.showingAtLeast'
-                  : isExact
-                    ? 'attributes.showingExact'
-                    : 'attributes.showing',
-                { start: formatNumber(rangeStart), end: formatNumber(rangeEnd), total: formatNumber(effectiveTotal) },
-              )}
-              {isFetching && (
-                <Loader2 className="inline h-3 w-3 animate-spin ms-2" />
-              )}
-            </span>
-          )}
+          {!renderHeader && countNode}
           {!renderHeader && (
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground text-xs">{t('attributes.rowsPerPage')}</span>
