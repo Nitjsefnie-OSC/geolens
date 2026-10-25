@@ -342,7 +342,7 @@ export function AttributeTableDrawer({
           role="separator"
           aria-orientation="horizontal"
           aria-label={t('attributeTableDrawer.resizeHandle', { defaultValue: 'Resize attribute table' })}
-          aria-valuenow={height}
+          aria-valuenow={320}
           aria-valuemin={MIN_DRAWER_HEIGHT}
           aria-valuemax={maxHeight}
           tabIndex={0}
