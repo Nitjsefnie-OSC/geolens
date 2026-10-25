@@ -2016,6 +2016,10 @@ export function MapBuilderPage() {
                   basemapConfig={basemapState.config}
                 />
               </Suspense>
+            <PluginHost
+              byAnchor={byAnchor}
+              ctx={pluginCtx}
+            />
             </MapErrorBoundary>
             {/* The preview's surface is the stack row above — but the
               stack panel only exists at ≥1100px; below that the sidebar
@@ -2087,16 +2091,12 @@ export function MapBuilderPage() {
               </div>
             )}
 
-            <PluginHost
-              byAnchor={byAnchor}
-              ctx={pluginCtx}
-              topLeftSlot={
+            <div className="absolute top-12 left-3 z-10 flex flex-col gap-2">
                 <ActiveFilterChips
                   layers={layers.localLayers}
                   onClearFilter={handleClearFilter}
                 />
-              }
-            />
+            </div>
           </div>
 
           {/* Read-only attribute table for one layer, docked under the map.
