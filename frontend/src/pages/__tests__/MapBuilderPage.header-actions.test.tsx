@@ -1,7 +1,7 @@
 import userEvent from '@testing-library/user-event';
 import { useParams } from 'react-router';
 import { toast } from 'sonner';
-import { fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
+import { act, fireEvent, render, screen, waitFor, within } from '@/test/test-utils';
 import { MapBuilderPage } from '@/pages/MapBuilderPage';
 import { AnalysisJobWatcher } from '@/components/analysis/AnalysisJobWatcher';
 import { useJobStatus } from '@/components/import/hooks/use-ingest';
@@ -696,7 +696,7 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     expectDockedStructure('Trails');
   });
 
-  it('stack entry point: the ✕ and a second activation close it; focus returns to the opener', () => {
+  it('stack entry point: the ✕ and a second activation close it; focus returns to the opener', async () => {
     render(<MapBuilderPage />, { route: '/maps/map-1' });
 
     // ✕ close returns focus to the layer's kebab trigger.
@@ -705,10 +705,15 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     expect(document.activeElement).toBe(kebabTrigger('l-trails'));
 
     // A second activation of the same entry point closes it (toggle), and
-    // focus lands back on the opener again.
+    // focus lands back on the opener again. Radix's menu-close commit and its
+    // close-autofocus restore run one task later than the toggle; drain that
+    // deferred work inside act so the assertion observes the real sequence.
     openTableViaKebab('l-trails');
     openTableViaKebab('l-trails');
     expect(sheetContent()).toBeNull();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     expect(document.activeElement).toBe(kebabTrigger('l-trails'));
 
     // Escape on the map container does not close the table.
