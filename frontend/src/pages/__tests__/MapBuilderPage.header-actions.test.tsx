@@ -804,6 +804,37 @@ describe('MapBuilderPage docked attribute table (round 4)', () => {
     expect(document.activeElement).toBe(fallback);
   });
 
+  it('restoring a removed layer with the same id keeps its attribute table closed', () => {
+    const restoredLayers = mockLocalLayers;
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+    expect(screen.getByRole('region', { name: 'Trails' })).toBeInTheDocument();
+
+    mockLocalLayers = restoredLayers.filter((layer) => layer.id !== 'l-trails');
+    view.rerender(<MapBuilderPage />);
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
+
+    mockLocalLayers = restoredLayers;
+    view.rerender(<MapBuilderPage />);
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
+  });
+
+  it('opens a restored layer attribute table on the first kebab activation after removal', () => {
+    const restoredLayers = mockLocalLayers;
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+    expect(screen.getByRole('region', { name: 'Trails' })).toBeInTheDocument();
+
+    mockLocalLayers = restoredLayers.filter((layer) => layer.id !== 'l-trails');
+    view.rerender(<MapBuilderPage />);
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeNull();
+
+    mockLocalLayers = restoredLayers;
+    view.rerender(<MapBuilderPage />);
+    openTableViaKebab('l-trails');
+    expect(screen.queryByRole('region', { name: 'Trails' })).toBeInTheDocument();
+  });
+
   it('deleting the open layer returns focus even when the first stack row is a folder row', () => {
     const folderLayer = () => makeLayer({ id: 'l-group', display_name: 'Folder', layer_type: 'group:folder-1' as never });
     mockLocalLayers = [folderLayer(), makeLayer({ id: 'l-trails', display_name: 'Trails' })];
