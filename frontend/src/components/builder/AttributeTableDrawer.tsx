@@ -4,6 +4,7 @@ import { Table2, X } from 'lucide-react';
 import type { Map as MaplibreMap } from 'maplibre-gl';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
+import { geometryBounds } from '@/components/viewer/accessible-map-data';
 import { getFeature } from '@/api/features';
 import { maplibreFilterToCql2 } from '@/lib/maplibre-filter-utils';
 import { toFitBounds } from '@/lib/bbox';
@@ -19,30 +20,6 @@ const HIGHLIGHT_POINT_LAYER = 'attribute-table-highlight-point';
 
 const MIN_DRAWER_HEIGHT = 120;
 const MAX_DRAWER_HEIGHT_RATIO = 0.7;
-
-/** Fold one GeoJSON geometry's coordinates into a [w, s, e, n] bbox. */
-function geometryBbox(geometry: GeoJSON.Geometry): [number, number, number, number] | null {
-  if (!('coordinates' in geometry)) return null;
-  let bbox: [number, number, number, number] | null = null;
-  const fold = (coords: unknown): void => {
-    if (!Array.isArray(coords) || coords.length === 0) return;
-    if (typeof coords[0] === 'number') {
-      const [x, y] = coords as number[];
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      if (bbox === null) {
-        bbox = [x, y, x, y];
-        return;
-      }
-      bbox[0] = Math.min(bbox[0], x);
-      bbox[1] = Math.min(bbox[1], y);
-      bbox[2] = Math.max(bbox[2], x);
-      bbox[3] = Math.max(bbox[3], y);
-    }
-    for (const part of coords) fold(part);
-  };
-  fold(geometry.coordinates as unknown);
-  return bbox;
-}
 
 export interface AttributeTableDrawerProps {
   /** The layer whose dataset the table reads; must satisfy canOpenAttributeTable. */
@@ -119,9 +96,11 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
       if (seq !== rowRequestSeqRef.current) return;
       const map = mapRef.current;
       if (!map) return;
+      // Bounds before paint: without usable geometry the map stays exactly as
+      // it was — the previous highlight included.
+      const bbox = geometryBounds(feature.geometry);
+      if (!bbox) return;
       clearHighlight();
-      const bbox = feature.geometry ? geometryBbox(feature.geometry) : null;
-      if (!bbox || !feature.geometry) return;
       map.addSource(HIGHLIGHT_SOURCE, {
         type: 'geojson',
         data: { type: 'Feature', geometry: feature.geometry, properties: {} },
