@@ -185,7 +185,6 @@ export function AttributeTableDrawer({
     };
     map.on('style.load', repaint);
     return () => {
-      map.off('style.load', repaint);
     };
   });
 
