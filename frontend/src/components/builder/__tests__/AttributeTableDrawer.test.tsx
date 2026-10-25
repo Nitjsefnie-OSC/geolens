@@ -346,6 +346,30 @@ describe('AttributeTableDrawer', () => {
     expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[2]).toBe(0);
   });
 
+  it('resets scroll on a cql2Filter change while the cursor is already zero', () => {
+    const mounted = render(<AttributeTable datasetId="dataset-1" />);
+    const region = screen.getByRole('region', { name: 'attributes.tableLabel' });
+    region.scrollTop = 44;
+    expect(region.scrollTop).toBe(44);
+    expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[2]).toBe(0);
+
+    const response = makeRowsReturn();
+    vi.mocked(useDatasetRows).mockReturnValue({
+      ...response,
+      data: { ...response.data, rows: [{ gid: 3, name: 'filtered' }] },
+    } as never);
+    mounted.rerender(
+      <AttributeTable
+        datasetId="dataset-1"
+        cql2Filter={JSON.stringify({ op: '=', args: [{ property: 'name' }, 'filtered'] })}
+      />,
+    );
+
+    expect(screen.getByText('filtered')).toBeInTheDocument();
+    expect(vi.mocked(useDatasetRows).mock.calls.at(-1)?.[2]).toBe(0);
+    expect(region.scrollTop).toBe(0);
+  });
+
   it('shows noResults with the toolbar for a filtered empty page, and noData only without a filter', () => {
     const emptyPage = makeRowsReturn();
     emptyPage.data.rows = [];
