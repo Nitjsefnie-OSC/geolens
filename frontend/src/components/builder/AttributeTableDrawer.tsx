@@ -344,7 +344,6 @@ export function AttributeTableDrawer({
           aria-label={t('attributeTableDrawer.resizeHandle', { defaultValue: 'Resize attribute table' })}
           aria-valuenow={height}
           aria-valuemin={MIN_DRAWER_HEIGHT}
-          aria-valuemax={maxHeight}
           tabIndex={0}
           data-testid="attribute-table-drawer-resize"
           className="group/handle flex h-3 shrink-0 cursor-row-resize items-center justify-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
