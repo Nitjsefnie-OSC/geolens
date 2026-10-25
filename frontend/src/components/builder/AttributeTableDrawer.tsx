@@ -142,7 +142,6 @@ export function AttributeTableDrawer({
       const bbox = geometryBounds(feature.geometry);
       if (!bbox) return;
       setSelectedGid(gid);
-      clearHighlight();
       map.addSource(HIGHLIGHT_SOURCE, {
         type: 'geojson',
         data: { type: 'Feature', geometry: feature.geometry, properties: {} },
