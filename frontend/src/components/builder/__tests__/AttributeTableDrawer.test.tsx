@@ -85,6 +85,17 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   });
+  // The drawer reads useBuilderLayout's isEditorHidden to pick the docked
+  // section vs the <800px sheet; jsdom has no matchMedia, so hand the hook a
+  // never-matching one (>=800px: the table stays docked). Assigned directly
+  // rather than vi.stubGlobal so vi.unstubAllGlobals() in the round-4
+  // describe's afterEach cannot clear it mid-file.
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
 });
 
 // jsdom computes no layout, so the real virtualizer renders a zero window of
