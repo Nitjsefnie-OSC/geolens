@@ -1457,6 +1457,7 @@
     "toggleExpand": "Alternar grupo de carpetas"
   },
   "attributeTableDrawer": {
+    "layerPicker": "Capa de la tabla de atributos",
     "description": "Tabla de atributos de {{name}}",
     "filterUnsupported": "No se pudo aplicar el filtro de la capa; se muestran todas las filas.",
     "resizeHandle": "Redimensionar la tabla de atributos",

@@ -2106,6 +2106,8 @@ export function MapBuilderPage() {
               open
               onClose={handleCloseAttributeTable}
               mapRef={mapInstanceRef}
+              layers={layers.localLayers}
+              onLayerChange={setAttributeTableLayerId}
             />
           )}
         </div>
