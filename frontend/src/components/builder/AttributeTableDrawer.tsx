@@ -203,10 +203,13 @@ export function AttributeTableDrawer({ layer, open, onClose, mapRef }: Attribute
     mapRef.current?.resize();
   };
   const handleResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const step = e.shiftKey ? 64 : 24;
+    // Proportional steps: a fixed ±px step returns to exactly the starting
+    // height after up-then-down, while a proportional step scales the table
+    // against its current size. Home/End still pin the exact bounds.
+    const factor = e.shiftKey ? 0.25 : 0.1;
     let next: number | null = null;
-    if (e.key === 'ArrowUp') next = heightRef.current + step;
-    else if (e.key === 'ArrowDown') next = heightRef.current - step;
+    if (e.key === 'ArrowUp') next = heightRef.current * (1 + factor);
+    else if (e.key === 'ArrowDown') next = heightRef.current * (1 - factor);
     else if (e.key === 'Home') next = maxHeight;
     else if (e.key === 'End') next = MIN_DRAWER_HEIGHT;
     if (next === null) return;
