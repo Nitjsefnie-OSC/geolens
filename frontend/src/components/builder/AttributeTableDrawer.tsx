@@ -91,7 +91,11 @@ export function AttributeTableDrawer({
       canonical.kind === 'editable' &&
       canonical.conditions.some((condition) => {
         const values = condition.listValues ?? (condition.rawValue == null ? [] : [condition.rawValue]);
-        return values.some((value) => !isCql2LiteralCompatible(value, types.get(condition.field)));
+        return values.some((value) =>
+          ['smallint', 'integer', 'bigint'].includes(types.get(condition.field) ?? '')
+            ? typeof value !== 'number' || !Number.isInteger(value)
+            : !isCql2LiteralCompatible(value, types.get(condition.field)),
+        );
       });
     return incompatibleLiteral ? 'unsupported' : converted;
   }, [layer.filter, columns]);
