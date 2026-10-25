@@ -332,6 +332,7 @@ export function AttributeTableDrawer({
   if (!isEditorHidden) {
     return (
       <section
+        role="dialog"
         aria-labelledby={titleId}
         className="flex flex-col overflow-hidden border-t bg-background shrink-0"
         style={{ height }}
