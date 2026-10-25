@@ -7777,7 +7777,7 @@
             "type": "array"
           },
           "approximate_total": {
-            "description": "Total row count, or with `filter[...]` the matching rows; `total_kind` says how exact it is.",
+            "description": "Total row count, or with `filter[...]` or the CQL2 `filter` the matching rows; `total_kind` says how exact it is.",
             "title": "Approximate Total",
             "type": "integer"
           },
