@@ -697,14 +697,14 @@ export function AttributeTable({
         renderHeader({ count: countNode, columns: columnsMenu })
       ) : (
         heading || actions || columnsMenu ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <header className="flex shrink-0 flex-wrap items-center gap-2">
             {heading}
             <div className="ms-auto flex items-center gap-1">
               {deleteRowsAction}
               {columnsMenu}
               {actions}
             </div>
-          </div>
+          </header>
         ) : null
       )}
       {body}
