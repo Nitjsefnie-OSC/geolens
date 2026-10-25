@@ -1998,7 +1998,7 @@ export function MapBuilderPage() {
         <div className="relative flex min-h-0 min-w-0 flex-col">
           <MapErrorBoundary
             hasUnsavedChanges={layers.hasUnsavedChanges}
-            className="relative min-h-0 flex-1"
+            className="relative"
           >
             <Suspense fallback={<LoadingState />}>
               <BuilderMap
