@@ -967,7 +967,9 @@ describe('docked attribute table (round 4)', () => {
     // page-size select is the dataset page's only combobox.
     expect(document.querySelector('section')).toBeNull();
     for (const row of document.querySelectorAll('tr[data-index]')) {
-      expect(row.getAttribute('aria-selected')).not.toBe('true');
+      // Absence, not merely "not 'true'": the dataset page never opts rows
+      // into selection, so the attribute itself must not appear.
+      expect(row.hasAttribute('aria-selected')).toBe(false);
     }
     // The dataset toolbar is unchanged.
     expect(screen.getByRole('button', { name: /columns/i })).toBeInTheDocument();
