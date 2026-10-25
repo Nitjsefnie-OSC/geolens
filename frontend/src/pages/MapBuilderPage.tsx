@@ -2098,6 +2098,7 @@ export function MapBuilderPage() {
               Unmounts when the layer is removed, taking its highlight with it. */}
           {attributeTableLayer && (
             <AttributeTableDrawer
+              key={attributeTableLayer.id}
               layer={attributeTableLayer}
               open
               onClose={handleCloseAttributeTable}
