@@ -856,6 +856,7 @@ export function AttributeTable({
                 {virtualItems.map((virtualRow) => {
                   const row = rows[virtualRow.index];
                   const gid = row.original.gid as number;
+                  const activatable = onRowClick && Number.isSafeInteger(gid);
                   const selected = selectedGid !== undefined && gid === selectedGid;
                   return (
                     <TableRow
@@ -864,13 +865,13 @@ export function AttributeTable({
                       aria-selected={selectedGid === undefined ? undefined : selected ? 'true' : 'false'}
                       className={cn(
                         virtualRow.index % 2 === 1 ? 'bg-muted/30' : '',
-                        onRowClick && 'cursor-pointer hover:bg-primary-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+                        activatable && 'cursor-pointer hover:bg-primary-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
                         selected && 'selection-inset',
                       )}
-                      tabIndex={onRowClick ? 0 : undefined}
-                      aria-label={onRowClick ? t('attributes.rowActionLabel', { gid, defaultValue: 'Show row {{gid}} on the map' }) : undefined}
-                      onClick={onRowClick ? () => onRowClick(gid) : undefined}
-                      onKeyDown={onRowClick ? (e) => {
+                      tabIndex={activatable ? 0 : undefined}
+                      aria-label={activatable ? t('attributes.rowActionLabel', { gid, defaultValue: 'Show row {{gid}} on the map' }) : undefined}
+                      onClick={activatable ? () => onRowClick(gid) : undefined}
+                      onKeyDown={activatable ? (e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
                           onRowClick(gid);
