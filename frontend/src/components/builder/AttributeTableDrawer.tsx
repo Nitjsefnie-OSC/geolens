@@ -181,7 +181,7 @@ export function AttributeTableDrawer({
     if (!map) return;
     const repaint = () => {
       const feature = highlightFeatureRef.current;
-      if (feature) paintHighlight(feature);
+      if (feature) return;
     };
     map.on('style.load', repaint);
     return () => {
