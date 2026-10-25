@@ -673,6 +673,11 @@ describe('docked attribute table (round 4)', () => {
   const resizeHandle = () => screen.getByRole('separator');
   const valuenow = () => Number(resizeHandle().getAttribute('aria-valuenow'));
 
+  /** invocationCallOrder of a recording map method (the fake types them as
+   *  MaplibreMap members, so reach for the vi.fn underneath). */
+  const invocationOrder = (fn: unknown): number[] =>
+    (fn as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder;
+
   // jsdom computes no layout; the clamp bounds come from window.innerHeight
   // (MAX_DRAWER_HEIGHT_RATIO), so pin the window to a known size. jsdom also
   // has no pointer capture, which the resize handle calls directly.
@@ -869,7 +874,7 @@ describe('docked attribute table (round 4)', () => {
 
   function renderTableWithTotalExact() {
     const rows = makeRowsReturn();
-    rows.data.total_kind = 'exact' as never;
+    (rows.data as { total_kind?: string }).total_kind = 'exact';
     vi.mocked(useDatasetRows).mockReturnValue(rows as never);
   }
 
@@ -1121,9 +1126,9 @@ describe('docked attribute table (round 4)', () => {
       data: { type: 'Feature', geometry: lineGeometry, properties: {} },
     });
     // The old layers were removed before the new ones were added.
-    expect(map.removeSource.mock.invocationCallOrder[0]).toBeLessThan(map.addSource.mock.invocationCallOrder[1]);
-    expect(map.removeLayer.mock.invocationCallOrder.at(-1)!).toBeLessThan(
-      map.addLayer.mock.invocationCallOrder[2],
+    expect(invocationOrder(map.removeSource)[0]).toBeLessThan(invocationOrder(map.addSource)[1]);
+    expect(invocationOrder(map.removeLayer).at(-1)!).toBeLessThan(
+      invocationOrder(map.addLayer)[2],
     );
     expect(map.getLayer('attribute-table-highlight-line')).toBeTruthy();
     expect(map.getLayer('attribute-table-highlight-point')).toBeTruthy();
