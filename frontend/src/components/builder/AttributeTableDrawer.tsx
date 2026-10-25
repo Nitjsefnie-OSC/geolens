@@ -276,7 +276,6 @@ export function AttributeTableDrawer({
       {pickerLayers && onLayerChange && (
         <select
           ref={pickerRef}
-          aria-label={t('attributeTableDrawer.layerPicker', { defaultValue: 'Attribute table layer' })}
           className="h-7 max-w-40 cursor-pointer rounded-md border bg-transparent px-1.5 text-xs"
           value={layer.id}
           onChange={(e) => {
