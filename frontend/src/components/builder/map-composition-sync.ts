@@ -186,6 +186,7 @@ export function applyMapBasemapAppearance({
 
   if (!map.isStyleLoaded()) {
     applySublayerOverrides(map, basemapConfig?.sublayer_overrides ?? null, sourcePrefix, masterOpacity);
+    return;
   } else {
     reorderBasemapLabels(map, showBasemapLabels, sourcePrefix);
     applyBasemapConfigToMap(map, basemapConfig, showBasemapLabels, sourcePrefix);
