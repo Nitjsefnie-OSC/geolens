@@ -153,6 +153,7 @@ export function AttributeTableDrawer({
   // older click on the same layer nor a response from the previous layer can
   // repaint the map.
   const rowRequestSeqRef = useRef(0);
+  const pendingRowPaintCleanupRef = useRef<(() => void) | null>(null);
 
   // Clear on close, on layer change, and on unmount (the cleanup of the
   // previous effect run), so a replaced table never leaves the previous
@@ -161,6 +162,8 @@ export function AttributeTableDrawer({
     if (!open) return;
     return () => {
       rowRequestSeqRef.current += 1;
+      pendingRowPaintCleanupRef.current?.();
+      pendingRowPaintCleanupRef.current = null;
       highlightFeatureRef.current = null;
       clearHighlight();
     };
@@ -214,6 +217,8 @@ export function AttributeTableDrawer({
     async (gid: number) => {
       if (!datasetId) return;
       const seq = ++rowRequestSeqRef.current;
+      pendingRowPaintCleanupRef.current?.();
+      pendingRowPaintCleanupRef.current = null;
       let feature: Awaited<ReturnType<typeof getFeature>>;
       try {
         feature = await getFeature(datasetId, gid);
@@ -229,14 +234,23 @@ export function AttributeTableDrawer({
       // it was — the previous highlight included.
       const bbox = geometryBounds(feature.geometry);
       if (!bbox) return;
-      setSelectedGid(gid);
-      clearHighlight();
-      highlightFeatureRef.current = feature;
-      paintHighlight(feature);
-      try {
-        map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
-      } catch {
-        // Out-of-range coordinates: keep the highlight, skip the fit.
+      const paintAndFit = () => {
+        if (seq !== rowRequestSeqRef.current || mapRef.current !== map) return;
+        pendingRowPaintCleanupRef.current = null;
+        try {
+          setSelectedGid(gid);
+          clearHighlight();
+          highlightFeatureRef.current = feature;
+          paintHighlight(feature);
+          map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
+        } catch {
+          // Style changes or out-of-range coordinates leave the table usable.
+        }
+      };
+      if (map.isStyleLoaded()) paintAndFit();
+      else {
+        pendingRowPaintCleanupRef.current = () => map.off('style.load', paintAndFit);
+        map.once('style.load', paintAndFit);
       }
     },
     [datasetId, mapRef, clearHighlight, paintHighlight],
