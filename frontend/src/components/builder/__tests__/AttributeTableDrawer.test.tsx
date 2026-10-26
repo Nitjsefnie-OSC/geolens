@@ -2205,6 +2205,70 @@ describe('style readiness after style.load', () => {
   });
 });
 
+describe('fit padding across an in-flight breakpoint change', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ['dock to sheet', 'feature response', 900, 790],
+    ['sheet to dock', 'feature response', 790, 900],
+    ['dock to sheet', 'style.load', 900, 790],
+    ['sheet to dock', 'style.load', 790, 900],
+  ] as const)('fits the current layout for %s while awaiting %s', async (_direction, pendingAt, startWidth, endWidth) => {
+    vi.stubGlobal('innerWidth', startWidth);
+    vi.stubGlobal('innerHeight', 1000);
+    const listeners = new Set<() => void>();
+    const editorMql = {
+      matches: startWidth < 800,
+      addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener),
+    };
+    const fallbackMatchMedia = window.matchMedia;
+    vi.stubGlobal('matchMedia', (query: string) => query === '(max-width: 799px)'
+      ? editorMql : fallbackMatchMedia(query));
+    const map = makeFakeMap();
+    if (pendingAt === 'style.load') vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+    let resolveFeature!: (feature: Awaited<ReturnType<typeof getFeature>>) => void;
+    vi.mocked(getFeature).mockImplementationOnce(() => new Promise((resolve) => { resolveFeature = resolve; }));
+    const feature = {
+      type: 'Feature' as const, id: 2,
+      geometry: { type: 'Point' as const, coordinates: [12.5, 48.1] }, properties: {},
+    };
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    expect(Boolean(document.querySelector('[data-slot="sheet-content"]'))).toBe(startWidth < 800);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    expect(getFeature).toHaveBeenCalledWith('dataset-1', 2);
+    if (pendingAt === 'style.load') {
+      await act(async () => { resolveFeature(feature); });
+      expect(map.once).toHaveBeenCalledWith('style.load', expect.any(Function));
+    }
+    expect(map.fitBounds).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.stubGlobal('innerWidth', endWidth);
+      editorMql.matches = endWidth < 800;
+      for (const listener of listeners) listener();
+    });
+    const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+    expect(Boolean(sheet)).toBe(endWidth < 800);
+    const sheetHeight = sheet ? parseFloat(sheet.style.height) : 0;
+    if (sheet) expect(sheetHeight).toBeGreaterThan(0);
+    await act(async () => {
+      if (pendingAt === 'style.load') {
+        vi.mocked(map.isStyleLoaded).mockReturnValue(true);
+        map.fireStyleLoad();
+      } else resolveFeature(feature);
+    });
+
+    expect(map.fitBounds).toHaveBeenCalledExactlyOnceWith(
+      [[12.5, 48.1], [12.5, 48.1]],
+      {
+        padding: sheet ? { top: 40, right: 40, left: 40, bottom: 40 + sheetHeight } : 40,
+        maxZoom: 18,
+      },
+    );
+  });
+});
+
 describe('below-800px attribute table height', () => {
   beforeEach(() => {
     vi.stubGlobal('innerWidth', 640);
