@@ -189,8 +189,6 @@ export function AttributeTableDrawer({
       if (feature) paintHighlight(feature);
     };
     map.on('style.load', repaint);
-    // A parsed style accepts mutations even while its sources are still loading.
-    if (map.isStyleLoaded() || map.getStyle() !== undefined) repaint();
     return () => {
       map.off('style.load', repaint);
     };
