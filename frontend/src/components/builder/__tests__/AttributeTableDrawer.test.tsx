@@ -12,7 +12,7 @@ import { beforeAll, beforeEach, vi } from 'vitest';
 import { AttributeTableDrawer } from '../AttributeTableDrawer';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
 import * as attributeTableModule from '@/components/dataset/AttributeTable';
-import { applyBasemapConfigToMap, toSyncInput } from '../map-sync';
+import { applyBasemapConfigToMap, reorderDataLayers, toSyncInput } from '../map-sync';
 import { applyMapBasemapAppearance, syncMapComposition } from '../map-composition-sync';
 import { DEFAULT_BASEMAP_CONFIG, isBasemapOwnedLayer } from '@/lib/basemap-utils';
 import { StackRow } from '../StackRow';
@@ -1958,6 +1958,49 @@ describe('attribute-table highlight across basemap and composition changes', () 
     for (const id of [LINE, POINT]) {
       expect.soft(order.indexOf(id)).toBeGreaterThan(Math.max(...dataPositions));
     }
+  });
+
+  it.each(['composition', 'direct appearance'])('restacks highlights with pending sources via %s', async (path) => {
+    const map = makeCompositionMap();
+    const first = makeLayer();
+    const layers = [first, makeLayer({ id: 'layer-2', dataset_id: 'dataset-2' })];
+    const managedSourcesRef = { current: new Set<string>() };
+    const orderKeyRef = { current: '' };
+    const sync = (next: MapLayerResponse[]) => syncMapComposition({
+      map,
+      layers: next.map(toSyncInput),
+      tokenMap: new Map(),
+      managedSourcesRef,
+      orderKeyRef,
+    });
+    sync([first]);
+    render(<AttributeTableDrawer layer={first} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    expect(map.getStyle()?.layers.slice(-2).map(({ id }) => id)).toEqual([LINE, POINT]);
+    vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+    expect(map.getStyle()).toBeDefined();
+
+    if (path === 'composition') {
+      sync(layers);
+    } else {
+      reorderDataLayers(map, [first]);
+      applyMapBasemapAppearance({
+        map,
+        basemapConfig: { ...DEFAULT_BASEMAP_CONFIG, opacity: 0.4 },
+        showBasemapLabels: false,
+        reorderDataLayerIds: [first],
+      });
+    }
+
+    const order = map.getStyle()!.layers.map(({ id }) => id);
+    const dataPositions = order.flatMap((id, index) => id.startsWith('layer-') ? [index] : []);
+    expect(dataPositions.length).toBeGreaterThan(0);
+    for (const id of [LINE, POINT]) {
+      expect.soft(order.indexOf(id)).toBeGreaterThan(Math.max(...dataPositions));
+    }
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(map.addSource).mock.calls.filter(([id]) => id === SOURCE)).toHaveLength(1);
   });
 
   it.each(['visibility toggle', 'added layer'])('keeps both highlight layers above data after a %s', async (change) => {
