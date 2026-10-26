@@ -117,7 +117,7 @@ export function AttributeTableDrawer({
   const paintHighlight = useCallback(
     (feature: Awaited<ReturnType<typeof getFeature>>) => {
       const map = mapRef.current;
-      if (!map) return;
+      if (!map || map.getSource(HIGHLIGHT_SOURCE)) return;
       map.addSource(HIGHLIGHT_SOURCE, {
         type: 'geojson',
         data: { type: 'Feature', geometry: feature.geometry, properties: {} },
@@ -187,6 +187,7 @@ export function AttributeTableDrawer({
       if (feature) paintHighlight(feature);
     };
     map.on('style.load', repaint);
+    if (map.isStyleLoaded()) repaint();
     return () => {
       map.off('style.load', repaint);
     };
