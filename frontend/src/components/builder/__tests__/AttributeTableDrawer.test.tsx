@@ -2236,6 +2236,32 @@ describe('below-800px attribute table height', () => {
     expect(heightBound(sheet!)).toBeLessThanOrEqual(Math.round(window.innerHeight * 0.7));
   });
 
+  it('adds the current sheet height to bottom fit padding before and after resize', async () => {
+    const map = makeFakeMap();
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]')!;
+    const handle = within(sheet).getByRole('separator');
+    const expectSheetFit = async () => {
+      const sheetHeight = parseFloat(sheet.style.height);
+      expect(sheetHeight).toBeGreaterThan(0);
+      expect(handle).toHaveAttribute('aria-valuenow', String(sheetHeight));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+      });
+      expect(map.fitBounds).toHaveBeenLastCalledWith(
+        [[12.5, 48.1], [12.5, 48.1]],
+        { padding: { top: 40, right: 40, left: 40, bottom: 40 + sheetHeight }, maxZoom: 18 },
+      );
+    };
+
+    await expectSheetFit();
+    const initialHeight = parseFloat(sheet.style.height);
+    fireEvent.keyDown(handle, { key: 'ArrowUp' });
+    expect(parseFloat(sheet.style.height)).toBeGreaterThan(initialHeight);
+    await expectSheetFit();
+    expect(map.fitBounds).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the resize handle aria values and keyboard maximum within the sheet cap', () => {
     render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
     const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
