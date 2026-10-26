@@ -156,14 +156,6 @@ export function AttributeTableDrawer({
   // repaint the map.
   const rowRequestSeqRef = useRef(0);
   const pendingRowPaintCleanupRef = useRef<(() => void) | null>(null);
-  const styleReadinessRef = useRef<{ map: MaplibreMap | null; loaded: boolean }>({ map: null, loaded: false });
-  const isStyleReady = useCallback((map: MaplibreMap) => {
-    if (styleReadinessRef.current.map !== map) styleReadinessRef.current = { map, loaded: false };
-    const state = styleReadinessRef.current;
-    // A parsed style supports mutations while sources load; recover a pre-attach style.load too.
-    state.loaded ||= Boolean(map.isStyleLoaded() || map.getStyle?.());
-    return state.loaded;
-  }, []);
 
   // Clear on close, on layer change, and on unmount (the cleanup of the
   // previous effect run), so a replaced table never leaves the previous
@@ -193,12 +185,12 @@ export function AttributeTableDrawer({
     const map = mapRef.current;
     if (!map) return;
     const repaint = () => {
-      styleReadinessRef.current = { map, loaded: true };
       const feature = highlightFeatureRef.current;
       if (feature) paintHighlight(feature);
     };
     map.on('style.load', repaint);
-    if (isStyleReady(map)) repaint();
+    // A parsed style accepts mutations even while its sources are still loading.
+    if (map.isStyleLoaded() || map.getStyle() !== undefined) repaint();
     return () => {
       map.off('style.load', repaint);
     };
@@ -259,13 +251,13 @@ export function AttributeTableDrawer({
           // Style changes or out-of-range coordinates leave the table usable.
         }
       };
-      if (isStyleReady(map)) paintAndFit();
+      if (map.isStyleLoaded() || map.getStyle() !== undefined) paintAndFit();
       else {
         pendingRowPaintCleanupRef.current = () => map.off('style.load', paintAndFit);
         map.once('style.load', paintAndFit);
       }
     },
-    [datasetId, mapRef, clearHighlight, paintHighlight, isStyleReady],
+    [datasetId, mapRef, clearHighlight, paintHighlight],
   );
 
   // --- Resizing -------------------------------------------------------------
