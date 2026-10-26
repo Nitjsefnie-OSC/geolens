@@ -246,7 +246,12 @@ export function AttributeTableDrawer({
           clearHighlight();
           highlightFeatureRef.current = feature;
           paintHighlight(feature);
-          map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
+          map.fitBounds(toFitBounds(bbox), {
+            padding: isEditorHidden
+              ? { top: 40, right: 40, left: 40, bottom: 40 + heightRef.current }
+              : 40,
+            maxZoom: 18,
+          });
         } catch {
           // Style changes or out-of-range coordinates leave the table usable.
         }
@@ -257,7 +262,7 @@ export function AttributeTableDrawer({
         map.once('style.load', paintAndFit);
       }
     },
-    [datasetId, mapRef, clearHighlight, paintHighlight],
+    [datasetId, mapRef, clearHighlight, paintHighlight, isEditorHidden],
   );
 
   // --- Resizing -------------------------------------------------------------
