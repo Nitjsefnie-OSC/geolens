@@ -2055,6 +2055,59 @@ describe('style readiness after style.load', () => {
     expect(replacement.addLayer).toHaveBeenCalledTimes(2);
     expect(replacement.styleLoadListenerCount()).toBe(1);
   });
+
+  it('defers a row click while a replacement style on the same map is unparsed', async () => {
+    const map = makeFakeMap();
+    const mapRef = { current: map };
+    const layer = makeLayer();
+    const view = render(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={mapRef} />);
+    act(() => map.fireStyleLoad());
+    await act(async () => {
+      fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    });
+    expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+
+    const parsedStyle = map.getStyle();
+    // Replacing the style drops its custom layers/source before the next style.load.
+    map.removeLayer('attribute-table-highlight-line');
+    map.removeLayer('attribute-table-highlight-point');
+    map.removeSource('attribute-table-highlight');
+    vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+    vi.mocked(map.getStyle).mockReturnValue(undefined as never);
+    vi.mocked(map.addSource).mockClear();
+    vi.mocked(map.addLayer).mockClear();
+    vi.mocked(map.fitBounds).mockClear();
+    vi.mocked(getFeature).mockResolvedValueOnce({
+      type: 'Feature', id: 1, geometry: { type: 'Point', coordinates: [3, 4] }, properties: {},
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('row', { name: 'Show row 1 on the map' }));
+    });
+    expect(getFeature).toHaveBeenLastCalledWith('dataset-1', 1);
+    expect(map.addSource).not.toHaveBeenCalled();
+    expect(map.addLayer).not.toHaveBeenCalled();
+    expect(map.fitBounds).not.toHaveBeenCalled();
+
+    view.rerender(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={mapRef} />);
+    expect(map.addSource).not.toHaveBeenCalled();
+    expect(map.addLayer).not.toHaveBeenCalled();
+    expect(map.fitBounds).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.mocked(map.getStyle).mockReturnValue(parsedStyle);
+      map.fireStyleLoad();
+    });
+    expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+    expect(map.getLayer('attribute-table-highlight-line')).toBeTruthy();
+    expect(map.getLayer('attribute-table-highlight-point')).toBeTruthy();
+    expect(map.addSource).toHaveBeenLastCalledWith('attribute-table-highlight', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: { type: 'Point', coordinates: [3, 4] }, properties: {} },
+    });
+    expect(map.fitBounds).toHaveBeenCalledExactlyOnceWith([[3, 4], [3, 4]], { padding: 40, maxZoom: 18 });
+  });
 });
 
 describe('below-800px attribute table height', () => {
