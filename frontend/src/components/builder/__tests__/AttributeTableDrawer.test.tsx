@@ -11,6 +11,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@/test/test-uti
 import { beforeAll, beforeEach, vi } from 'vitest';
 import { AttributeTableDrawer } from '../AttributeTableDrawer';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
+import * as attributeTableModule from '@/components/dataset/AttributeTable';
+import { applyBasemapConfigToMap, toSyncInput } from '../map-sync';
+import { syncMapComposition } from '../map-composition-sync';
+import { DEFAULT_BASEMAP_CONFIG, isBasemapOwnedLayer } from '@/lib/basemap-utils';
 import { StackRow } from '../StackRow';
 import { LayerEditorPanel, type LayerEditorHandlers } from '../LayerEditorPanel';
 import { UnifiedStackPanel } from '../UnifiedStackPanel';
@@ -66,6 +70,7 @@ function makeFakeMap() {
   // Registered 'style.load' listeners: the round-5 tests fire a style
   // replacement through these and assert the drawer unsubscribed on unmount.
   const styleLoadListeners = new Set<() => void>();
+  const idleListeners = new Set<() => void>();
   return {
     getLayer: vi.fn((id: string) => (layers.has(id) ? {} : undefined)),
     removeLayer: vi.fn((id: string) => layers.delete(id)),
@@ -79,11 +84,26 @@ function makeFakeMap() {
     }),
     fitBounds: vi.fn(),
     resize: vi.fn(),
+    isStyleLoaded: vi.fn(() => true),
     on: vi.fn((event: string, handler: () => void) => {
       if (event === 'style.load') styleLoadListeners.add(handler);
+      if (event === 'idle') idleListeners.add(handler);
     }),
     off: vi.fn((event: string, handler: () => void) => {
       if (event === 'style.load') styleLoadListeners.delete(handler);
+      if (event === 'idle') idleListeners.delete(handler);
+    }),
+    once: vi.fn((event: string, handler: () => void) => {
+      const listeners = event === 'style.load' ? styleLoadListeners : idleListeners;
+      const once = () => {
+        listeners.delete(once);
+        handler();
+      };
+      listeners.add(once);
+    }),
+    fire: vi.fn((event: string) => {
+      const listeners = event === 'style.load' ? styleLoadListeners : idleListeners;
+      for (const handler of [...listeners]) handler();
     }),
     // A style replacement drops the custom sources and layers, then runs the
     // registered 'style.load' listeners.
@@ -1789,5 +1809,240 @@ describe('round 5: the layer name appears exactly once', () => {
     );
     expect(within(table()).queryByRole('combobox')).toBeNull();
     expect(nameCount()).toBe(1);
+  });
+});
+
+// The real composition helpers need live paint and layer order, beyond the
+// presence-only map used by the row/selection tests above.
+function makeCompositionMap() {
+  type Layer = {
+    id: string;
+    type: string;
+    source?: string;
+    paint?: Record<string, unknown>;
+    layout?: Record<string, unknown>;
+    filter?: unknown;
+  };
+  const layers: Layer[] = [];
+  const sources = new Map<string, Record<string, unknown>>();
+  const listeners = new Map<string, Set<() => void>>();
+  const map = {
+    ...makeFakeMap(),
+    getLayer: vi.fn((id: string) => layers.find((layer) => layer.id === id)),
+    getSource: vi.fn((id: string) => sources.get(id)),
+    getStyle: vi.fn(() => ({ version: 8, sources: Object.fromEntries(sources), layers })),
+    addSource: vi.fn((id: string, definition: Record<string, unknown>) => {
+      sources.set(id, { ...definition, serialize: () => definition, setTiles: vi.fn() });
+    }),
+    removeSource: vi.fn((id: string) => sources.delete(id)),
+    addLayer: vi.fn((definition: Layer, beforeId?: string) => {
+      const before = layers.findIndex((layer) => layer.id === beforeId);
+      layers.splice(before < 0 ? layers.length : before, 0, structuredClone(definition));
+    }),
+    removeLayer: vi.fn((id: string) => {
+      const index = layers.findIndex((layer) => layer.id === id);
+      if (index >= 0) layers.splice(index, 1);
+    }),
+    moveLayer: vi.fn((id: string, beforeId?: string) => {
+      const index = layers.findIndex((layer) => layer.id === id);
+      if (index < 0) throw new Error(`Missing layer: ${id}`);
+      const [layer] = layers.splice(index, 1);
+      const before = layers.findIndex((candidate) => candidate.id === beforeId);
+      layers.splice(before < 0 ? layers.length : before, 0, layer);
+    }),
+    getPaintProperty: vi.fn((id: string, key: string) => layers.find((layer) => layer.id === id)?.paint?.[key]),
+    setPaintProperty: vi.fn((id: string, key: string, value: unknown) => {
+      const layer = layers.find((candidate) => candidate.id === id)!;
+      layer.paint = { ...layer.paint, [key]: value };
+    }),
+    getLayoutProperty: vi.fn((id: string, key: string) => layers.find((layer) => layer.id === id)?.layout?.[key]),
+    setLayoutProperty: vi.fn((id: string, key: string, value: unknown) => {
+      const layer = layers.find((candidate) => candidate.id === id)!;
+      layer.layout = { ...layer.layout, [key]: value };
+    }),
+    getFilter: vi.fn((id: string) => layers.find((layer) => layer.id === id)?.filter),
+    setFilter: vi.fn((id: string, filter: unknown) => {
+      layers.find((layer) => layer.id === id)!.filter = filter;
+    }),
+    setLayerZoomRange: vi.fn(),
+    hasImage: vi.fn(() => true),
+    on: vi.fn((event: string, handler: () => void) => {
+      if (!listeners.has(event)) listeners.set(event, new Set());
+      listeners.get(event)!.add(handler);
+    }),
+    off: vi.fn((event: string, handler: () => void) => listeners.get(event)?.delete(handler)),
+    fire: vi.fn((event: string) => {
+      for (const handler of [...(listeners.get(event) ?? [])]) handler();
+    }),
+  } as unknown as ReturnType<typeof makeFakeMap>;
+  return map;
+}
+
+describe('attribute-table highlight across basemap and composition changes', () => {
+  const SOURCE = 'attribute-table-highlight';
+  const LINE = 'attribute-table-highlight-line';
+  const POINT = 'attribute-table-highlight-point';
+
+  it.each([SOURCE, LINE, POINT])('excludes %s from basemap ownership', (id) => {
+    expect(isBasemapOwnedLayer({ id, source: SOURCE }, 'source-')).toBe(false);
+    expect(isBasemapOwnedLayer({ id: 'water', source: 'basemap' }, 'source-')).toBe(true);
+    expect(isBasemapOwnedLayer({ id: 'layer-1', source: 'source-data-population' }, 'source-')).toBe(false);
+  });
+
+  it.each([0, 0.4])('basemap opacity %s leaves the painted highlight untouched', async (opacity) => {
+    const map = makeCompositionMap();
+    map.addSource('basemap', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'water', type: 'fill', source: 'basemap', paint: { 'fill-opacity': 1 } });
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    const paintBefore = [LINE, POINT].map((id) => structuredClone(map.getLayer(id)?.paint));
+
+    applyBasemapConfigToMap(map, { ...DEFAULT_BASEMAP_CONFIG, opacity });
+
+    expect(map.getPaintProperty('water', 'fill-opacity')).toBe(opacity);
+    expect([LINE, POINT].map((id) => map.getLayer(id)?.paint)).toEqual(paintBefore);
+  });
+
+  it.each(['visibility toggle', 'added layer'])('keeps both highlight layers above data after a %s', async (change) => {
+    const map = makeCompositionMap();
+    const mapRef = { current: map };
+    const managedSourcesRef = { current: new Set<string>() };
+    const orderKeyRef = { current: '' };
+    const sync = (layers: MapLayerResponse[]) => syncMapComposition({
+      map,
+      layers: layers.map(toSyncInput),
+      tokenMap: new Map(),
+      managedSourcesRef,
+      orderKeyRef,
+    });
+    const first = makeLayer({ visible: change !== 'visibility toggle' });
+    sync([first]);
+    expect(map.getLayer('layer-layer-1')).toBeTruthy();
+    const view = render(<AttributeTableDrawer layer={first} layers={[first]} open onClose={vi.fn()} mapRef={mapRef} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    expect(map.getStyle()?.layers.slice(-2).map(({ id }) => id)).toEqual([LINE, POINT]);
+    const updated = change === 'visibility toggle'
+      ? [makeLayer({ visible: true })]
+      : [first, makeLayer({ id: 'layer-2', dataset_id: 'dataset-2', dataset_table_name: 'parcels' })];
+
+    act(() => {
+      sync(updated);
+      view.rerender(<AttributeTableDrawer layer={updated[0]} layers={updated} open onClose={vi.fn()} mapRef={mapRef} />);
+      map.fire('styledata');
+      map.fire('idle');
+    });
+
+    expect(map.getLayoutProperty('layer-layer-1', 'visibility')).toBe('visible');
+    if (change === 'added layer') expect(map.getLayer('layer-layer-2')).toBeTruthy();
+    const order = map.getStyle()?.layers.map(({ id }) => id) ?? [];
+    const dataPositions = order.flatMap((id, index) => id.startsWith('layer-') ? [index] : []);
+    expect(dataPositions.length).toBeGreaterThan(0);
+    for (const id of [LINE, POINT]) {
+      expect(order.indexOf(id)).toBeGreaterThan(Math.max(...dataPositions));
+    }
+    expect(map.fitBounds).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(map.addSource).mock.calls.filter(([id]) => id === SOURCE)).toHaveLength(1);
+  });
+});
+
+describe('row response during a basemap style load', () => {
+  it('waits for the style, then paints and fits without rejecting the row callback', async () => {
+    const map = makeFakeMap();
+    vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+    const addSource = vi.mocked(map.addSource).getMockImplementation()!;
+    vi.mocked(map.addSource).mockImplementation((id, source) => {
+      if (!map.isStyleLoaded()) throw new Error('Style is not done loading.');
+      return addSource(id, source);
+    });
+    // Consume the actual row callback's promise so an early MapLibre throw is
+    // reported by expect, rather than as an unhandled rejection from a click.
+    const RealAttributeTable = attributeTableModule.AttributeTable;
+    let rowError: unknown;
+    const tableSpy = vi.spyOn(attributeTableModule, 'AttributeTable').mockImplementation((props) => (
+      <RealAttributeTable {...props} onRowClick={(gid) => {
+        void Promise.resolve(props.onRowClick?.(gid)).catch((error: unknown) => { rowError = error; });
+      }} />
+    ));
+    try {
+      render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+      });
+      expect(getFeature).toHaveBeenCalledWith('dataset-1', 2);
+      expect.soft(rowError).toBeUndefined();
+      expect.soft(map.addSource).not.toHaveBeenCalled();
+      expect.soft(map.addLayer).not.toHaveBeenCalled();
+      expect.soft(map.fitBounds).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.mocked(map.isStyleLoaded).mockReturnValue(true);
+        map.fireStyleLoad();
+        map.fire?.('idle');
+      });
+
+      expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+      expect(map.getLayer('attribute-table-highlight-line')).toBeTruthy();
+      expect(map.getLayer('attribute-table-highlight-point')).toBeTruthy();
+      expect.soft(rowError).toBeUndefined();
+      expect(map.fitBounds).toHaveBeenCalledTimes(1);
+      expect(map.fitBounds).toHaveBeenCalledWith(
+        [[12.5, 48.1], [12.5, 48.1]],
+        { padding: 40, maxZoom: 18 },
+      );
+    } finally {
+      tableSpy.mockRestore();
+    }
+  });
+});
+
+describe('below-800px attribute table height', () => {
+  beforeEach(() => {
+    vi.stubGlobal('innerWidth', 640);
+    vi.stubGlobal('innerHeight', 1000);
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Tailwind is not laid out by jsdom: inspect the rendered height constraint,
+  // accepting either an inline bound or an arbitrary-value height class.
+  function heightBound(sheet: HTMLElement): number {
+    const bounds = [sheet.style.height, sheet.style.maxHeight];
+    for (const token of sheet.classList) {
+      const match = /^(?:max-)?h-\[([\d.]+(?:px|d?vh))\]$/.exec(token);
+      if (match) bounds.push(match[1]);
+    }
+    return Math.min(...bounds.flatMap((bound) => {
+      const match = /^([\d.]+)(px|d?vh)$/.exec(bound);
+      if (!match) return [];
+      return [Number(match[1]) * (match[2] === 'px' ? 1 : window.innerHeight / 100)];
+    }));
+  }
+
+  it('bounds the sheet height so at least thirty percent of the window remains for the map', () => {
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
+    const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+    expect(sheet).not.toBeNull();
+    expect(heightBound(sheet!)).toBeGreaterThan(0);
+    expect(heightBound(sheet!)).toBeLessThanOrEqual(Math.round(window.innerHeight * 0.7));
+  });
+
+  it('keeps the resize handle aria values and keyboard maximum within the sheet cap', () => {
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: makeFakeMap() }} />);
+    const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+    expect(sheet).not.toBeNull();
+    const handle = within(sheet!).queryByRole('separator');
+    expect(handle).not.toBeNull();
+    expect(handle).toHaveAttribute('aria-valuemax');
+    const max = Number(handle!.getAttribute('aria-valuemax'));
+    expect(max).toBeGreaterThan(0);
+    expect(max).toBeLessThanOrEqual(Math.round(window.innerHeight * 0.7));
+    expect(heightBound(sheet!)).toBeLessThanOrEqual(max);
+    fireEvent.keyDown(handle!, { key: 'Home' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(max));
+    expect(heightBound(sheet!)).toBe(max);
+    fireEvent.keyDown(handle!, { key: 'ArrowUp' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(max));
   });
 });

@@ -620,6 +620,7 @@ function makeFakeMap() {
     }),
     fitBounds: vi.fn(),
     resize: vi.fn(),
+    isStyleLoaded: vi.fn(() => true),
     on: vi.fn((event: string, handler: () => void) => {
       if (event === 'style.load') styleLoadListeners.add(handler);
     }),
@@ -1115,6 +1116,38 @@ describe('MapBuilderPage round 5: the map error boundary wraps BuilderMap alone'
     });
     expect(highlightPaintedOn(secondMap)).toBe(true);
     expect(selectedRows()).toHaveLength(1);
+  });
+
+  it('retry repaints a replacement map whose style.load fired before attach, without duplicate sources', async () => {
+    const view = render(<MapBuilderPage />, { route: '/maps/map-1' });
+    openTableViaKebab('l-trails');
+    const firstMap = mockPageMap!;
+    fireEvent.click(screen.getByRole('region', { name: 'Trails' }).querySelectorAll('tr[data-index]')[1]);
+    await waitFor(() => expect(firstMap.fitBounds).toHaveBeenCalledTimes(1));
+    expect(highlightPaintedOn(firstMap)).toBe(true);
+
+    mockBuilderMapThrows = true;
+    view.rerender(<MapBuilderPage />);
+    const secondMap = makeFakeMap();
+    secondMap.fireStyleLoad();
+    expect(secondMap.styleLoadListenerCount()).toBe(0);
+    expect(secondMap.isStyleLoaded()).toBe(true);
+    mockPageMap = secondMap;
+    mockBuilderMapThrows = false;
+    fireEvent.click(screen.getByRole('button', { name: 'errorBoundary.mapRetry' }));
+
+    expect(secondMap).not.toBe(firstMap);
+    expect.soft(highlightPaintedOn(secondMap)).toBe(true);
+    expect(selectedRows()).toHaveLength(1);
+    expect.soft(secondMap.addSource).toHaveBeenCalledTimes(1);
+    expect.soft(secondMap.addLayer).toHaveBeenCalledTimes(2);
+    expect(secondMap.fitBounds).not.toHaveBeenCalled();
+
+    view.rerender(<MapBuilderPage />);
+    expect(highlightPaintedOn(secondMap)).toBe(true);
+    expect(secondMap.addSource).toHaveBeenCalledTimes(1);
+    expect(secondMap.addLayer).toHaveBeenCalledTimes(2);
+    expect(secondMap.styleLoadListenerCount()).toBe(1);
   });
 
   it('the round-4 dock structure holds against the new map wrapper', () => {
