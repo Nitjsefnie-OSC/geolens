@@ -238,6 +238,7 @@ export function AttributeTableDrawer({
       // it was — the previous highlight included.
       const bbox = geometryBounds(feature.geometry);
       if (!bbox) return;
+      const shouldFit = map.isStyleLoaded() || map.getStyle() !== undefined;
       const paintAndFit = () => {
         if (seq !== rowRequestSeqRef.current || mapRef.current !== map) return;
         pendingRowPaintCleanupRef.current = null;
@@ -246,7 +247,7 @@ export function AttributeTableDrawer({
           clearHighlight();
           highlightFeatureRef.current = feature;
           paintHighlight(feature);
-          map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
+          if (shouldFit) map.fitBounds(toFitBounds(bbox), { padding: 40, maxZoom: 18 });
         } catch {
           // Style changes or out-of-range coordinates leave the table usable.
         }
