@@ -67,6 +67,7 @@ vi.mock('@/api/features', () => ({
 function makeFakeMap() {
   const layers = new Set<string>();
   const sources = new Set<string>();
+  let styleLoadFired = false;
   // Registered 'style.load' listeners: the round-5 tests fire a style
   // replacement through these and assert the drawer unsubscribed on unmount.
   const styleLoadListeners = new Set<() => void>();
@@ -85,6 +86,8 @@ function makeFakeMap() {
     fitBounds: vi.fn(),
     resize: vi.fn(),
     isStyleLoaded: vi.fn(() => true),
+    // MapLibre exposes the parsed style even while sources are still loading.
+    getStyle: vi.fn(() => styleLoadFired ? { version: 8, sources: {}, layers: [] } : undefined),
     on: vi.fn((event: string, handler: () => void) => {
       if (event === 'style.load') styleLoadListeners.add(handler);
       if (event === 'idle') idleListeners.add(handler);
@@ -108,6 +111,7 @@ function makeFakeMap() {
     // A style replacement drops the custom sources and layers, then runs the
     // registered 'style.load' listeners.
     fireStyleLoad: () => {
+      styleLoadFired = true;
       sources.clear();
       layers.clear();
       for (const handler of [...styleLoadListeners]) handler();
@@ -1994,6 +1998,62 @@ describe('row response during a basemap style load', () => {
     } finally {
       tableSpy.mockRestore();
     }
+  });
+});
+
+describe('style readiness after style.load', () => {
+  it('paints and fits immediately after style.load while sources are loading', async () => {
+    const map = makeFakeMap();
+    vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+    render(<AttributeTableDrawer layer={makeLayer()} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    act(() => map.fireStyleLoad());
+    vi.mocked(map.isStyleLoaded).mockReturnValue(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    });
+
+    expect(map.getSource('attribute-table-highlight')).toBeTruthy();
+    expect(map.getLayer('attribute-table-highlight-line')).toBeTruthy();
+    expect(map.getLayer('attribute-table-highlight-point')).toBeTruthy();
+    expect(map.fitBounds).toHaveBeenCalledExactlyOnceWith(
+      [[12.5, 48.1], [12.5, 48.1]],
+      { padding: 40, maxZoom: 18 },
+    );
+    expect(map.once).not.toHaveBeenCalled();
+  });
+
+  it('repaints a replacement map attached after style.load while sources are loading', async () => {
+    const firstMap = makeFakeMap();
+    const mapRef = { current: firstMap };
+    const layer = makeLayer();
+    const view = render(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={mapRef} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    });
+    expect(firstMap.fitBounds).toHaveBeenCalledTimes(1);
+
+    const replacement = makeFakeMap();
+    replacement.fireStyleLoad();
+    expect(replacement.styleLoadListenerCount()).toBe(0);
+    vi.mocked(replacement.isStyleLoaded).mockReturnValue(false);
+    expect(replacement.getStyle()).toBeTruthy();
+    mapRef.current = replacement;
+    view.rerender(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={mapRef} />);
+
+    expect(replacement.getSource('attribute-table-highlight')).toBeTruthy();
+    expect(replacement.getLayer('attribute-table-highlight-line')).toBeTruthy();
+    expect(replacement.getLayer('attribute-table-highlight-point')).toBeTruthy();
+    expect(replacement.addSource).toHaveBeenCalledTimes(1);
+    expect(replacement.addLayer).toHaveBeenCalledTimes(2);
+    expect(replacement.fitBounds).not.toHaveBeenCalled();
+    expect(firstMap.styleLoadListenerCount()).toBe(0);
+    expect(replacement.styleLoadListenerCount()).toBe(1);
+
+    view.rerender(<AttributeTableDrawer layer={layer} open onClose={vi.fn()} mapRef={mapRef} />);
+    expect(replacement.addSource).toHaveBeenCalledTimes(1);
+    expect(replacement.addLayer).toHaveBeenCalledTimes(2);
+    expect(replacement.styleLoadListenerCount()).toBe(1);
   });
 });
 
