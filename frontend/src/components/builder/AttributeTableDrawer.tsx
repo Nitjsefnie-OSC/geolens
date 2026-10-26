@@ -251,11 +251,7 @@ export function AttributeTableDrawer({
           // Style changes or out-of-range coordinates leave the table usable.
         }
       };
-      if (map.isStyleLoaded() || map.getStyle() !== undefined) paintAndFit();
-      else {
-        pendingRowPaintCleanupRef.current = () => map.off('style.load', paintAndFit);
-        map.once('style.load', paintAndFit);
-      }
+      paintAndFit();
     },
     [datasetId, mapRef, clearHighlight, paintHighlight],
   );
