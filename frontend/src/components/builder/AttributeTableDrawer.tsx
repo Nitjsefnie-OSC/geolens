@@ -45,7 +45,7 @@ export interface AttributeTableDrawerProps {
 
 /**
  * Read-only attribute table for one builder layer, docked under the map at
- * >=800px and a full-screen sheet below that. The layer's filter applies to
+ * >=800px and a bottom sheet below that. The layer's filter applies to
  * the table via the rows endpoint's CQL2 `filter` param; when the layer filter
  * cannot be converted to CQL2 the table falls back to every row plus a notice,
  * so the table never silently disagrees with the map.
@@ -59,11 +59,13 @@ export function AttributeTableDrawer({
   onLayerChange,
 }: AttributeTableDrawerProps) {
   const { t } = useTranslation('builder');
-  // The layer editor's breakpoint: the table docks at >=800px and goes
-  // full-screen sheet below it. Never a separate media-query helper.
+  // The layer editor's breakpoint: the table docks at >=800px and uses a
+  // bottom sheet below it. Never a separate media-query helper.
   const { isEditorHidden } = useBuilderLayout();
   const titleId = useId();
-  const [height, setHeight] = useState(320);
+  const [height, setHeight] = useState(
+    () => Math.min(320, Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO)),
+  );
   const heightRef = useRef(height);
   heightRef.current = height;
 
@@ -266,7 +268,7 @@ export function AttributeTableDrawer({
     () => Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO),
   );
   const clampHeight = useCallback(
-    (next: number): number => Math.max(MIN_DRAWER_HEIGHT, Math.min(maxHeight, next)),
+    (next: number): number => Math.min(maxHeight, Math.max(MIN_DRAWER_HEIGHT, next)),
     [maxHeight],
   );
   // When the window shrinks the maximum with it, an over-tall table reclamps.
@@ -274,7 +276,7 @@ export function AttributeTableDrawer({
     const onWindowResize = () => {
       const max = Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO);
       setMaxHeight(max);
-      setHeight((current) => Math.max(MIN_DRAWER_HEIGHT, Math.min(max, current)));
+      setHeight((current) => Math.min(max, Math.max(MIN_DRAWER_HEIGHT, current)));
     };
     window.addEventListener('resize', onWindowResize);
     return () => window.removeEventListener('resize', onWindowResize);
@@ -407,6 +409,29 @@ export function AttributeTableDrawer({
     </header>
   );
 
+  // Resize handle: pointer drag or Arrow/Home/End keys, shared by dock and sheet.
+  const resizeHandle = (
+    /* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- role="separator" with aria-orientation is the WAI-ARIA separator (resizable) pattern; the rules' default interactive lists lag it. */
+    <div
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label={t('attributeTableDrawer.resizeHandle', { defaultValue: 'Resize attribute table' })}
+      aria-valuenow={height}
+      aria-valuemin={Math.min(MIN_DRAWER_HEIGHT, maxHeight)}
+      aria-valuemax={maxHeight}
+      tabIndex={0}
+      data-testid="attribute-table-drawer-resize"
+      className="group/handle flex h-3 shrink-0 cursor-row-resize items-center justify-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onKeyDown={handleResizeKeyDown}
+    >
+      <span aria-hidden="true" className="h-1 w-10 rounded-full bg-muted-foreground/40 group-hover/handle:bg-muted-foreground/70" />
+    </div>
+  );
+
   const rows = datasetId && (
     <AttributeTable
       key={datasetId}
@@ -428,32 +453,13 @@ export function AttributeTableDrawer({
         className="flex flex-col overflow-hidden border-t bg-background shrink-0"
         style={{ height }}
       >
-        {/* Resize handle: pointer drag or Arrow/Home/End keys. */}
-        {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- role="separator" with aria-orientation is the WAI-ARIA separator (resizable) pattern; the rules' default interactive lists lag it. */}
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label={t('attributeTableDrawer.resizeHandle', { defaultValue: 'Resize attribute table' })}
-          aria-valuenow={height}
-          aria-valuemin={MIN_DRAWER_HEIGHT}
-          aria-valuemax={maxHeight}
-          tabIndex={0}
-          data-testid="attribute-table-drawer-resize"
-          className="group/handle flex h-3 shrink-0 cursor-row-resize items-center justify-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onKeyDown={handleResizeKeyDown}
-        >
-          <span aria-hidden="true" className="h-1 w-10 rounded-full bg-muted-foreground/40 group-hover/handle:bg-muted-foreground/70" />
-        </div>
+        {resizeHandle}
         {rows}
       </section>
     );
   }
 
-  // Below 800px: full-screen sheet on the editor's breakpoint; Escape stays
+  // Below 800px: bounded sheet on the editor's breakpoint; Escape stays
   // with the map, the ✕ closes.
   return (
     <Sheet open={open} modal={false} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -462,10 +468,12 @@ export function AttributeTableDrawer({
         overlay={false}
         showCloseButton={false}
         onEscapeKeyDown={(event) => event.preventDefault()}
-        className="h-full w-full gap-0 border-t p-0"
+        className="w-full gap-0 overflow-hidden border-t p-0"
+        style={{ height, maxHeight }}
         aria-labelledby={titleId}
         aria-describedby={undefined}
       >
+        {resizeHandle}
         {rows}
       </SheetContent>
     </Sheet>
