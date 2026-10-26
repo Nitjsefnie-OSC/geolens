@@ -282,7 +282,7 @@ export function AttributeTable({
     setEditingCell(null);
     setEditError(null);
     if (parentRef.current) parentRef.current.scrollTop = 0;
-  }, [datasetId, cursor, activeFilters, sort, pageSize, cql2Filter]);
+  }, [datasetId, cursor, activeFilters, sort, pageSize]);
 
   const { data, error, isLoading, isFetching, isError, isPlaceholderData } = useDatasetRows(
     datasetId,
