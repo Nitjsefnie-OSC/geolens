@@ -13,7 +13,7 @@ import { AttributeTableDrawer } from '../AttributeTableDrawer';
 import { AttributeTable } from '@/components/dataset/AttributeTable';
 import * as attributeTableModule from '@/components/dataset/AttributeTable';
 import { applyBasemapConfigToMap, toSyncInput } from '../map-sync';
-import { syncMapComposition } from '../map-composition-sync';
+import { applyMapBasemapAppearance, syncMapComposition } from '../map-composition-sync';
 import { DEFAULT_BASEMAP_CONFIG, isBasemapOwnedLayer } from '@/lib/basemap-utils';
 import { StackRow } from '../StackRow';
 import { LayerEditorPanel, type LayerEditorHandlers } from '../LayerEditorPanel';
@@ -1906,6 +1906,36 @@ describe('attribute-table highlight across basemap and composition changes', () 
 
     expect(map.getPaintProperty('water', 'fill-opacity')).toBe(opacity);
     expect([LINE, POINT].map((id) => map.getLayer(id)?.paint)).toEqual(paintBefore);
+  });
+
+  it('keeps both highlight layers above data after a direct basemap appearance update', async () => {
+    const map = makeCompositionMap();
+    const layers = [makeLayer(), makeLayer({ id: 'layer-2', dataset_id: 'dataset-2' })];
+    syncMapComposition({
+      map,
+      layers: layers.map(toSyncInput),
+      tokenMap: new Map(),
+      managedSourcesRef: { current: new Set<string>() },
+      orderKeyRef: { current: '' },
+    });
+    render(<AttributeTableDrawer layer={layers[0]} open onClose={vi.fn()} mapRef={{ current: map }} />);
+    fireEvent.click(screen.getByRole('row', { name: 'Show row 2 on the map' }));
+    await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
+    expect(map.getStyle()?.layers.slice(-2).map(({ id }) => id)).toEqual([LINE, POINT]);
+
+    applyMapBasemapAppearance({
+      map,
+      basemapConfig: { ...DEFAULT_BASEMAP_CONFIG, opacity: 0.4 },
+      showBasemapLabels: false,
+      reorderDataLayerIds: layers.map(({ id }) => ({ id })),
+    });
+
+    const order = map.getStyle()!.layers.map(({ id }) => id);
+    const dataPositions = order.flatMap((id, index) => id.startsWith('layer-') ? [index] : []);
+    expect(dataPositions).toHaveLength(4);
+    for (const id of [LINE, POINT]) {
+      expect.soft(order.indexOf(id)).toBeGreaterThan(Math.max(...dataPositions));
+    }
   });
 
   it.each(['visibility toggle', 'added layer'])('keeps both highlight layers above data after a %s', async (change) => {

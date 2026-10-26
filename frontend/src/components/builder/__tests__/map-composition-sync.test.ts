@@ -37,6 +37,7 @@ const reorderBasemapAboveDataMock = vi.mocked(reorderBasemapAboveData);
 function map(styleLoaded = true) {
   return {
     isStyleLoaded: vi.fn(() => styleLoaded),
+    getLayer: vi.fn(),
   } as unknown as MaplibreMap;
 }
 
@@ -65,6 +66,7 @@ function skyMap(initialSky?: Sky) {
       setMissingStyleImageResolver: vi.fn(),
       setSky,
       getSky: vi.fn(() => stored),
+      getLayer: vi.fn(),
     } as unknown as MaplibreMap,
     setSky,
     sky: () => stored,
@@ -83,6 +85,7 @@ function containerMap() {
       setProjection: vi.fn(),
       setMissingStyleImageResolver: vi.fn(),
       getContainer: vi.fn(() => container),
+      getLayer: vi.fn(),
     } as unknown as MaplibreMap,
     container,
   };
@@ -182,7 +185,7 @@ describe('map composition sync', () => {
 
   it('applies the saved projection with the basemap appearance', () => {
     const setProjection = vi.fn();
-    const target = { isStyleLoaded: vi.fn(() => true), setProjection } as unknown as MaplibreMap;
+    const target = { isStyleLoaded: vi.fn(() => true), setProjection, getLayer: vi.fn() } as unknown as MaplibreMap;
 
     applyMapBasemapAppearance({
       map: target,
@@ -242,7 +245,7 @@ describe('map composition sync', () => {
   it('applies the globe atmosphere with the projection and resets it on mercator', () => {
     const setProjection = vi.fn();
     const setSky = vi.fn();
-    const target = { isStyleLoaded: vi.fn(() => true), setProjection, setSky } as unknown as MaplibreMap;
+    const target = { isStyleLoaded: vi.fn(() => true), setProjection, setSky, getLayer: vi.fn() } as unknown as MaplibreMap;
 
     applyMapBasemapAppearance({
       map: target,

@@ -197,6 +197,10 @@ export function applyMapBasemapAppearance({
     reorderDataLayers(map, reorderDataLayerIds, idPrefix);
   }
   reorderBasemapAboveData(map, basemapConfig?.basemap_position ?? undefined, sourcePrefix);
+  // Mirror AttributeTableDrawer's layers: data/basemap reorders leave selection on top.
+  for (const id of ['attribute-table-highlight-line', 'attribute-table-highlight-point']) {
+    if (map.getLayer(id)) map.moveLayer(id);
+  }
 }
 
 interface SyncMapCompositionOptions {
@@ -246,9 +250,5 @@ export function syncMapComposition({
     idPrefix: syncOptions?.idPrefix,
     reorderDataLayerIds,
   });
-  // Mirror AttributeTableDrawer's layers: data/basemap reorders leave selection on top.
-  for (const id of ['attribute-table-highlight-line', 'attribute-table-highlight-point']) {
-    if (map.getLayer(id)) map.moveLayer(id);
-  }
   afterSync?.();
 }
