@@ -469,8 +469,7 @@ export function AttributeTableDrawer({
         overlay={false}
         showCloseButton={false}
         onEscapeKeyDown={(event) => event.preventDefault()}
-        className="w-full gap-0 overflow-hidden border-t p-0"
-        style={{ height, maxHeight }}
+        className="h-full w-full gap-0 overflow-hidden border-t p-0"
         aria-labelledby={titleId}
         aria-describedby={undefined}
       >
