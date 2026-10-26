@@ -62,6 +62,8 @@ export function AttributeTableDrawer({
   // The layer editor's breakpoint: the table docks at >=800px and uses a
   // bottom sheet below it. Never a separate media-query helper.
   const { isEditorHidden } = useBuilderLayout();
+  const isEditorHiddenRef = useRef(isEditorHidden);
+  isEditorHiddenRef.current = isEditorHidden;
   const titleId = useId();
   const [height, setHeight] = useState(
     () => Math.min(320, Math.round(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO)),
@@ -247,7 +249,7 @@ export function AttributeTableDrawer({
           highlightFeatureRef.current = feature;
           paintHighlight(feature);
           map.fitBounds(toFitBounds(bbox), {
-            padding: isEditorHidden
+            padding: isEditorHiddenRef.current
               ? { top: 40, right: 40, left: 40, bottom: 40 + heightRef.current }
               : 40,
             maxZoom: 18,
@@ -262,7 +264,7 @@ export function AttributeTableDrawer({
         map.once('style.load', paintAndFit);
       }
     },
-    [datasetId, mapRef, clearHighlight, paintHighlight, isEditorHidden],
+    [datasetId, mapRef, clearHighlight, paintHighlight],
   );
 
   // --- Resizing -------------------------------------------------------------
